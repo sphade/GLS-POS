@@ -1,0 +1,8 @@
+{
+  "extends": "@gls-pos/typescript-config/base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "moduleResolution": "Bundler"
+  },
+  "include": ["src/**/*.ts"]
+}

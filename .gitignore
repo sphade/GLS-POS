@@ -1,0 +1,49 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# turbo
+.turbo/
+
+# expo
+.expo/
+.expo-shared/
+*.orig.*
+web-build/
+
+# env
+.env
+.env.local
+.env.*.local
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# cloudflare / wrangler
+.wrangler/
+
+# local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# logs
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/

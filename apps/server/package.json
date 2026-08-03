@@ -1,0 +1,39 @@
+{
+  "name": "@gls-pos/server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "cf-typegen": "wrangler types",
+    "db:generate": "drizzle-kit generate",
+    "db:generate:do": "drizzle-kit generate --config drizzle-do.config.ts",
+    "db:migrate:local": "wrangler d1 migrations apply gls-pos-control --local",
+    "db:migrate:remote": "wrangler d1 migrations apply gls-pos-control --remote",
+    "lint": "tsc --noEmit",
+    "check-types": "tsc --noEmit",
+    "clean": "rimraf dist .turbo .wrangler"
+  },
+  "dependencies": {
+    "@better-auth/expo": "^1.6.25",
+    "@gls-pos/types": "workspace:*",
+    "@hono/zod-validator": "^0.9.0",
+    "better-auth": "^1.6.25",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.7.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "@gls-pos/typescript-config": "workspace:*",
+    "@types/node": "^22.13.0",
+    "drizzle-kit": "^0.31.10",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.118.0"
+  }
+}

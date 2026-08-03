@@ -1,0 +1,14 @@
+{
+  "extends": "@gls-pos/typescript-config/base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/workers-types"],
+    "noEmit": true,
+    "allowJs": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.js", "drizzle.config.ts", "drizzle-do.config.ts"]
+}
