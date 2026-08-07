@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
+import { EmptyState } from "@/components/EmptyState";
 import { useCart, type Receipt } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
 
@@ -61,8 +62,7 @@ export default function TodayScreen() {
         contentContainerStyle={{ paddingBottom: 24 }}
         ListEmptyComponent={
           <View style={styles.emptyWrap}>
-            <MaterialCommunityIcons name="receipt" size={64} color={colors.grey400} />
-            <Text style={styles.empty}>{strings.noTransactionsToday}</Text>
+            <EmptyState text={strings.noTransactionsToday} size={120} />
           </View>
         }
         ListFooterComponent={
@@ -135,8 +135,7 @@ const styles = StyleSheet.create({
   tabActive: { backgroundColor: colors.primary },
   tabText: { fontSize: 16, fontWeight: "700", color: colors.primary },
   tabTextActive: { color: colors.white },
-  emptyWrap: { alignItems: "center", justifyContent: "center", marginTop: 80, gap: 12 },
-  empty: { color: colors.grey600, fontSize: 15 },
+  emptyWrap: { alignItems: "center", justifyContent: "center", marginTop: 80 },
   rcptCard: {
     flexDirection: "row",
     alignItems: "center",

@@ -5,8 +5,14 @@
     "version": "0.0.1",
     "orientation": "default",
     "scheme": "glspos",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "icon": "./assets/images/gls-logo.png",
+    "splash": {
+      "image": "./assets/images/gls-logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FFFFFF"
+    },
     "runtimeVersion": {
       "policy": "appVersion"
     },
@@ -20,6 +26,10 @@
     },
     "android": {
       "package": "com.gls.pos",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/gls-logo.png",
+        "backgroundColor": "#FFFFFF"
+      },
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.BLUETOOTH_CONNECT",

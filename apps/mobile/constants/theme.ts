@@ -3,16 +3,19 @@
  * strings.xml) so the replicated screens match the original.
  */
 export const colors = {
-  primary: "#4169E1",
-  primaryDark: "#214ED3",
-  accent: "#42A5F5",
-  green: "#4CAF50",
-  dkGreen: "#38BA9E",
+  // GLS brand green (derived from the logo). Deep enough that white text on the
+  // primary bar/buttons/active tab stays legible; `brand` is the lighter logo lime.
+  primary: "#5AA02C",
+  primaryDark: "#3F7A1C",
+  brand: "#8BC34A",
+  accent: "#8BC34A",
+  green: "#3FA34D",
+  dkGreen: "#2E7D46",
   red300: "#E57373",
   red500: "#F44336",
   red800: "#C62828",
-  blue50: "#E9EEFC",
-  blue600: "#214ED3",
+  blue50: "#EAF4E0",
+  blue600: "#3F7A1C",
   grey50: "#FAFAFA",
   grey100: "#F5F5F5",
   grey200: "#EEEEEE",

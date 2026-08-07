@@ -1,18 +1,113 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { seedReceipts } from "./seed-receipts";
+
+/**
+ * How an item is sold:
+ *  - "unit"     → whole units only (1, 2, 3 …). `unit` is a free label e.g. "plate".
+ *  - "fraction" → loose/weighed. Quantity may be fractional and converts to a
+ *                 sub-unit at `unitRatio` (e.g. 1 Kg = 1000 Gm, so 0.25 → 250 Gm).
+ */
+export type SellBy = "unit" | "fraction";
+
+export type Measure = {
+  /** Major unit priced against, e.g. "Kg". */
+  unit: string;
+  /** Sub unit shown when a fractional quantity is entered, e.g. "Gm". */
+  subUnit: string;
+  /** How many sub-units make one major unit, e.g. 1000. */
+  ratio: number;
+};
+
+export const MEASURES: Measure[] = [
+  { unit: "Kg", subUnit: "Gm", ratio: 1000 },
+  { unit: "Ltr", subUnit: "Ml", ratio: 1000 },
+  { unit: "Mtr", subUnit: "Cm", ratio: 100 },
+  { unit: "Dozen", subUnit: "Pcs", ratio: 12 },
+];
+
+/** 0.25 with Kg/Gm/1000 → "250 Gm". Whole values stay in the major unit. */
+export function formatFractionalQty(qty: number, measure: Measure): string {
+  if (Number.isInteger(qty)) return `${qty} ${measure.unit}`;
+  const sub = Math.round(qty * measure.ratio);
+  return `${sub} ${measure.subUnit}`;
+}
+
+/** One sellable variation of an item (e.g. 500gm, Blue, 1kg). */
+export type Variant = {
+  id: string;
+  name: string;
+  color: string;
+  /** integer minor units */
+  price: number;
+  cost?: number;
+  stock?: number;
+  trackProfit: boolean;
+  lowStockAlert: boolean;
+  lowStockAt?: number;
+  autoUpdateStock: boolean;
+  barcodeOn: boolean;
+  barcode?: string;
+  expiryOn: boolean;
+  expiry?: string;
+  taxOn: boolean;
+  taxPercent?: number;
+  taxInclusive?: boolean;
+  notesOn: boolean;
+  notes?: string;
+  modifiersOn: boolean;
+  modifierIds: string[];
+  recipeOn: boolean;
+  spacesOn: boolean;
+  tagsOn: boolean;
+  tags?: string;
+  compareOn: boolean;
+  comparePrice?: number;
+  skuOn: boolean;
+  sku?: string;
+};
 
 export type Item = {
   id: string;
   name: string;
-  /** integer minor units (cents) */
+  /** integer minor units (cents) — price per unit, or per major unit when fractional */
   price: number;
   currency: string;
   /** null = not stock-tracked */
   stockQuantity: number | null;
+  /** Free-text label when sellBy === "unit" (e.g. "plate", "cup"). */
   unit?: string;
+  sellBy?: SellBy;
+  /** Set when sellBy === "fraction". */
+  measure?: Measure;
   categoryId?: string;
   categoryColor?: string;
   taxRateBps?: number;
+  /** Populated in Advance mode. Empty = simple single-price item. */
+  variants?: Variant[];
 };
+
+export function newVariant(color: string): Variant {
+  return {
+    id: `var_${Date.now()}_${Math.round(Math.random() * 1e4)}`,
+    name: "",
+    color,
+    price: 0,
+    trackProfit: false,
+    lowStockAlert: false,
+    autoUpdateStock: true,
+    barcodeOn: false,
+    expiryOn: false,
+    taxOn: false,
+    notesOn: false,
+    modifiersOn: false,
+    modifierIds: [],
+    recipeOn: false,
+    spacesOn: false,
+    tagsOn: false,
+    compareOn: false,
+    skuOn: false,
+  };
+}
 
 export type Receipt = {
   id: string;
@@ -48,7 +143,8 @@ const CartContext = createContext<CartState | null>(null);
 
 export function CartProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
-  const [receipts, setReceipts] = useState<Receipt[]>([]);
+  // Seeded with demo sales so Reports/Today render on first launch.
+  const [receipts, setReceipts] = useState<Receipt[]>(() => seedReceipts());
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);

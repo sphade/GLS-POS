@@ -58,7 +58,7 @@ export function PosTabBar({ state, navigation, descriptors }: BottomTabBarProps)
             accessibilityRole="button"
             accessibilityState={focused ? { selected: true } : {}}
             accessibilityLabel={meta.label}
-            android_ripple={{ color: focused ? "#FFFFFF22" : "#4169E122", borderless: false }}
+            android_ripple={{ color: focused ? "#FFFFFF22" : "#5AA02C22", borderless: false }}
             onPress={() => {
               feedbackTap();
               const event = navigation.emit({
