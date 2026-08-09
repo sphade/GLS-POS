@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -22,7 +22,7 @@ export default function AddEntryScreen() {
   const [notes, setNotes] = useState("");
 
   const isExpense = kind !== "income";
-  const actionColor = isExpense ? "#EF3E36" : "#43A047";
+  const actionColor = isExpense ? colors.red500 : colors.green;
   const actionLabel = isExpense ? "ADD EXPENSE" : "ADD INCOME";
 
   const numeric = parseFloat(amount.replace(/,/g, "")) || 0;
@@ -146,3 +146,4 @@ const styles = StyleSheet.create({
   notesInput: { fontSize: 18, color: colors.grey900, paddingVertical: 6, paddingHorizontal: 0 },
   notesUnderline: { height: 2, backgroundColor: colors.primary },
 });
+

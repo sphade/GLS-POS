@@ -6,8 +6,8 @@ import { ok } from "./lib/response.js";
 import { onError, notFound } from "./middleware/error-handler.js";
 import { withAuth, requireAuth } from "./middleware/auth.js";
 import { withStore } from "./middleware/store.js";
-import { products } from "./modules/products/products.routes.js";
-import { orders } from "./modules/orders/orders.routes.js";
+import { stores } from "./modules/stores/stores.routes.js";
+import { sync } from "./modules/sync/sync.routes.js";
 
 /**
  * Build the Hono application. New feature areas are added by creating a module
@@ -42,11 +42,15 @@ export function createApp() {
   const api = app.basePath("/api");
   api.get("/me", requireAuth, (c) => ok(c, { user: c.get("user") }));
 
-  // Business routes operate against a specific store's Durable Object.
-  api.use("/products/*", withStore);
-  api.use("/orders/*", withStore);
-  api.route("/products", products);
-  api.route("/orders", orders);
+  // Store registry & membership (control plane, D1).
+  api.use("/stores/*", requireAuth);
+  api.use("/stores", requireAuth);
+  api.route("/stores", stores);
+
+  // Offline-first sync against the caller's store Durable Object.
+  api.use("/sync", requireAuth, withStore);
+  api.use("/sync/*", requireAuth, withStore);
+  api.route("/sync", sync);
 
   app.notFound(notFound);
   app.onError(onError);

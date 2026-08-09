@@ -25,7 +25,12 @@ export default function SelectTableScreen() {
         <Text style={styles.toolbarTitle}>SELECT TABLE</Text>
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.sectionRow}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.sectionScroll}
+        contentContainerStyle={styles.sectionRow}
+      >
         {allSections.map((s) => (
           <Pressable
             key={s}
@@ -40,7 +45,7 @@ export default function SelectTableScreen() {
         ))}
       </ScrollView>
 
-      <ScrollView contentContainerStyle={styles.grid}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.grid}>
         {visible.map((t) => (
           <Pressable
             key={t.id}
@@ -79,7 +84,8 @@ const styles = StyleSheet.create({
   backBtn: { width: 40, alignItems: "center" },
   toolbarTitle: { fontSize: 18, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
 
-  sectionRow: { padding: 8, gap: 8 },
+  sectionScroll: { flexGrow: 0 },
+  sectionRow: { padding: 8, gap: 8, alignItems: "center" },
   sectionChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 3, backgroundColor: colors.white },
   sectionChipActive: { backgroundColor: colors.primary },
   sectionText: { fontSize: 13, fontWeight: "700", color: colors.primary },

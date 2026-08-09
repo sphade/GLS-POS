@@ -82,23 +82,23 @@ export default function CounterScreen() {
                 </View>
                 <View style={styles.stepper}>
                   <Pressable
-                    style={styles.stepBtn}
+                    style={[styles.stepBtn, styles.stepMinus]}
                     onPress={() => {
                       feedbackTap();
                       remove(entry.item.id);
                     }}
                   >
-                    <Ionicons name="remove" size={18} color={colors.primary} />
+                    <Ionicons name="remove" size={22} color={colors.white} />
                   </Pressable>
                   <Text style={styles.qty}>{entry.qty}</Text>
                   <Pressable
-                    style={styles.stepBtn}
+                    style={[styles.stepBtn, styles.stepPlus]}
                     onPress={() => {
                       feedbackAddItem();
                       add(entry.item);
                     }}
                   >
-                    <Ionicons name="add" size={18} color={colors.primary} />
+                    <Ionicons name="add" size={22} color={colors.white} />
                   </Pressable>
                 </View>
                 <Text style={styles.lineTotal}>
@@ -200,17 +200,18 @@ const styles = StyleSheet.create({
   },
   name: { fontSize: 15, color: colors.grey900, fontWeight: "600" },
   unitPrice: { fontSize: 13, color: colors.grey600, marginTop: 2 },
-  stepper: { flexDirection: "row", alignItems: "center", gap: 10 },
+  stepper: { flexDirection: "row", alignItems: "center", gap: 12 },
   stepBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.primary,
+    width: 38,
+    height: 38,
+    borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
+    elevation: 1,
   },
-  qty: { minWidth: 20, textAlign: "center", fontWeight: "700", color: colors.grey900 },
+  stepMinus: { backgroundColor: colors.actionRemove },
+  stepPlus: { backgroundColor: colors.actionAdd },
+  qty: { minWidth: 24, textAlign: "center", fontSize: 16, fontWeight: "800", color: colors.grey900 },
   lineTotal: { width: 78, textAlign: "right", fontWeight: "700", color: colors.grey900 },
 
   totalsCard: { backgroundColor: colors.card, margin: 8, marginTop: 0, borderRadius: 3, padding: 12, elevation: 1 },

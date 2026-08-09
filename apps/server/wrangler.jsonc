@@ -5,16 +5,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    "BETTER_AUTH_URL": "http://localhost:8787",
-    "ENVIRONMENT": "development"
+    "BETTER_AUTH_URL": "https://gls-pos-server.sphade012.workers.dev",
+    "ENVIRONMENT": "production"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "gls-pos-control",
-      // Placeholder for local dev. Run `wrangler d1 create gls-pos-control`
-      // and paste the returned id here before deploying.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "a074366b-c2cb-4e54-bd30-be752a9195c8",
       "migrations_dir": "migrations"
     }
   ],

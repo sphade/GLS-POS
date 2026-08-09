@@ -1,4 +1,5 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { startAutoSync } from "./sync";
 
 export type Store = {
   id: string;
@@ -30,6 +31,10 @@ const StoreContext = createContext<StoreState | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [storeId, setStoreId] = useState(stores[0]!.id);
+
+  // Offline-first background sync for the active store. No-ops until the user is
+  // signed in and online, so the app keeps working entirely from local data.
+  useEffect(() => startAutoSync(storeId), [storeId]);
 
   const value = useMemo<StoreState>(
     () => ({

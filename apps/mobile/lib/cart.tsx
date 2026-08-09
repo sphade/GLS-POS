@@ -1,11 +1,12 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+﻿import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { seedReceipts } from "./seed-receipts";
+import { loadAll, put as dbPut, seedOnce } from "./db";
 
 /**
  * How an item is sold:
- *  - "unit"     → whole units only (1, 2, 3 …). `unit` is a free label e.g. "plate".
- *  - "fraction" → loose/weighed. Quantity may be fractional and converts to a
- *                 sub-unit at `unitRatio` (e.g. 1 Kg = 1000 Gm, so 0.25 → 250 Gm).
+ *  - "unit"     â†’ whole units only (1, 2, 3 â€¦). `unit` is a free label e.g. "plate".
+ *  - "fraction" â†’ loose/weighed. Quantity may be fractional and converts to a
+ *                 sub-unit at `unitRatio` (e.g. 1 Kg = 1000 Gm, so 0.25 â†’ 250 Gm).
  */
 export type SellBy = "unit" | "fraction";
 
@@ -25,7 +26,7 @@ export const MEASURES: Measure[] = [
   { unit: "Dozen", subUnit: "Pcs", ratio: 12 },
 ];
 
-/** 0.25 with Kg/Gm/1000 → "250 Gm". Whole values stay in the major unit. */
+/** 0.25 with Kg/Gm/1000 â†’ "250 Gm". Whole values stay in the major unit. */
 export function formatFractionalQty(qty: number, measure: Measure): string {
   if (Number.isInteger(qty)) return `${qty} ${measure.unit}`;
   const sub = Math.round(qty * measure.ratio);
@@ -69,7 +70,7 @@ export type Variant = {
 export type Item = {
   id: string;
   name: string;
-  /** integer minor units (cents) — price per unit, or per major unit when fractional */
+  /** integer minor units (cents) â€” price per unit, or per major unit when fractional */
   price: number;
   currency: string;
   /** null = not stock-tracked */
@@ -143,8 +144,11 @@ const CartContext = createContext<CartState | null>(null);
 
 export function CartProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
-  // Seeded with demo sales so Reports/Today render on first launch.
-  const [receipts, setReceipts] = useState<Receipt[]>(() => seedReceipts());
+  // Receipts persist in SQLite (offline-first). Seeded once for the demo.
+  const [receipts, setReceipts] = useState<Receipt[]>(() => {
+    seedOnce("receipts_seeded", () => seedReceipts().forEach((r) => dbPut("receipts", r, false)));
+    return loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt);
+  });
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
@@ -186,12 +190,13 @@ export function CartProvider({ children }: { children: ReactNode }) {
           mode,
           itemCount: list.reduce((s, e) => s + e.qty, 0),
           total: subtotal + taxTotal,
-          currency: list[0]?.item.currency ?? "USD",
+          currency: list[0]?.item.currency ?? "NGN",
           createdAt: Date.now(),
           synced: Math.random() > 0.25,
           lines: list.map((e) => ({ name: e.item.name, qty: e.qty, price: e.item.price })),
           cashReceived,
         };
+        dbPut("receipts", receipt);
         setReceipts((prev) => [receipt, ...prev]);
         setEntries({});
         return receipt;
@@ -207,3 +212,4 @@ export function useCart(): CartState {
   if (!ctx) throw new Error("useCart must be used within a CartProvider");
   return ctx;
 }
+

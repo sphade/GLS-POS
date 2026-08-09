@@ -136,6 +136,72 @@ export interface Store {
 }
 
 // ---------------------------------------------------------------------------
+// Offline-first sync protocol
+// ---------------------------------------------------------------------------
+
+/**
+ * The set of per-store collections that sync between the device's local SQLite
+ * and the store's Durable Object. Kept as opaque JSON documents on the wire so
+ * the sync engine never needs to know each collection's exact shape.
+ */
+export const SYNC_COLLECTIONS = [
+  "products",
+  "categories",
+  "modifiers",
+  "ingredients",
+  "tables",
+  "customers",
+  "staff",
+  "receipts",
+] as const;
+
+export type SyncCollection = (typeof SYNC_COLLECTIONS)[number];
+
+/**
+ * A single document change moving in either direction. `updatedAt` is the
+ * client wall-clock (ms) used as the last-write-wins clock; `deleted` carries
+ * tombstones so removals propagate.
+ */
+export interface SyncChange {
+  collection: SyncCollection;
+  id: ID;
+  data: unknown;
+  updatedAt: number;
+  deleted: boolean;
+}
+
+/**
+ * Push request: the device's current high-water `cursor` (the largest server
+ * sequence it has already pulled) plus every locally-dirty change. The response
+ * doubles as a pull, returning everything the store has seen since `cursor`.
+ */
+export interface SyncPushRequest {
+  cursor: number;
+  changes: SyncChange[];
+}
+
+export interface SyncPullResponse {
+  /** Changes the store recorded with a sequence greater than the request cursor. */
+  changes: SyncChange[];
+  /** New high-water mark for the device to persist and send next time. */
+  cursor: number;
+}
+
+// ---------------------------------------------------------------------------
+// Store registry (control plane)
+// ---------------------------------------------------------------------------
+
+export type StoreRole = "owner" | "manager" | "cashier" | "waiter" | "kitchen";
+
+/** A store the signed-in user belongs to, with their role in it. */
+export interface StoreMembership {
+  id: ID;
+  name: string;
+  currency: CurrencyCode;
+  role: StoreRole;
+}
+
+// ---------------------------------------------------------------------------
 // API envelope
 // ---------------------------------------------------------------------------
 

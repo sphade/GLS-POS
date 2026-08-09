@@ -44,6 +44,7 @@ export default function RootLayout() {
                 <Stack.Screen name="staff-editor" options={MODAL} />
                 <Stack.Screen name="expense-categories" options={MODAL} />
                 <Stack.Screen name="add-entry" options={MODAL} />
+                <Stack.Screen name="sale-success" options={{ presentation: "fullScreenModal", gestureEnabled: false }} />
                 <Stack.Screen name="settings" options={MODAL} />
                 <Stack.Screen name="report/[type]" options={MODAL} />
               </Stack>

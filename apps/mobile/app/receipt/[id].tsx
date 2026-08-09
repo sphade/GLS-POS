@@ -124,6 +124,7 @@ export default function ReceiptScreen() {
           )}
 
           <Text style={styles.thankYou}>{strings.thankYou}</Text>
+          <Text style={styles.poweredBy}>Powered By GLS-POS</Text>
         </View>
       </ScrollView>
 
@@ -202,6 +203,7 @@ const styles = StyleSheet.create({
   totalValue: { fontSize: 13, color: colors.grey900, fontWeight: "600" },
   totalBold: { fontSize: 16, fontWeight: "800", color: colors.grey900 },
   thankYou: { textAlign: "center", marginTop: 14, fontSize: 13, color: colors.grey700, fontWeight: "600" },
+  poweredBy: { textAlign: "center", marginTop: 6, fontSize: 12, color: colors.grey400, fontWeight: "700" },
   newSaleBar: { backgroundColor: colors.grey200, padding: 10 },
   newSaleBtn: { backgroundColor: colors.green, height: 52, borderRadius: 6, alignItems: "center", justifyContent: "center" },
   newSaleText: { color: colors.white, fontSize: 18, fontWeight: "700" },

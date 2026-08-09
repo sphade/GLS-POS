@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -40,7 +40,7 @@ export function CheckBox({ value, onChange }: { value: boolean; onChange: (v: bo
   );
 }
 
-/** Feature row: icon · label · (?) · checkbox, with an optional revealed body. */
+/** Feature row: icon Â· label Â· (?) Â· checkbox, with an optional revealed body. */
 function FeatureRow({
   icon,
   label,
@@ -98,7 +98,7 @@ function Labelled({
 }
 
 /**
- * Full-screen variant editor sheet: ✕ · DELETE · ADD, then the variant's price,
+ * Full-screen variant editor sheet: âœ• Â· DELETE Â· ADD, then the variant's price,
  * stock and the optional feature checkboxes.
  */
 export function VariantEditor({
@@ -316,7 +316,7 @@ const styles = StyleSheet.create({
   toolbarBtn: { width: 44, alignItems: "center" },
   deleteBtn: { backgroundColor: "#EF3E36", borderRadius: 3, paddingHorizontal: 18, paddingVertical: 10 },
   deleteText: { color: colors.white, fontWeight: "700", fontSize: 14, letterSpacing: 0.5 },
-  addBtn: { backgroundColor: "#3BAA57", borderRadius: 3, paddingHorizontal: 24, paddingVertical: 10 },
+  addBtn: { backgroundColor: colors.green, borderRadius: 3, paddingHorizontal: 24, paddingVertical: 10 },
   addText: { color: colors.white, fontWeight: "700", fontSize: 14, letterSpacing: 0.5 },
 
   card: { backgroundColor: colors.card, borderRadius: 3, padding: 12, marginBottom: 8, elevation: 1 },
@@ -357,3 +357,4 @@ const styles = StyleSheet.create({
   featureBody: { marginTop: 12, gap: 8 },
   hintText: { fontSize: 13, color: colors.grey600 },
 });
+

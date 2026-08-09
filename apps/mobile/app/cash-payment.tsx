@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useRouter, type Href } from "expo-router";
 import { colors, currencySymbol, denominationsFor, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
 import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
@@ -33,7 +33,7 @@ export default function CashPaymentScreen() {
     }
     feedbackSaleComplete();
     const receipt = completeSale({ mode: "Cash", customerName: null, cashReceived: receivedMinor });
-    router.replace({ pathname: "/receipt/[id]", params: { id: receipt.id, fromSale: "1" } });
+    router.replace(`/sale-success?id=${receipt.id}` as Href);
   };
 
   return (

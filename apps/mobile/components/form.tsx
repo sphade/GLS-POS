@@ -1,10 +1,10 @@
-import { type ReactNode } from "react";
+﻿import { type ReactNode } from "react";
 import { Image, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 
-/** Toolbar used by every editor: ✕ · TITLE · optional actions · SAVE. */
+/** Toolbar used by every editor: âœ• Â· TITLE Â· optional actions Â· SAVE. */
 export function EditorToolbar({
   title,
   dirty,
@@ -85,7 +85,7 @@ export function FieldCard({
   );
 }
 
-/** Card that opens a picker — shows the chosen value with a caret. */
+/** Card that opens a picker â€” shows the chosen value with a caret. */
 export function PickerCard({
   label,
   value,
@@ -144,7 +144,7 @@ export function ToggleRow({
   );
 }
 
-/** Collapsible feature card: icon · label · help · switch, body when enabled. */
+/** Collapsible feature card: icon Â· label Â· help Â· switch, body when enabled. */
 export function FeatureCard({
   icon,
   imageIcon,
@@ -185,7 +185,7 @@ export function FeatureCard({
   );
 }
 
-/** Segmented two-way control (Simple/Advance, Expense/Income…). */
+/** Segmented two-way control (Simple/Advance, Expense/Incomeâ€¦). */
 export function Segmented({
   left,
   right,
@@ -240,7 +240,7 @@ const styles = StyleSheet.create({
   toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
   deleteBtn: { borderWidth: 1, borderColor: colors.red500, borderRadius: 3, paddingHorizontal: 12, paddingVertical: 8 },
   deleteText: { color: colors.red500, fontWeight: "700", fontSize: 13 },
-  saveBtn: { backgroundColor: "#3BAA57", borderRadius: 3, paddingHorizontal: 20, paddingVertical: 10 },
+  saveBtn: { backgroundColor: colors.green, borderRadius: 3, paddingHorizontal: 20, paddingVertical: 10 },
   saveText: { color: colors.white, fontWeight: "700", fontSize: 15, letterSpacing: 0.5 },
 
   card: { backgroundColor: colors.card, borderRadius: 4, padding: 12, marginBottom: 8, elevation: 1 },
@@ -265,3 +265,4 @@ const styles = StyleSheet.create({
   segText: { fontSize: 16, fontWeight: "700", color: colors.primary },
   segTextActive: { color: colors.white },
 });
+

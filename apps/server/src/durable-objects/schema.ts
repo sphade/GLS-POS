@@ -1,48 +1,46 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
-import type { OrderChannel, OrderItem, OrderStatus, Payment } from "@gls-pos/types";
+import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core";
 
 /**
  * Per-store operational schema, embedded in each Store Durable Object's SQLite.
  * This is the data plane: one isolated copy of these tables exists per store.
  *
- * Money is integer minor units. Timestamps are ISO strings to map 1:1 onto the
- * shared domain types. Order line items and payments are stored as typed JSON
- * columns for now; hot query paths can be normalised into tables later.
+ * The store is offline-first. The device holds the same collections in local
+ * SQLite and the DO is the authoritative mirror, so the DO keeps every entity
+ * as an opaque JSON `document` rather than one strongly-typed table per entity.
+ * That keeps the sync engine generic: adding a new collection (e.g. expenses)
+ * needs no migration here.
+ *
+ * Sync columns:
+ *  - updated_at : the device wall-clock (ms) of the last change — the
+ *                 last-write-wins clock used to resolve conflicts.
+ *  - deleted    : tombstone so deletions propagate to other devices.
+ *  - server_seq : a monotonic per-store sequence assigned on every write, so a
+ *                 device can pull "everything since cursor N" in order.
  */
 
-export const products = sqliteTable("products", {
-  id: text("id").primaryKey(),
-  storeId: text("store_id").notNull(),
-  categoryId: text("category_id"),
-  name: text("name").notNull(),
-  sku: text("sku"),
-  barcode: text("barcode"),
-  price: integer("price").notNull(),
-  cost: integer("cost"),
-  currency: text("currency").notNull().default("USD"),
-  stockQuantity: integer("stock_quantity"),
-  taxRateBps: integer("tax_rate_bps"),
-  imageUrl: text("image_url"),
-  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
+export const documents = sqliteTable(
+  "documents",
+  {
+    /** Logical collection name, e.g. "products", "receipts". */
+    collection: text("collection").notNull(),
+    id: text("id").notNull(),
+    /** JSON-encoded domain document (the same shape the device stores). */
+    data: text("data").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+    deleted: integer("deleted", { mode: "boolean" }).notNull().default(false),
+    serverSeq: integer("server_seq").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.collection, t.id] }),
+    index("documents_server_seq_idx").on(t.serverSeq),
+  ],
+);
 
-export const orders = sqliteTable("orders", {
-  id: text("id").primaryKey(),
-  storeId: text("store_id").notNull(),
-  channel: text("channel").$type<OrderChannel>().notNull(),
-  status: text("status").$type<OrderStatus>().notNull(),
-  items: text("items", { mode: "json" }).$type<OrderItem[]>().notNull(),
-  payments: text("payments", { mode: "json" }).$type<Payment[]>().notNull(),
-  currency: text("currency").notNull(),
-  subtotal: integer("subtotal").notNull(),
-  taxTotal: integer("tax_total").notNull(),
-  discountTotal: integer("discount_total").notNull(),
-  grandTotal: integer("grand_total").notNull(),
-  customerId: text("customer_id"),
-  staffId: text("staff_id"),
-  note: text("note"),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
+/**
+ * Tiny key/value table for the DO's own bookkeeping. Currently holds the
+ * monotonic `seq` counter that assigns `server_seq` to each document write.
+ */
+export const syncMeta = sqliteTable("sync_meta", {
+  key: text("key").primaryKey(),
+  value: integer("value").notNull(),
 });

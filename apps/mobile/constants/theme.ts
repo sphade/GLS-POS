@@ -9,8 +9,12 @@ export const colors = {
   primaryDark: "#3F7A1C",
   brand: "#8BC34A",
   accent: "#8BC34A",
-  green: "#3FA34D",
+  // CTA / success green is the primary green so the whole app is one green.
+  green: "#5AA02C",
   dkGreen: "#2E7D46",
+  // Action colours for stepper: increase vs decrease.
+  actionAdd: "#3FA34D",
+  actionRemove: "#E53935",
   red300: "#E57373",
   red500: "#F44336",
   red800: "#C62828",
@@ -83,11 +87,11 @@ export const strings = {
   delete: "Delete",
 };
 
-const symbols: Record<string, string> = { USD: "$", NGN: "₦", EUR: "€", GBP: "£", INR: "₹" };
-export function currencySymbol(currency = "USD") {
+const symbols: Record<string, string> = { NGN: "₦", USD: "$", EUR: "€", GBP: "£", INR: "₹" };
+export function currencySymbol(currency = "NGN") {
   return symbols[currency] ?? `${currency} `;
 }
-export function formatMoney(minor: number, currency = "USD"): string {
+export function formatMoney(minor: number, currency = "NGN"): string {
   return `${currencySymbol(currency)}${(minor / 100).toFixed(2)}`;
 }
 

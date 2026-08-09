@@ -15,7 +15,7 @@ const PAD = 6;
 
 export default function ItemsScreen() {
   const router = useRouter();
-  const { add, qtyOf, count } = useCart();
+  const { add, remove, qtyOf, count } = useCart();
   const { products } = useCatalog();
   const [query, setQuery] = useState("");
   const [isGrid, setIsGrid] = useState(true);
@@ -37,6 +37,13 @@ export default function ItemsScreen() {
     }
     feedbackAddItem();
     add(item);
+  };
+
+  /** Long-press removes one from the cart (no-op if none). */
+  const onRemove = (item: Item) => {
+    if (qtyOf(item.id) === 0) return;
+    feedbackTap();
+    remove(item.id);
   };
 
   return (
@@ -75,9 +82,20 @@ export default function ItemsScreen() {
             );
           }
           return isGrid ? (
-            <ProductCard item={item} width={cardWidth} qty={qtyOf(item.id)} onPress={() => onAdd(item)} />
+            <ProductCard
+              item={item}
+              width={cardWidth}
+              qty={qtyOf(item.id)}
+              onPress={() => onAdd(item)}
+              onLongPress={() => onRemove(item)}
+            />
           ) : (
-            <ProductRow item={item} qty={qtyOf(item.id)} onPress={() => onAdd(item)} />
+            <ProductRow
+              item={item}
+              qty={qtyOf(item.id)}
+              onPress={() => onAdd(item)}
+              onLongPress={() => onRemove(item)}
+            />
           );
         }}
       />
@@ -101,7 +119,6 @@ export default function ItemsScreen() {
 }
 
 function Avatar({ item, size }: { item: Item; size: number }) {
-  const out = item.stockQuantity === 0;
   const low = item.stockQuantity !== null && item.stockQuantity > 0 && item.stockQuantity <= 3;
   return (
     <View
@@ -111,52 +128,103 @@ function Avatar({ item, size }: { item: Item; size: number }) {
       ]}
     >
       {low && <View style={styles.lowDot} />}
-      {out && (
-        <View style={styles.oosPill}>
-          <Text style={styles.oosText}>{strings.outOfStock}</Text>
-        </View>
-      )}
     </View>
   );
 }
 
-function ProductCard({ item, width, qty, onPress }: { item: Item; width: number; qty: number; onPress: () => void }) {
+function ProductCard({
+  item,
+  width,
+  qty,
+  onPress,
+  onLongPress,
+}: {
+  item: Item;
+  width: number;
+  qty: number;
+  onPress: () => void;
+  onLongPress: () => void;
+}) {
   const circle = Math.min(width - 28, 78);
+  const out = item.stockQuantity === 0;
+  // Band spans the full card width but only the image area's height (+ padding).
+  const bandHeight = circle + 20;
   return (
-    <Pressable style={[styles.card, { width }]} onPress={onPress} android_ripple={{ color: "#00000010" }}>
-      <View style={styles.avatarWrap}>
+    <Pressable
+      style={[styles.card, { width }]}
+      onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={250}
+      android_ripple={{ color: "#00000010" }}
+    >
+      <View style={[styles.imageZone, { width: circle, height: circle }]}>
         <Avatar item={item} size={circle} />
-        {qty > 0 && (
-          <View style={styles.qtyOverlay}>
-            <Text style={styles.qtyOverlayText}>{qty}</Text>
-          </View>
-        )}
       </View>
+
       <Text style={styles.title} numberOfLines={1}>
         {item.name}
       </Text>
       <Text style={styles.price} numberOfLines={1}>
         {formatMoney(item.price, item.currency)}
       </Text>
+
+      {/* Full-width band over the image area only — leaves name/price clear */}
+      {out && (
+        <View style={[styles.oosBand, { height: bandHeight }]}>
+          <View style={styles.oosLabel}>
+            <Text style={styles.oosLabelText}>OUT OF STOCK</Text>
+          </View>
+        </View>
+      )}
+      {qty > 0 && !out && (
+        <View style={[styles.countBand, { height: bandHeight }]}>
+          <Text style={styles.countText}>x{qty}</Text>
+        </View>
+      )}
     </Pressable>
   );
 }
 
-function ProductRow({ item, qty, onPress }: { item: Item; qty: number; onPress: () => void }) {
+function ProductRow({
+  item,
+  qty,
+  onPress,
+  onLongPress,
+}: {
+  item: Item;
+  qty: number;
+  onPress: () => void;
+  onLongPress: () => void;
+}) {
+  const out = item.stockQuantity === 0;
   return (
-    <Pressable style={styles.row} onPress={onPress} android_ripple={{ color: "#00000010" }}>
-      <Avatar item={item} size={44} />
+    <Pressable
+      style={styles.row}
+      onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={250}
+      android_ripple={{ color: "#00000010" }}
+    >
+      <View style={styles.rowThumb}>
+        <Avatar item={item} size={46} />
+        {out && (
+          <View style={[styles.oosZone, { borderRadius: 6 }]}>
+            <Text style={styles.oosThumbText}>OOS</Text>
+          </View>
+        )}
+        {qty > 0 && !out && (
+          <View style={[styles.countZone, { borderRadius: 6 }]}>
+            <Text style={styles.countThumbText}>x{qty}</Text>
+          </View>
+        )}
+      </View>
       <View style={{ flex: 1 }}>
-        <Text style={styles.title} numberOfLines={1}>
+        <Text style={[styles.title, { textAlign: "left", marginTop: 0 }]} numberOfLines={1}>
           {item.name}
         </Text>
-        <Text style={styles.price}>{formatMoney(item.price, item.currency)}</Text>
+        <Text style={[styles.price, { textAlign: "left", marginTop: 2 }]}>{formatMoney(item.price, item.currency)}</Text>
       </View>
-      {qty > 0 && (
-        <View style={[styles.qtyOverlay, { position: "relative", top: 0, right: 0 }]}>
-          <Text style={styles.qtyOverlayText}>{qty}</Text>
-        </View>
-      )}
+      {out && <Text style={styles.rowOosText}>Out of stock</Text>}
     </Pressable>
   );
 }
@@ -174,6 +242,8 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     marginBottom: GAP,
     alignItems: "center",
+    position: "relative",
+    overflow: "hidden",
     elevation: 1,
     shadowColor: "#000",
     shadowOpacity: 0.07,
@@ -190,19 +260,63 @@ const styles = StyleSheet.create({
     marginBottom: GAP,
     elevation: 1,
   },
-  avatarWrap: { position: "relative" },
   avatar: { alignItems: "center", justifyContent: "center", overflow: "hidden" },
   lowDot: { position: "absolute", top: 4, left: 4, width: 10, height: 10, borderRadius: 5, backgroundColor: colors.white },
-  oosPill: {
+
+  /** Square zone that holds the circular avatar; overlays fill it. */
+  imageZone: { alignItems: "center", justifyContent: "center", position: "relative" },
+  rowThumb: { width: 46, height: 46, position: "relative" },
+
+  /** Out-of-stock: scrim over the whole zone + a clear red label. */
+  oosZone: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  oosLabel: {
+    backgroundColor: colors.outOfStock,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    transform: [{ rotate: "-8deg" }],
+  },
+  oosLabelText: { color: colors.white, fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
+  oosThumbText: { color: colors.white, fontSize: 10, fontWeight: "800" },
+  rowOosText: { color: colors.outOfStock, fontSize: 12, fontWeight: "700" },
+
+  /** In-cart count over the thumbnail (list mode). */
+  countZone: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(139,195,74,0.60)",
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  countText: { color: colors.white, fontSize: 30, fontWeight: "800", textShadowColor: "#00000055", textShadowRadius: 3 },
+  countThumbText: { color: colors.white, fontSize: 15, fontWeight: "800" },
+
+  /** Grid overlays: full card width, image-height only, pinned to the top. */
+  oosBand: {
     position: "absolute",
-    bottom: 0,
+    top: 0,
     left: 0,
     right: 0,
-    backgroundColor: "#00000088",
-    paddingVertical: 2,
+    backgroundColor: "rgba(0,0,0,0.45)",
     alignItems: "center",
+    justifyContent: "center",
   },
-  oosText: { color: colors.white, fontSize: 8, fontWeight: "700" },
+  countBand: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "rgba(90,160,44,0.82)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
   qtyOverlay: {
     position: "absolute",
     top: -2,
