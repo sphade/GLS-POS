@@ -20,6 +20,10 @@
     "typescript": "^5.7.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "workerd"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "@shopify/react-native-skia"
+    ]
   }
 }

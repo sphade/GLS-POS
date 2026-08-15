@@ -9,13 +9,22 @@ const config = getDefaultConfig(__dirname);
 config.resolver.unstable_enablePackageExports = true;
 
 // Prefer the standard conditions; "require" first keeps CJS-only deps working.
-config.resolver.unstable_conditionNames = ["react-native", "browser", "require", "import"];
+config.resolver.unstable_conditionNames = [
+  "react-native",
+  "browser",
+  "require",
+  "import",
+];
 
 // Metro's default assetExts covers mp3/wav but not ogg — register the extra
 // audio formats we bundle.
-config.resolver.assetExts = [...new Set([...config.resolver.assetExts, "ogg", "m4a", "aac"])];
+config.resolver.assetExts = [
+  ...new Set([...config.resolver.assetExts, "ogg", "m4a", "aac"]),
+];
 
 // better-auth ships .mjs entry points.
-config.resolver.sourceExts = [...new Set([...config.resolver.sourceExts, "mjs"])];
+config.resolver.sourceExts = [
+  ...new Set([...config.resolver.sourceExts, "mjs"]),
+];
 
 module.exports = config;

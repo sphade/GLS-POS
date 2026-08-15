@@ -2,8 +2,8 @@ import Constants from "expo-constants";
 import { createAuthClient } from "better-auth/react";
 import type { BetterAuthClientPlugin } from "better-auth/client";
 import { expoClient } from "@better-auth/expo/client";
+import { adminClient } from "better-auth/client/plugins";
 import * as SecureStore from "expo-secure-store";
-
 /**
  * better-auth client for the mobile app. The Expo plugin persists the session
  * cookie in the device secure store and handles the deep-link callback
@@ -19,7 +19,7 @@ import * as SecureStore from "expo-secure-store";
 export const API_URL =
   process.env.EXPO_PUBLIC_API_URL ??
   (Constants.expoConfig?.extra?.apiUrl as string | undefined) ??
-  "https://gls-pos-server.sphade012.workers.dev";
+  "https://gls-pos-server.nwabuisichike70.workers.dev";
 
 // The Expo plugin's inferred type doesn't line up with BetterAuthClientPlugin
 // across the current better-auth versions (a known deep-generic mismatch in the
@@ -28,11 +28,14 @@ const expoPlugin = expoClient({
   scheme: "glspos",
   storagePrefix: "glspos",
   storage: SecureStore,
-}) as unknown as BetterAuthClientPlugin;
+}) as BetterAuthClientPlugin;
 
 export const authClient = createAuthClient({
+  scheme: "glspos",
+  storagePrefix: "glspos",
+  storage: SecureStore,
   baseURL: API_URL,
-  plugins: [expoPlugin],
+  plugins: [expoPlugin, adminClient()],
 });
 
 export const { signIn, signUp, signOut, useSession } = authClient;
@@ -46,6 +49,8 @@ export const { signIn, signUp, signOut, useSession } = authClient;
  * plugin action inference is bypassed above.
  */
 export function authCookie(): string {
-  const client = authClient as unknown as { getCookie?: () => string | undefined };
+  const client = authClient as unknown as {
+    getCookie?: () => string | undefined;
+  };
   return client.getCookie?.() ?? "";
 }

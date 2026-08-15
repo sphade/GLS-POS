@@ -13,10 +13,16 @@ export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
-  emailVerified: integer("email_verified", { mode: "boolean" }).notNull().default(false),
+  emailVerified: integer("email_verified", { mode: "boolean" })
+    .notNull()
+    .default(false),
   image: text("image"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+  role: text("role"),
+  banned: integer("banned"),
+  banReason: text("ban_reason"),
+  banExpires: integer("ban_expires", { mode: "timestamp_ms" }),
 });
 
 export const session = sqliteTable("session", {
@@ -30,6 +36,9 @@ export const session = sqliteTable("session", {
   userId: text("user_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
+  activeOrganizationId: text("active_organization_id"),
+  activeTeamId: text("active_team_id"),
+  impersonatedBy: text("impersonated_by"),
 });
 
 export const account = sqliteTable("account", {
@@ -42,8 +51,12 @@ export const account = sqliteTable("account", {
   accessToken: text("access_token"),
   refreshToken: text("refresh_token"),
   idToken: text("id_token"),
-  accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp" }),
-  refreshTokenExpiresAt: integer("refresh_token_expires_at", { mode: "timestamp" }),
+  accessTokenExpiresAt: integer("access_token_expires_at", {
+    mode: "timestamp",
+  }),
+  refreshTokenExpiresAt: integer("refresh_token_expires_at", {
+    mode: "timestamp",
+  }),
   scope: text("scope"),
   password: text("password"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
@@ -73,15 +86,47 @@ export const store = sqliteTable("store", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
 
-/** Links a user to a store with a role. */
+// /** Links a user to a store with a role. */
+// export const member = sqliteTable("member", {
+//   id: text("id").primaryKey(),
+//   userId: text("user_id")
+//     .notNull()
+//     .references(() => user.id, { onDelete: "cascade" }),
+//   storeId: text("store_id")
+//     .notNull()
+//     .references(() => store.id, { onDelete: "cascade" }),
+//   role: text("role").notNull().default("owner"),
+//   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+// });
+
+export const organization = sqliteTable("organization", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  logo: text("logo"),
+  metadata: text("metadata"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const organizationRole = sqliteTable("organization_role", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  role: text("role").notNull(),
+  permission: text("permission").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
+});
+
 export const member = sqliteTable("member", {
   id: text("id").primaryKey(),
   userId: text("user_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
-  storeId: text("store_id")
+  organizationId: text("organization_id")
     .notNull()
-    .references(() => store.id, { onDelete: "cascade" }),
-  role: text("role").notNull().default("owner"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+    .references(() => organization.id, { onDelete: "cascade" }),
+  role: text("role").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });

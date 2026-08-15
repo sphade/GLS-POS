@@ -12,29 +12,41 @@ import type { CreateStoreInput } from "./stores.schema.js";
  */
 
 /** Stores the given user belongs to, with their role in each. */
-export async function listStoresForUser(env: Env, userId: string): Promise<StoreMembership[]> {
+export async function listStoresForUser(
+  env: Env,
+  userId: string,
+): Promise<StoreMembership[]> {
   const db = createDb(env.DB);
   const rows = await db
     .select({
       id: schema.store.id,
       name: schema.store.name,
       currency: schema.store.currency,
-      role: schema.member.role,
+      role: schema.storeMember.role,
     })
-    .from(schema.member)
-    .innerJoin(schema.store, eq(schema.member.storeId, schema.store.id))
-    .where(eq(schema.member.userId, userId));
+    .from(schema.storeMember)
+    .innerJoin(schema.store, eq(schema.storeMember.storeId, schema.store.id))
+    .where(eq(schema.storeMember.userId, userId));
 
   return rows.map((r) => ({ ...r, role: r.role as StoreRole }));
 }
 
 /** True when the user is a member of the store. Used by the store middleware. */
-export async function isMember(env: Env, userId: string, storeId: string): Promise<boolean> {
+export async function isMember(
+  env: Env,
+  userId: string,
+  storeId: string,
+): Promise<boolean> {
   const db = createDb(env.DB);
   const [row] = await db
-    .select({ id: schema.member.id })
-    .from(schema.member)
-    .where(and(eq(schema.member.userId, userId), eq(schema.member.storeId, storeId)))
+    .select({ id: schema.storeMember.id })
+    .from(schema.storeMember)
+    .where(
+      and(
+        eq(schema.storeMember.userId, userId),
+        eq(schema.storeMember.storeId, storeId),
+      ),
+    )
     .limit(1);
   return !!row;
 }
@@ -58,13 +70,10 @@ export async function createStore(
     updatedAt: now,
   });
 
-  await db.insert(schema.member).values({
-    id: newId("mbr"),
-    userId,
-    storeId,
+  return {
+    id: storeId,
+    name: input.name,
+    currency: input.currency,
     role: "owner",
-    createdAt: now,
-  });
-
-  return { id: storeId, name: input.name, currency: input.currency, role: "owner" };
+  };
 }

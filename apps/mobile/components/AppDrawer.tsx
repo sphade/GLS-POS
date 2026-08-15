@@ -1,9 +1,17 @@
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
+import { signOut } from "@/lib/auth-client";
 
 type Entry = {
   label: string;
@@ -15,11 +23,27 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
   {
     title: "MANAGEMENT",
     entries: [
-      { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory" },
+      {
+        label: "Inventory Management",
+        icon: "package-variant-closed",
+        route: "/inventory",
+      },
       { label: "Table Management", icon: "table-furniture", route: "/tables" },
-      { label: "Customers Management", icon: "account-group-outline", route: "/customers" },
-      { label: "Staff Management", icon: "account-tie-outline", route: "/staff" },
-      { label: "Add Expense", icon: "cash-minus", route: "/expense-categories" },
+      {
+        label: "Customers Management",
+        icon: "account-group-outline",
+        route: "/customers",
+      },
+      {
+        label: "Staff Management",
+        icon: "account-tie-outline",
+        route: "/staff",
+      },
+      {
+        label: "Add Expense",
+        icon: "cash-minus",
+        route: "/expense-categories",
+      },
       { label: "Receipts", icon: "receipt", route: "/(tabs)/today" },
       { label: "Activity History", icon: "history" },
     ],
@@ -37,7 +61,13 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
 ];
 
 /** Side drawer opened from the hamburger in PosHeader. */
-export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+export function AppDrawer({
+  visible,
+  onClose,
+}: {
+  visible: boolean;
+  onClose: () => void;
+}) {
   const router = useRouter();
   const { store } = useStore();
 
@@ -47,8 +77,20 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
     if (route) router.push(route as never);
   };
 
+  const handleLogout = async () => {
+    feedbackTap();
+    onClose();
+    await signOut();
+    router.replace("/setup");
+  };
+
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+    >
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={styles.drawer} onPress={(e) => e.stopPropagation()}>
           {/* Header */}
@@ -81,7 +123,11 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
                     onPress={() => go(e.route)}
                     android_ripple={{ color: "#00000010" }}
                   >
-                    <MaterialCommunityIcons name={e.icon} size={22} color={colors.primary} />
+                    <MaterialCommunityIcons
+                      name={e.icon}
+                      size={22}
+                      color={colors.primary}
+                    />
                     <Text style={styles.rowLabel}>{e.label}</Text>
                   </Pressable>
                 ))}
@@ -89,9 +135,19 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
             ))}
 
             <View style={styles.divider} />
-            <Pressable style={styles.row} onPress={() => go()} android_ripple={{ color: "#00000010" }}>
-              <MaterialCommunityIcons name="logout" size={22} color={colors.red500} />
-              <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
+            <Pressable
+              style={styles.row}
+              onPress={handleLogout}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <MaterialCommunityIcons
+                name="logout"
+                size={22}
+                color={colors.red500}
+              />
+              <Text style={[styles.rowLabel, { color: colors.red500 }]}>
+                Logout
+              </Text>
             </Pressable>
           </ScrollView>
         </Pressable>
@@ -103,9 +159,19 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
 const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: "#00000066", flexDirection: "row" },
   drawer: { width: "82%", maxWidth: 340, backgroundColor: colors.white },
-  header: { backgroundColor: colors.primary, paddingHorizontal: 16, paddingTop: 44, paddingBottom: 16 },
+  header: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: 16,
+    paddingTop: 44,
+    paddingBottom: 16,
+  },
   appName: { color: colors.white, fontSize: 20, fontWeight: "800" },
-  storeRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16 },
+  storeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 16,
+  },
   avatar: {
     width: 46,
     height: 46,
@@ -118,7 +184,12 @@ const styles = StyleSheet.create({
   storeName: { color: colors.white, fontSize: 16, fontWeight: "700" },
   storeRef: { color: "#FFFFFFBB", fontSize: 12, marginTop: 2 },
   editBusiness: { marginTop: 12 },
-  editBusinessText: { color: colors.white, fontSize: 13, fontWeight: "700", textDecorationLine: "underline" },
+  editBusinessText: {
+    color: colors.white,
+    fontSize: 13,
+    fontWeight: "700",
+    textDecorationLine: "underline",
+  },
 
   groupTitle: {
     fontSize: 11,
@@ -129,7 +200,17 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 6,
   },
-  row: { flexDirection: "row", alignItems: "center", gap: 14, paddingHorizontal: 16, paddingVertical: 13 },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+  },
   rowLabel: { flex: 1, fontSize: 15, color: colors.grey800 },
-  divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300, marginVertical: 8 },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.grey300,
+    marginVertical: 8,
+  },
 });

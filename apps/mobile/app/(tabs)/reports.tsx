@@ -8,6 +8,7 @@ import { PosHeader } from "@/components/PosHeader";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { usePermission } from "@/lib/permissions";
 import { feedbackTap } from "@/lib/feedback";
 
 const CURRENCY = "NGN";
@@ -44,7 +45,10 @@ function rangeBounds(range: string): { from: number; to: number } {
       return { from: w.getTime(), to: w.getTime() + 7 * DAY };
     }
     case "This Month":
-      return { from: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), to: Date.now() + 1 };
+      return {
+        from: new Date(d.getFullYear(), d.getMonth(), 1).getTime(),
+        to: Date.now() + 1,
+      };
     case "Last Month":
       return {
         from: new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime(),
@@ -56,7 +60,10 @@ function rangeBounds(range: string): { from: number; to: number } {
         to: new Date(d.getFullYear(), 0, 1).getTime(),
       };
     default:
-      return { from: new Date(d.getFullYear(), 0, 1).getTime(), to: Date.now() + 1 };
+      return {
+        from: new Date(d.getFullYear(), 0, 1).getTime(),
+        to: Date.now() + 1,
+      };
   }
 }
 
@@ -73,10 +80,31 @@ export default function ReportsScreen() {
   const router = useRouter();
   const { receipts } = useCart();
   const { products } = useCatalog();
+  const { can } = usePermission();
   const [tab, setTab] = useState<"pos" | "storefront">("pos");
   const [rangeIndex, setRangeIndex] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const range = RANGES[rangeIndex]!;
+
+  // Check if user has permission to view reports
+  const hasAccess = can("reports", "read");
+
+  if (!hasAccess) {
+    return (
+      <SafeAreaView edges={["top"]} style={styles.root}>
+        <PosHeader showShare />
+        <View style={styles.accessDeniedContainer}>
+          <View style={styles.accessDeniedContent}>
+            <Ionicons name="lock-closed" size={56} color={colors.grey400} />
+            <Text style={styles.accessDeniedTitle}>Access Denied</Text>
+            <Text style={styles.accessDeniedMessage}>
+              You do not have permissions to view this page.
+            </Text>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   const scoped = useMemo(() => {
     const { from, to } = rangeBounds(range);
@@ -100,9 +128,12 @@ export default function ReportsScreen() {
       profit: Math.round(totalSales * 0.4),
       tax: Math.round(totalSales * 0.075),
       highest,
-      topMode: Object.entries(byMode).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "â€”",
+      topMode:
+        Object.entries(byMode).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "â€”",
       topItem,
-      lowStock: products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length,
+      lowStock: products.filter(
+        (i) => i.stockQuantity !== null && i.stockQuantity <= 3,
+      ).length,
       remaining: products.reduce((s, i) => s + (i.stockQuantity ?? 0), 0),
     };
   }, [scoped, products]);
@@ -120,7 +151,11 @@ export default function ReportsScreen() {
 
       {/* Date range bar: â† calendar + label â†’ */}
       <View style={styles.dateBar}>
-        <Pressable style={styles.dateArrow} hitSlop={8} onPress={() => step(-1)}>
+        <Pressable
+          style={styles.dateArrow}
+          hitSlop={8}
+          onPress={() => step(-1)}
+        >
           <Ionicons name="arrow-back" size={22} color={colors.primary} />
         </Pressable>
         <Pressable
@@ -130,7 +165,11 @@ export default function ReportsScreen() {
             setPickerOpen((v) => !v);
           }}
         >
-          <MaterialCommunityIcons name="calendar-month" size={24} color={colors.primary} />
+          <MaterialCommunityIcons
+            name="calendar-month"
+            size={24}
+            color={colors.primary}
+          />
           <Text style={styles.dateText}>{dateLabelFor(range)}</Text>
         </Pressable>
         <Pressable style={styles.dateArrow} hitSlop={8} onPress={() => step(1)}>
@@ -150,7 +189,14 @@ export default function ReportsScreen() {
                 setPickerOpen(false);
               }}
             >
-              <Text style={[styles.presetText, range === r && { color: colors.white }]}>{r}</Text>
+              <Text
+                style={[
+                  styles.presetText,
+                  range === r && { color: colors.white },
+                ]}
+              >
+                {r}
+              </Text>
             </Pressable>
           ))}
         </View>
@@ -163,14 +209,26 @@ export default function ReportsScreen() {
       ) : (
         <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
           <View style={styles.tabCard}>
-            <Pressable style={[styles.tabHalf, tab === "pos" && styles.tabActive]} onPress={() => setTab("pos")}>
-              <Text style={[styles.tabText, tab === "pos" && styles.tabTextActive]}>{strings.posReports}</Text>
+            <Pressable
+              style={[styles.tabHalf, tab === "pos" && styles.tabActive]}
+              onPress={() => setTab("pos")}
+            >
+              <Text
+                style={[styles.tabText, tab === "pos" && styles.tabTextActive]}
+              >
+                {strings.posReports}
+              </Text>
             </Pressable>
             <Pressable
               style={[styles.tabHalf, tab === "storefront" && styles.tabActive]}
               onPress={() => setTab("storefront")}
             >
-              <Text style={[styles.tabText, tab === "storefront" && styles.tabTextActive]}>
+              <Text
+                style={[
+                  styles.tabText,
+                  tab === "storefront" && styles.tabTextActive,
+                ]}
+              >
                 {strings.storefrontReports}
               </Text>
             </Pressable>
@@ -197,20 +255,39 @@ export default function ReportsScreen() {
           />
           <MetricCard
             label="TOP STOCKS"
-            value={stats.topItem ? `${stats.topItem[0]} : ${stats.topItem[1]}` : "â€”"}
+            value={
+              stats.topItem
+                ? `${stats.topItem[0]} : ${stats.topItem[1]}`
+                : "â€”"
+            }
             message={stats.topItem ? `Only ${stats.topItem[1]}` : undefined}
             type="topStocks"
             title="Top Stocks"
           />
-          <MetricCard label="TOP CATEGORY" value="Fruits : 1" type="topCategory" title="Top Category" />
+          <MetricCard
+            label="TOP CATEGORY"
+            value="Fruits : 1"
+            type="topCategory"
+            title="Top Category"
+          />
           <MetricCard
             label="TOTAL RECEIPT COUNT"
             value={String(stats.count)}
             type="salesCount"
             title="Receipt Count"
           />
-          <MetricCard label="TAX" value={formatMoney(stats.tax, CURRENCY)} type="tax" title="Tax" />
-          <MetricCard label="DISCOUNT" value={formatMoney(0, CURRENCY)} type="discount" title="Discount" />
+          <MetricCard
+            label="TAX"
+            value={formatMoney(stats.tax, CURRENCY)}
+            type="tax"
+            title="Tax"
+          />
+          <MetricCard
+            label="DISCOUNT"
+            value={formatMoney(0, CURRENCY)}
+            type="discount"
+            title="Discount"
+          />
           <MetricCard
             label="AVG SALES VALUE"
             value={formatMoney(stats.avg, CURRENCY)}
@@ -230,7 +307,13 @@ export default function ReportsScreen() {
             type="payment"
             title="Payment Modes"
           />
-          <MetricCard label="SOLD BY" value="â€”" message="No Cashier Found" type="cashier" title="Sold By" />
+          <MetricCard
+            label="SOLD BY"
+            value="â€”"
+            message="No Cashier Found"
+            type="cashier"
+            title="Sold By"
+          />
           <MetricCard
             label="LOW STOCK INVENTORY"
             value={String(stats.lowStock)}
@@ -273,12 +356,23 @@ function MetricCard({
       android_ripple={{ color: "#00000010" }}
       onPress={() => {
         feedbackTap();
-        if (type) router.push({ pathname: "/report/[type]", params: { type, title: title ?? label } });
+        if (type)
+          router.push({
+            pathname: "/report/[type]",
+            params: { type, title: title ?? label },
+          });
       }}
     >
       <View style={{ flex: 1 }}>
         <Text style={styles.metricLabel}>{label}</Text>
-        <Text style={[styles.metricValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
+        <Text
+          style={[
+            styles.metricValue,
+            valueColor ? { color: valueColor } : null,
+          ]}
+        >
+          {value}
+        </Text>
         {message ? <Text style={styles.metricMessage}>{message}</Text> : null}
       </View>
       <Ionicons name="chevron-forward" size={24} color={colors.primary} />
@@ -297,7 +391,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   dateArrow: { width: 44, alignItems: "center" },
-  dateCenter: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
+  dateCenter: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
   dateText: { fontSize: 18, color: colors.grey800, fontWeight: "500" },
 
   presetGrid: {
@@ -317,10 +417,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.grey400,
   },
-  presetActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  presetActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
   presetText: { color: colors.grey700, fontWeight: "600", fontSize: 13 },
 
-  emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 80 },
+  emptyWrap: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingBottom: 80,
+  },
 
   tabCard: {
     flexDirection: "row",
@@ -347,8 +455,34 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   metricLabel: { fontSize: 15, color: colors.grey800, fontWeight: "500" },
-  metricValue: { fontSize: 24, color: colors.primary, fontWeight: "700", marginTop: 6 },
+  metricValue: {
+    fontSize: 24,
+    color: colors.primary,
+    fontWeight: "700",
+    marginTop: 6,
+  },
   metricMessage: { fontSize: 13, color: colors.grey500, marginTop: 4 },
+
+  accessDeniedContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  accessDeniedContent: {
+    alignItems: "center",
+    gap: 12,
+  },
+  accessDeniedTitle: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: colors.grey900,
+    marginTop: 12,
+  },
+  accessDeniedMessage: {
+    fontSize: 16,
+    color: colors.grey600,
+    textAlign: "center",
+    lineHeight: 24,
+  },
 });
-
-

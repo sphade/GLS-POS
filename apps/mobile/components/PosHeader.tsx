@@ -1,8 +1,16 @@
 ﻿import { useState } from "react";
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, strings } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
+import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { AppDrawer } from "@/components/AppDrawer";
 
@@ -33,9 +41,67 @@ export function PosHeader({
   onShare?: () => void;
   onChat?: () => void;
 }) {
-  const { store, stores, setStoreId } = useStore();
+  const { store, stores, setStoreId, addStore } = useStore();
   const [open, setOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [shopName, setShopName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const slugifyOrganizationName = (name: string) =>
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48);
+
+  const createOrganization = async () => {
+    const trimmedName = shopName.trim();
+
+    if (!trimmedName) {
+      setError("Please enter a shop name.");
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+
+    const result = await api.createOrganization({
+      name: trimmedName,
+      slug: slugifyOrganizationName(trimmedName),
+    });
+    setBusy(false);
+
+    if (!result.ok) {
+      setError(result.error.message || "Unable to create organization.");
+      return;
+    }
+
+    const created = result.data;
+    const initials = created.name
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0].toUpperCase())
+      .join("");
+
+    const newStore = {
+      id: created.id,
+      name: created.name,
+      currency: "NGN",
+      initials: initials || "--",
+      reference: created.slug,
+    };
+
+    addStore(newStore);
+    setStoreId(newStore.id);
+    setShopName("");
+    setCreateOpen(false);
+    setOpen(false);
+  };
 
   return (
     <>
@@ -122,11 +188,20 @@ export function PosHeader({
             onChat?.();
           }}
         >
-          <MaterialCommunityIcons name="message-text" size={20} color={colors.primary} />
+          <MaterialCommunityIcons
+            name="message-text"
+            size={20}
+            color={colors.primary}
+          />
         </Pressable>
       </View>
 
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
           <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
             <Text style={styles.sheetTitle}>SWITCH SHOP</Text>
@@ -143,27 +218,119 @@ export function PosHeader({
                   }}
                   android_ripple={{ color: "#00000010" }}
                 >
-                  <View style={[styles.avatar, active && { backgroundColor: colors.primary }]}>
-                    <Text style={[styles.avatarText, active && { color: colors.white }]}>{s.initials}</Text>
+                  <View
+                    style={[
+                      styles.avatar,
+                      active && { backgroundColor: colors.primary },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.avatarText,
+                        active && { color: colors.white },
+                      ]}
+                    >
+                      {s.initials}
+                    </Text>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.rowName, active && { color: colors.primary, fontWeight: "700" }]}>
+                    <Text
+                      style={[
+                        styles.rowName,
+                        active && { color: colors.primary, fontWeight: "700" },
+                      ]}
+                    >
                       {s.name}
                     </Text>
-                    {s.reference ? <Text style={styles.rowRef}>{s.reference}</Text> : null}
+                    {s.reference ? (
+                      <Text style={styles.rowRef}>{s.reference}</Text>
+                    ) : null}
                   </View>
-                  {active && <Ionicons name="checkmark-circle" size={22} color={colors.primary} />}
+                  {active && (
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={22}
+                      color={colors.primary}
+                    />
+                  )}
                 </Pressable>
               );
             })}
             <View style={styles.sheetDivider} />
-            <Pressable style={styles.sheetAction} onPress={feedbackTap} android_ripple={{ color: "#00000010" }}>
-              <Ionicons name="add-circle-outline" size={22} color={colors.primary} />
+            <Pressable
+              style={styles.sheetAction}
+              onPress={() => {
+                feedbackTap();
+                setOpen(false);
+                setCreateOpen(true);
+              }}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <Ionicons
+                name="add-circle-outline"
+                size={22}
+                color={colors.primary}
+              />
               <Text style={styles.sheetActionText}>Create Shop</Text>
             </Pressable>
-            <Pressable style={styles.sheetAction} onPress={feedbackTap} android_ripple={{ color: "#00000010" }}>
-              <MaterialCommunityIcons name="store-cog-outline" size={22} color={colors.primary} />
+            <Pressable
+              style={styles.sheetAction}
+              onPress={feedbackTap}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <MaterialCommunityIcons
+                name="store-cog-outline"
+                size={22}
+                color={colors.primary}
+              />
               <Text style={styles.sheetActionText}>Edit Business</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={createOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCreateOpen(false)}
+      >
+        <Pressable style={styles.backdrop} onPress={() => setCreateOpen(false)}>
+          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.sheetTitle}>CREATE SHOP</Text>
+            <View style={styles.formRow}>
+              <Text style={styles.formLabel}>Shop name</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Enter shop name"
+                placeholderTextColor={colors.hint}
+                value={shopName}
+                onChangeText={(text) => {
+                  setShopName(text);
+                  setError(null);
+                }}
+                returnKeyType="done"
+              />
+            </View>
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            <Pressable
+              style={[styles.sheetAction, styles.createButton]}
+              onPress={createOrganization}
+              disabled={busy}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <Text style={[styles.sheetActionText, styles.createButtonText]}>
+                {busy ? "Creating..." : "Create Shop"}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={styles.sheetAction}
+              onPress={() => setCreateOpen(false)}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <Text style={[styles.sheetActionText, { color: colors.grey700 }]}>
+                Cancel
+              </Text>
             </Pressable>
           </Pressable>
         </Pressable>
@@ -207,7 +374,11 @@ export function PosSearchBar({
           onScan?.();
         }}
       >
-        <MaterialCommunityIcons name="barcode-scan" size={26} color={colors.white} />
+        <MaterialCommunityIcons
+          name="barcode-scan"
+          size={26}
+          color={colors.white}
+        />
       </Pressable>
     </View>
   );
@@ -225,8 +396,18 @@ const styles = StyleSheet.create({
   },
   hamburger: { paddingRight: 4 },
   title: { flex: 1, color: colors.white, fontSize: 19, fontWeight: "600" },
-  storeSelector: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
-  storeName: { color: colors.white, fontSize: 19, fontWeight: "600", flexShrink: 1 },
+  storeSelector: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  storeName: {
+    color: colors.white,
+    fontSize: 19,
+    fontWeight: "600",
+    flexShrink: 1,
+  },
   iconBtn: { paddingHorizontal: 2 },
   chatBtn: {
     width: 34,
@@ -265,10 +446,33 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
-  backdrop: { flex: 1, backgroundColor: "#00000066", justifyContent: "flex-start", paddingTop: 70, paddingHorizontal: 12 },
-  sheet: { backgroundColor: colors.white, borderRadius: 6, paddingVertical: 8, elevation: 8 },
-  sheetTitle: { fontSize: 12, fontWeight: "800", color: colors.grey600, paddingHorizontal: 16, paddingVertical: 8 },
-  storeRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  backdrop: {
+    flex: 1,
+    backgroundColor: "#00000066",
+    justifyContent: "flex-start",
+    paddingTop: 70,
+    paddingHorizontal: 12,
+  },
+  sheet: {
+    backgroundColor: colors.white,
+    borderRadius: 6,
+    paddingVertical: 8,
+    elevation: 8,
+  },
+  sheetTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: colors.grey600,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  storeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
   avatar: {
     width: 40,
     height: 40,
@@ -280,8 +484,51 @@ const styles = StyleSheet.create({
   avatarText: { fontSize: 15, fontWeight: "800", color: colors.grey700 },
   rowName: { fontSize: 16, color: colors.grey800, fontWeight: "500" },
   rowRef: { fontSize: 12, color: colors.grey500, marginTop: 2 },
-  sheetDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300, marginVertical: 6 },
-  sheetAction: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 13 },
+  sheetDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.grey300,
+    marginVertical: 6,
+  },
+  sheetAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+  },
   sheetActionText: { fontSize: 15, color: colors.primary, fontWeight: "600" },
+  formRow: { paddingHorizontal: 16, paddingBottom: 10 },
+  formLabel: {
+    fontSize: 13,
+    color: colors.grey700,
+    fontWeight: "700",
+    marginBottom: 6,
+  },
+  input: {
+    backgroundColor: colors.grey100,
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: colors.grey800,
+    borderWidth: 1,
+    borderColor: colors.grey300,
+  },
+  multilineInput: {
+    minHeight: 88,
+    textAlignVertical: "top",
+  },
+  createButton: {
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    borderRadius: 4,
+    marginHorizontal: 16,
+    marginTop: 4,
+  },
+  createButtonText: { color: colors.white, flex: 1, textAlign: "center" },
+  errorText: {
+    color: colors.red500,
+    fontSize: 13,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+  },
 });
-

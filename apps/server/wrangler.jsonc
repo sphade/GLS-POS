@@ -5,28 +5,28 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    "BETTER_AUTH_URL": "https://gls-pos-server.sphade012.workers.dev",
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "BETTER_AUTH_URL": "https://gls-pos-server.nwabuisichike70.workers.dev",
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "gls-pos-control",
-      "database_id": "a074366b-c2cb-4e54-bd30-be752a9195c8",
-      "migrations_dir": "migrations"
-    }
+      "database_id": "02b00f34-e9fb-4ff2-9d8f-83edbbadac84",
+      "migrations_dir": "migrations",
+    },
   ],
   "durable_objects": {
-    "bindings": [{ "name": "STORE", "class_name": "StoreDurableObject" }]
+    "bindings": [{ "name": "STORE", "class_name": "StoreDurableObject" }],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["StoreDurableObject"]
-    }
+      "new_sqlite_classes": ["StoreDurableObject"],
+    },
   ],
   // Allow importing Drizzle's generated .sql migrations as text modules
   // (used by the Store Durable Object's migrator).
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  "dev": { "port": 8787 }
+  "dev": { "port": 8787 },
 }

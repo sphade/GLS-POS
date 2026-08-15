@@ -6,6 +6,7 @@ import { colors, formatMoney } from "@/constants/theme";
 import { SwipeTabs } from "@/components/SwipeTabs";
 import { EntityListScreen, EntityRow } from "@/components/EntityListScreen";
 import { useCatalog } from "@/lib/catalog";
+import { usePermission } from "@/lib/permissions";
 import { feedbackTap } from "@/lib/feedback";
 
 const TABS = ["ITEMS", "CATEGORIES", "MODIFIERS", "INGREDIENTS"];
@@ -17,11 +18,16 @@ const TABS = ["ITEMS", "CATEGORIES", "MODIFIERS", "INGREDIENTS"];
 export default function InventoryScreen() {
   const router = useRouter();
   const { products, categories, modifiers, ingredients } = useCatalog();
+  const { canCreate, canUpdate, canDelete } = usePermission();
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       <View style={styles.toolbar}>
-        <Pressable onPress={() => router.back()} style={styles.toolbarBtn} hitSlop={8}>
+        <Pressable
+          onPress={() => router.back()}
+          style={styles.toolbarBtn}
+          hitSlop={8}
+        >
           <Ionicons name="arrow-back" size={24} color={colors.primary} />
         </Pressable>
         <Text style={styles.toolbarTitle}>INVENTORY MANAGEMENT</Text>
@@ -40,17 +46,31 @@ export default function InventoryScreen() {
                 keyExtractor={(p) => p.id}
                 searchOf={(p) => p.name}
                 emptyText="No items yet"
-                addLabel="New Item"
-                onAdd={() => router.push("/item-editor")}
+                addLabel={canCreate("inventoryItems") ? "New Item" : undefined}
+                onAdd={
+                  canCreate("inventoryItems")
+                    ? () => router.push("/item-editor")
+                    : undefined
+                }
                 renderRow={(p) => (
                   <EntityRow
                     initial={p.name.charAt(0).toUpperCase()}
                     color={p.categoryColor}
                     title={p.name}
                     subtitle={`${formatMoney(p.price, p.currency)}${
-                      p.stockQuantity !== null ? ` · stock ${p.stockQuantity}` : " · no stock tracking"
+                      p.stockQuantity !== null
+                        ? ` · stock ${p.stockQuantity}`
+                        : " · no stock tracking"
                     }`}
-                    onPress={() => router.push({ pathname: "/item-editor", params: { id: p.id } })}
+                    onPress={
+                      canUpdate("inventoryItems")
+                        ? () =>
+                            router.push({
+                              pathname: "/item-editor",
+                              params: { id: p.id },
+                            })
+                        : undefined
+                    }
                   />
                 )}
               />
@@ -65,15 +85,24 @@ export default function InventoryScreen() {
                 keyExtractor={(c) => c.id}
                 searchOf={(c) => c.name}
                 emptyText="No categories yet"
-                addLabel="New Category"
-                onAdd={() => router.push("/category-editor")}
+                addLabel={canCreate("categories") ? "New Category" : undefined}
+                onAdd={
+                  canCreate("categories")
+                    ? () => router.push("/category-editor")
+                    : undefined
+                }
                 renderRow={(c) => (
                   <EntityRow
                     initial={c.name.charAt(0).toUpperCase()}
                     color={c.color}
                     title={c.name}
                     subtitle={`${products.filter((p) => p.categoryId === c.id).length} item(s)`}
-                    onPress={() => router.push({ pathname: "/category-editor", params: { id: c.id } })}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/category-editor",
+                        params: { id: c.id },
+                      })
+                    }
                   />
                 )}
               />
@@ -98,7 +127,12 @@ export default function InventoryScreen() {
                     subtitle={`${m.options.length} option(s) · ${m.required ? "Required" : "Optional"} · ${
                       m.multiSelect ? "Multi-select" : "Single-select"
                     }`}
-                    onPress={() => router.push({ pathname: "/modifier-editor", params: { id: m.id } })}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/modifier-editor",
+                        params: { id: m.id },
+                      })
+                    }
                   />
                 )}
               />
@@ -129,7 +163,12 @@ export default function InventoryScreen() {
                         </View>
                       ) : undefined
                     }
-                    onPress={() => router.push({ pathname: "/ingredient-editor", params: { id: g.id } })}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/ingredient-editor",
+                        params: { id: g.id },
+                      })
+                    }
                   />
                 );
               }}
@@ -153,7 +192,18 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   toolbarBtn: { width: 44, alignItems: "center" },
-  toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
-  lowPill: { backgroundColor: colors.red500, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
+  toolbarTitle: {
+    flex: 1,
+    fontSize: 17,
+    fontWeight: "700",
+    color: colors.primary,
+    letterSpacing: 0.5,
+  },
+  lowPill: {
+    backgroundColor: colors.red500,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
   lowPillText: { color: colors.white, fontSize: 10, fontWeight: "800" },
 });

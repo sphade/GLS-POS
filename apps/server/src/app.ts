@@ -8,7 +8,11 @@ import { withAuth, requireAuth } from "./middleware/auth.js";
 import { withStore } from "./middleware/store.js";
 import { stores } from "./modules/stores/stores.routes.js";
 import { sync } from "./modules/sync/sync.routes.js";
-
+import { customAuth } from "./modules/auth/auth.routes.js";
+import { organizations } from "./modules/organizations/organizations.routes.js";
+import { admin } from "./modules/admin/admin.routes.js";
+import { users } from "./modules/users/users.routes.js";
+import { createAuth } from "./auth/auth.js";
 /**
  * Build the Hono application. New feature areas are added by creating a module
  * under `src/modules/<feature>` and mounting it here.
@@ -33,14 +37,30 @@ export function createApp() {
   app.get("/", (c) => c.json({ ok: true, service: "gls-pos-server" }));
   app.get("/health", (c) => c.json({ ok: true, status: "healthy" }));
 
+  app.all("/api/auth/*", (c) => {
+    console.log("triggered auth handler");
+    let auth = createAuth(c.env);
+    return auth.handler(c.req.raw);
+  });
+
   // Resolve the per-request auth instance + session for every route.
   app.use("*", withAuth);
 
   // better-auth owns all sign-up/in/out and session endpoints.
-  app.on(["GET", "POST"], "/api/auth/*", (c) => c.get("auth").handler(c.req.raw));
 
   const api = app.basePath("/api");
   api.get("/me", requireAuth, (c) => ok(c, { user: c.get("user") }));
+
+  // Custom auth wrappers for sign-up and sign-in.
+
+  // Better Auth organization wrappers.
+  api.route("/organizations", organizations);
+
+  // Admin routes (auth-protected + admin-only).
+  api.route("/admin", admin);
+
+  // User routes (auth-protected, users manage their own profile).
+  api.route("/users", users);
 
   // Store registry & membership (control plane, D1).
   api.use("/stores/*", requireAuth);

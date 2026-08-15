@@ -26,32 +26,91 @@ type Card = {
  */
 export default function MoreScreen() {
   const router = useRouter();
-  const { products } = useCatalog();
+  const { products, staff } = useCatalog();
 
-  const lowStock = products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length;
-  const stockCost = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * Math.round(i.price * 0.6), 0);
-  const stockSell = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * i.price, 0);
+  const lowStock = products.filter(
+    (i) => i.stockQuantity !== null && i.stockQuantity <= 3,
+  ).length;
+  const stockCost = products.reduce(
+    (s, i) => s + (i.stockQuantity ?? 0) * Math.round(i.price * 0.6),
+    0,
+  );
+  const stockSell = products.reduce(
+    (s, i) => s + (i.stockQuantity ?? 0) * i.price,
+    0,
+  );
 
   const cards: Card[] = [
-    { key: "attendance", value: "Attendance", title: "Attendance Management", isNew: true },
+    {
+      key: "attendance",
+      value: "Attendance",
+      title: "Attendance Management",
+      isNew: true,
+    },
     { key: "payroll", value: "Manage Payroll", title: "Payments", isNew: true },
     { key: "storefront", value: "0", title: "Shopfront" },
-    { key: "customers", value: "0", title: "All Customers", route: "/customers" },
-    { key: "due", value: "0", title: "Due Customers", valueColor: colors.green },
-    { key: "expense", value: formatMoney(0, CURRENCY), title: "Expense - Income\n(This Week)", route: "/expense-categories" },
-    { key: "lowStocks", value: String(lowStock), title: "Low Stocks", valueColor: colors.red500 },
-    { key: "staff", value: "0", title: "Staff and Partners", route: "/staff" },
-    { key: "items", value: String(products.length), title: "Items and SubItems", route: "/inventory" },
-    { key: "costPrice", value: formatMoney(stockCost, CURRENCY), title: "Stock Value Cost Price" },
-    { key: "sellingPrice", value: formatMoney(stockSell, CURRENCY), title: "Stock Value Selling Price" },
-    { key: "settings", value: "Settings", title: "Business & Preferences", route: "/settings" },
+    {
+      key: "customers",
+      value: "0",
+      title: "All Customers",
+      route: "/customers",
+    },
+    {
+      key: "due",
+      value: "0",
+      title: "Due Customers",
+      valueColor: colors.green,
+    },
+    {
+      key: "expense",
+      value: formatMoney(0, CURRENCY),
+      title: "Expense - Income\n(This Week)",
+      route: "/expense-categories",
+    },
+    {
+      key: "lowStocks",
+      value: String(lowStock),
+      title: "Low Stocks",
+      valueColor: colors.red500,
+    },
+    {
+      key: "staff",
+      value: String(staff.length),
+      title: "Staff and Partners",
+      route: "/staff",
+    },
+    {
+      key: "items",
+      value: String(products.length),
+      title: "Items and SubItems",
+      route: "/inventory",
+    },
+    {
+      key: "costPrice",
+      value: formatMoney(stockCost, CURRENCY),
+      title: "Stock Value Cost Price",
+    },
+    {
+      key: "sellingPrice",
+      value: formatMoney(stockSell, CURRENCY),
+      title: "Stock Value Selling Price",
+    },
+    {
+      key: "settings",
+      value: "Settings",
+      title: "Business & Preferences",
+      route: "/settings",
+    },
   ];
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       <PosHeader />
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
         <View style={styles.grid}>
           {cards.map((c) => (
             <Pressable
@@ -69,7 +128,10 @@ export default function MoreScreen() {
                 </View>
               )}
               <Text
-                style={[styles.value, c.valueColor ? { color: c.valueColor } : null]}
+                style={[
+                  styles.value,
+                  c.valueColor ? { color: c.valueColor } : null,
+                ]}
                 numberOfLines={1}
                 adjustsFontSizeToFit
                 minimumFontScale={0.52}
@@ -92,7 +154,12 @@ const styles = StyleSheet.create({
 
   scroll: { padding: 8, paddingBottom: 20 },
 
-  grid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 8 },
+  grid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    rowGap: 8,
+  },
   card: {
     width: "49%",
     backgroundColor: colors.white,
@@ -138,6 +205,3 @@ const styles = StyleSheet.create({
   },
   newBadgeText: { color: colors.white, fontSize: 12, fontWeight: "600" },
 });
-
-
-

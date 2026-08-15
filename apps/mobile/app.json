@@ -6,13 +6,7 @@
     "orientation": "default",
     "scheme": "glspos",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "icon": "./assets/images/gls-logo.png",
-    "splash": {
-      "image": "./assets/images/gls-logo.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#FFFFFF"
-    },
     "runtimeVersion": {
       "policy": "appVersion"
     },
@@ -91,7 +85,18 @@
           ],
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to receipt printers and card readers over Bluetooth."
         }
-      ]
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/gls-logo.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#FFFFFF"
+        }
+      ],
+      "expo-image",
+      "expo-sharing",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
@@ -101,7 +106,7 @@
         "origin": false
       },
       "eas": {
-        "projectId": "3fcafcaa-5de5-4638-ae28-c71bcfbb6142"
+        "projectId": "7ca5c5af-bd29-4b2e-984d-8526bc0f5476"
       }
     }
   }

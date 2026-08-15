@@ -1,9 +1,10 @@
 import { betterAuth } from "better-auth";
 import { expo } from "@better-auth/expo";
+import { organization, admin } from "better-auth/plugins";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { createDb, schema } from "../db/index.js";
 import type { Env } from "../env.js";
-
+import { ac, owner, cashier, manager } from "../lib/permissions";
 /**
  * Build a better-auth instance for the current request. On Workers the D1
  * binding only exists per-request (inside `fetch`), so auth must be created
@@ -29,7 +30,18 @@ export function createAuth(env: Env) {
       "glspos://*",
       ...(isDev ? ["exp://", "exp://**"] : []),
     ],
-    plugins: [expo()],
+    plugins: [
+      expo(),
+      organization({
+        ac,
+        roles: {
+          manager,
+          cashier,
+          owner,
+        },
+      }),
+      admin(),
+    ],
   });
 }
 
