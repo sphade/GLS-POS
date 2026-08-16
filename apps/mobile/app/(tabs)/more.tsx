@@ -5,6 +5,7 @@ import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
+import { useWebOrders } from "@/lib/web-orders";
 import { feedbackTap } from "@/lib/feedback";
 import type { Permission } from "@gls-pos/types";
 
@@ -32,12 +33,21 @@ export default function MoreScreen() {
   const router = useRouter();
   const { products } = useCatalog();
   const { can } = useAuth();
+  const { pendingCount } = useWebOrders();
 
   const lowStock = products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length;
   const stockCost = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * Math.round(i.price * 0.6), 0);
   const stockSell = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * i.price, 0);
 
   const allCards: Card[] = [
+    {
+      key: "vip",
+      value: String(pendingCount),
+      title: "VIP Orders\n(from QR code)",
+      valueColor: pendingCount > 0 ? colors.red500 : undefined,
+      route: "/online-orders",
+      needs: "sale:create",
+    },
     { key: "attendance", value: "Attendance", title: "Attendance Management", isNew: true, needs: "staff:manage" },
     { key: "payroll", value: "Manage Payroll", title: "Payments", isNew: true, needs: "staff:manage" },
     { key: "storefront", value: "0", title: "Shopfront", needs: "settings:manage" },

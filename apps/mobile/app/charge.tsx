@@ -6,26 +6,36 @@ import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
-import { paymentModes } from "@/lib/mock-items";
+import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 import { feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
 
-const modeIcon = (m: string) => {
-  if (m.includes("Card")) return "credit-card-outline" as const;
-  if (m.includes("UPI")) return "cellphone" as const;
-  if (m === "Credit") return "account-clock-outline" as const;
-  return "cash" as const;
-};
+/**
+ * Payment methods. Cash is settled on the spot; Card and Transfer are settled
+ * *after* the customer gets the receipt (they pay against it), so those create
+ * an unpaid receipt that's marked paid once the money lands.
+ */
+const MODES: { key: string; label: string; icon: React.ComponentProps<typeof MaterialCommunityIcons>["name"]; settlesNow: boolean }[] = [
+  { key: "Cash", label: "Cash", icon: "cash", settlesNow: true },
+  { key: "Card", label: "Card", icon: "credit-card-outline", settlesNow: false },
+  { key: "Transfer", label: "Transfer", icon: "bank-transfer", settlesNow: false },
+  { key: "Credit", label: "Credit\n(pay later)", icon: "account-clock-outline", settlesNow: false },
+];
 
 export default function ChargeScreen() {
   const router = useRouter();
   const { total, entries, completeSale } = useCart();
   const { recordSale } = useCatalog();
+  const { store } = useStore();
+  const { user } = useAuth();
   const [mode, setMode] = useState<string | null>(null);
   const [phone, setPhone] = useState("");
   const [name, setName] = useState("");
   const [showMore, setShowMore] = useState(false);
   const [email, setEmail] = useState("");
   const [address, setAddress] = useState("");
+
+  const selectedMode = MODES.find((m) => m.key === mode);
 
   const onCharge = () => {
     if (!mode) return;
@@ -36,7 +46,15 @@ export default function ChargeScreen() {
     feedbackSaleComplete();
     // Snapshot cart lines before completeSale clears them, then decrement stock.
     const lines = Object.values(entries).map((e) => ({ productId: e.item.id, qty: e.qty }));
-    const receipt = completeSale({ mode, customerName: name.trim() || null });
+    const receipt = completeSale({
+      mode,
+      customerName: name.trim() || null,
+      // Card/transfer/credit: the customer pays after getting the receipt.
+      status: "unpaid",
+      storeName: store.name,
+      storeReference: store.reference,
+      servedBy: user?.name ?? "Staff",
+    });
     recordSale(lines, receipt.id);
     router.replace(`/sale-success?id=${receipt.id}` as Href);
   };
@@ -55,7 +73,7 @@ export default function ChargeScreen() {
         <Text style={styles.sectionTitle}>{strings.customerDetailsOptional.toUpperCase()}</Text>
         <View style={styles.card}>
           <View style={styles.phoneRow}>
-            <TextInput style={styles.codeInput} value="+1" editable={false} />
+            <TextInput style={styles.codeInput} value="+234" editable={false} />
             <TextInput
               style={styles.input}
               placeholder="Mobile Number"
@@ -108,35 +126,44 @@ export default function ChargeScreen() {
         <Text style={styles.sectionTitle}>{strings.selectPaymentMode}</Text>
         <View style={styles.card}>
           <View style={styles.modeGrid}>
-            {paymentModes.map((m) => (
+            {MODES.map((m) => (
               <Pressable
-                key={m}
-                style={[styles.modeTile, mode === m && styles.modeTileActive]}
+                key={m.key}
+                style={[styles.modeTile, mode === m.key && styles.modeTileActive]}
                 onPress={() => {
                   feedbackTap();
-                  setMode(m);
+                  setMode(m.key);
                 }}
               >
                 <MaterialCommunityIcons
-                  name={modeIcon(m)}
+                  name={m.icon}
                   size={30}
-                  color={mode === m ? colors.white : colors.grey700}
+                  color={mode === m.key ? colors.white : colors.grey700}
                 />
-                <Text style={[styles.modeText, mode === m && { color: colors.white }]}>{m}</Text>
+                <Text style={[styles.modeText, mode === m.key && { color: colors.white }]}>
+                  {m.label}
+                </Text>
               </Pressable>
             ))}
-            <Pressable style={styles.modeTile} onPress={feedbackTap}>
-              <Ionicons name="add" size={30} color={colors.grey700} />
-              <Text style={styles.modeText}>Add New</Text>
-            </Pressable>
           </View>
+
+          {/* Make the pay-after-receipt behaviour explicit before charging. */}
+          {selectedMode && !selectedMode.settlesNow && (
+            <View style={styles.unpaidNote}>
+              <MaterialCommunityIcons name="information-outline" size={18} color={colors.primary} />
+              <Text style={styles.unpaidNoteText}>
+                Receipt prints as NOT PAID. Give it to the customer, then mark it paid once the{" "}
+                {selectedMode.key.toLowerCase()} comes through.
+              </Text>
+            </View>
+          )}
         </View>
       </ScrollView>
 
       {mode && (
         <Pressable style={styles.charge} onPress={onCharge}>
           <Text style={styles.chargeText}>
-            {strings.charge} {formatMoney(total)}
+            {selectedMode?.settlesNow ? strings.charge : "PRINT RECEIPT"} {formatMoney(total, "NGN")}
           </Text>
         </Pressable>
       )}
@@ -195,6 +222,15 @@ const styles = StyleSheet.create({
   },
   modeTileActive: { backgroundColor: colors.primary },
   modeText: { fontSize: 13, fontWeight: "700", color: colors.grey700, textAlign: "center" },
+  unpaidNote: {
+    flexDirection: "row",
+    gap: 8,
+    backgroundColor: colors.blue50,
+    borderRadius: 4,
+    padding: 10,
+    marginTop: 10,
+  },
+  unpaidNoteText: { flex: 1, fontSize: 12, color: colors.primary, lineHeight: 17 },
   charge: {
     margin: 10,
     height: 52,

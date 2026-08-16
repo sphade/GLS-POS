@@ -1,6 +1,5 @@
-﻿import { useMemo, useState } from "react";
+﻿import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Image,
   LayoutAnimation,
   Platform,
   Pressable,
@@ -20,6 +19,8 @@ import { PosHeader, PosSearchBar } from "@/components/PosHeader";
 import { useCart, type Item } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
+import { ItemImage } from "@/components/ItemImage";
+import { warmImageCache } from "@/lib/image-store";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 const NEW_ITEM_ID = "__new_item__";
@@ -147,6 +148,17 @@ export default function ItemsScreen() {
     return grouped;
   }, [query, products, categories, cols, activeCat, collapsed, canEditCatalog]);
 
+  /**
+   * Materialise image files in the background once the screen has painted, so
+   * scrolling never blocks on a file write. Runs after the first frame.
+   */
+  useEffect(() => {
+    const ids = products.filter((p) => p.hasImage).map((p) => p.id);
+    if (ids.length === 0) return;
+    const t = setTimeout(() => void warmImageCache(ids), 400);
+    return () => clearTimeout(t);
+  }, [products]);
+
   /** Add every item in a group to the cart in one tap. */
   const addSection = (section: ItemSection) => {
     const items = section.data.flatMap((r) => r.items).filter((i) => i.stockQuantity !== 0);
@@ -236,6 +248,15 @@ export default function ItemsScreen() {
         keyExtractor={(row) => row.key}
         stickySectionHeadersEnabled={false}
         contentContainerStyle={styles.gridContent}
+        // Windowing: render a screenful first, then fill in while scrolling.
+        // NOTE: removeClippedSubviews is deliberately OFF. On Android it
+        // detaches nested subviews and blanks out row content (both the image
+        // and the name/price) in a grid built from nested flex rows.
+        removeClippedSubviews={false}
+        initialNumToRender={8}
+        maxToRenderPerBatch={8}
+        updateCellsBatchingPeriod={50}
+        windowSize={11}
         renderSectionHeader={({ section }) =>
           section.title ? (
             <View style={styles.sectionHeader}>
@@ -371,28 +392,25 @@ function Avatar({ item, size }: { item: Item; size: number }) {
   const threshold = item.lowStockAt ?? 3;
   const low = item.stockQuantity !== null && item.stockQuantity > 0 && item.stockQuantity <= threshold;
   return (
-    <View
-      style={[
-        styles.avatar,
-        { width: size, height: size, borderRadius: size / 2, backgroundColor: item.categoryColor ?? colors.red500 },
-      ]}
-    >
-      {item.image || item.imageUrl ? (
-        <Image
-          source={{ uri: item.image ?? item.imageUrl }}
-          style={{ width: size, height: size, borderRadius: size / 2 }}
-        />
-      ) : (
-        <Text style={[styles.avatarInitial, { fontSize: size * 0.4 }]}>
-          {item.name?.charAt(0).toUpperCase()}
-        </Text>
-      )}
+    <View style={{ width: size, height: size }}>
+      <ItemImage
+        productId={item.id}
+        name={item.name}
+        size={size}
+        color={item.categoryColor ?? colors.red500}
+        hasImage={!!item.hasImage}
+        remoteUrl={item.imageUrl}
+      />
       {low && <View style={styles.lowDot} />}
     </View>
   );
 }
 
-function ProductCard({
+/**
+ * Memoised so adding one item to the cart doesn't re-render (and re-decode the
+ * image of) every other tile in the grid.
+ */
+const ProductCard = memo(function ProductCard({
   item,
   width,
   qty,
@@ -443,9 +461,9 @@ function ProductCard({
       )}
     </Pressable>
   );
-}
+});
 
-function ProductRow({
+const ProductRow = memo(function ProductRow({
   item,
   qty,
   onPress,
@@ -487,7 +505,7 @@ function ProductRow({
       {out && <Text style={styles.rowOosText}>Out of stock</Text>}
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },

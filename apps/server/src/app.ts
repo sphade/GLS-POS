@@ -4,12 +4,14 @@ import { logger } from "hono/logger";
 import { ROLE_PERMISSIONS } from "@gls-pos/types";
 import type { AppEnv } from "./context.js";
 import { ok } from "./lib/response.js";
+import { HttpError } from "./lib/http-error.js";
 import { onError, notFound } from "./middleware/error-handler.js";
 import { withAuth, requireAuth } from "./middleware/auth.js";
 import { withStore } from "./middleware/store.js";
 import { stores } from "./modules/stores/stores.routes.js";
 import { members } from "./modules/stores/members.routes.js";
 import { sync } from "./modules/sync/sync.routes.js";
+import { vip } from "./modules/vip/vip.routes.js";
 
 /**
  * Build the Hono application. New feature areas are added by creating a module
@@ -35,6 +37,11 @@ export function createApp() {
   app.get("/", (c) => c.json({ ok: true, service: "gls-pos-server" }));
   app.get("/health", (c) => c.json({ ok: true, status: "healthy" }));
 
+  // VIP guest ordering is intentionally PUBLIC (guests scan a QR at the table),
+  // so it is mounted before the auth middleware. Its own module documents the
+  // narrow read/write surface that makes this safe.
+  app.route("/vip", vip);
+
   // Resolve the per-request auth instance + session for every route.
   app.use("*", withAuth);
 
@@ -59,6 +66,14 @@ export function createApp() {
   api.get("/session/store", requireAuth, withStore, (c) => {
     const role = c.get("role");
     return ok(c, { storeId: c.get("storeId"), role, permissions: ROLE_PERMISSIONS[role] });
+  });
+
+  // The VIP link to encode into each table's QR code. Staff-only.
+  api.get("/vip-link", requireAuth, withStore, (c) => {
+    const tableId = c.req.query("tableId");
+    if (!tableId) throw HttpError.badRequest("tableId is required");
+    const base = c.env.BETTER_AUTH_URL.replace(/\/$/, "");
+    return ok(c, { url: `${base}/vip/${c.get("storeId")}/${tableId}` });
   });
 
   // Offline-first sync against the caller's store Durable Object.

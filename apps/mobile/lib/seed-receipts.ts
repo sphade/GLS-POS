@@ -26,6 +26,8 @@ function receiptAt(
     number: `#${1000 + n}`,
     customerName,
     mode,
+    // Demo history is settled, except one open card sale to show the unpaid flow.
+    status: n === 8 ? "unpaid" : "paid",
     itemCount,
     total,
     currency: "NGN",
@@ -33,6 +35,9 @@ function receiptAt(
     synced: n % 7 !== 0, // a couple left unsynced to show the red banner
     lines,
     cashReceived: mode === "Cash" ? total + 50000 : undefined,
+    storeName: "GLS Kitchen & Bakery",
+    storeReference: "Poka, Epe · +234 810 561 5458",
+    servedBy: n % 3 === 0 ? "Tunde A." : "Owner",
   };
 }
 

@@ -154,6 +154,8 @@ export const SYNC_COLLECTIONS = [
   "staff",
   "receipts",
   "stock_movements",
+  "product_images",
+  "web_orders",
 ] as const;
 
 export type SyncCollection = (typeof SYNC_COLLECTIONS)[number];
@@ -192,8 +194,10 @@ export interface SyncPullResponse {
 // Store registry (control plane)
 // ---------------------------------------------------------------------------
 
-import type { StoreRole } from "./permissions.js";
-export * from "./permissions.js";
+// Extensionless so both Metro (mobile) and the Worker bundler resolve it.
+import type { StoreRole } from "./permissions";
+export * from "./permissions";
+export * from "./web-order";
 
 /** A store the signed-in user belongs to, with their role in it. */
 export interface StoreMembership {

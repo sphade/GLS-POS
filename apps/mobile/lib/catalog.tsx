@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import type { Item } from "./cart";
 import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
 import { ITEM_IMAGES } from "./item-images";
+import { loadImageIds, saveImage } from "./image-store";
 import { loadAll, put as dbPut, metaGet, metaSet, resetCollection, seedOnce, softDelete } from "./db";
 
 /** Colour palette auto-assigned to new categories/items. */
@@ -103,10 +104,21 @@ const DEFAULT_STAFF: StaffMember[] = [
  * re-seeds. The GLS menu seed wipes the old placeholder catalog + categories
  * first so switching menus never leaves duplicates behind.
  */
-seedOnce("catalog_seeded_gls_v2", () => {
-  (["products", "categories", "modifiers", "ingredients", "tables", "customers", "staff"] as const).forEach(
-    resetCollection,
-  );
+seedOnce("catalog_seeded_gls_v3", () => {
+  // v3 moved photos out of the product document into `product_images`, so the
+  // old rows (which carried base64 inline) are cleared out entirely.
+  (
+    [
+      "products",
+      "categories",
+      "modifiers",
+      "ingredients",
+      "tables",
+      "customers",
+      "staff",
+      "product_images",
+    ] as const
+  ).forEach(resetCollection);
   DEFAULT_CATEGORIES.forEach((c) => dbPut("categories", c, false));
   DEFAULT_MODIFIERS.forEach((m) => dbPut("modifiers", m, false));
   DEFAULT_INGREDIENTS.forEach((i) => dbPut("ingredients", i, false));
@@ -154,6 +166,13 @@ type CatalogState = {
   ) => void;
 };
 
+/**
+ * Products whose image we've already tried to fetch this session. Stops a
+ * broken URL from being retried in a tight loop, while still allowing a fresh
+ * attempt next launch (so a temporary network failure heals itself).
+ */
+const attemptedImages = new Set<string>();
+
 const CatalogContext = createContext<CatalogState | null>(null);
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
@@ -166,43 +185,72 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [customers, setCustomers] = useState<Customer[]>(() => loadAll<Customer>("customers"));
   const [staff, setStaff] = useState<StaffMember[]>(() => loadAll<StaffMember>("staff"));
 
-  // One-time image hydration: download each seeded item's photo and bake it
-  // into SQLite as a base64 data URI, so images become local + offline. Runs
-  // once (flag-guarded); silently skips failures and the app still works.
+  /**
+   * One-time image hydration for the seeded menu: download each photo and store
+   * it in the `product_images` collection.
+   *
+   * Deliberately batched — an earlier version called setProducts once per image,
+   * which re-rendered the whole grid 60 times and made the Items screen crawl.
+   * Now the DB is written per image (so progress survives a kill) but React
+   * state is updated once at the end. Runs after first paint.
+   */
   useEffect(() => {
-    if (metaGet("images_hydrated_v1")) return;
     let cancelled = false;
 
-    const toDataUri = async (url: string): Promise<string | null> => {
+    /** Fetch to raw base64 (no data-URI prefix). */
+    const toBase64 = async (url: string): Promise<{ base64: string; mime: string } | null> => {
       try {
         const res = await fetch(url);
         if (!res.ok) return null;
+        const mime = res.headers.get("content-type") ?? "image/jpeg";
         const blob = await res.blob();
-        return await new Promise<string | null>((resolve) => {
+        const dataUri = await new Promise<string | null>((resolve) => {
           const reader = new FileReader();
           reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
           reader.onerror = () => resolve(null);
           reader.readAsDataURL(blob);
         });
+        const base64 = dataUri?.split(",")[1];
+        return base64 ? { base64, mime } : null;
       } catch {
         return null;
       }
     };
 
-    (async () => {
-      const targets = loadAll<Item>("products").filter((p) => p.imageUrl && !p.image);
-      let any = false;
-      for (const p of targets) {
-        if (cancelled) return;
-        const dataUri = await toDataUri(p.imageUrl!);
-        if (!dataUri || cancelled) continue;
-        const updated = { ...p, image: dataUri };
-        dbPut("products", updated); // dirty, so it syncs when enabled
-        setProducts((prev) => prev.map((x) => (x.id === p.id ? updated : x)));
-        any = true;
-      }
-      if (!cancelled && any) metaSet("images_hydrated_v1", "1");
-      else if (!cancelled && targets.length === 0) metaSet("images_hydrated_v1", "1");
+    void (async () => {
+      // Resumable by construction: the work list is "products whose photo isn't
+      // stored yet", so an interrupted or partly-failed run simply picks up the
+      // remainder next launch. (An earlier version set a done-flag after a
+      // partial run, which permanently stranded any image that failed once.)
+      const have = loadImageIds();
+      const targets = loadAll<Item>("products").filter(
+        (p) => p.imageUrl && !have.has(p.id) && !attemptedImages.has(p.id),
+      );
+      if (targets.length === 0) return;
+
+      const done: string[] = [];
+
+      /** Download a few at a time — sequential was slow over a phone connection. */
+      const CONCURRENCY = 4;
+      let cursor = 0;
+      const worker = async () => {
+        while (!cancelled) {
+          const p = targets[cursor++];
+          if (!p) return;
+          attemptedImages.add(p.id);
+          const img = await toBase64(p.imageUrl!);
+          if (!img) continue; // retried on next launch
+          saveImage(p.id, img.base64, img.mime);
+          dbPut("products", { ...p, hasImage: true });
+          done.push(p.id);
+        }
+      };
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+      if (cancelled || done.length === 0) return;
+      // Single state update for the whole batch.
+      const flagged = new Set(done);
+      setProducts((prev) => prev.map((x) => (flagged.has(x.id) ? { ...x, hasImage: true } : x)));
     })();
 
     return () => {

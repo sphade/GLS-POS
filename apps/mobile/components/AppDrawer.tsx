@@ -1,36 +1,41 @@
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
+import type { Permission } from "@gls-pos/types";
 import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 
 type Entry = {
   label: string;
   icon: React.ComponentProps<typeof MaterialCommunityIcons>["name"];
   route?: string;
+  /** Hidden unless the signed-in role holds this permission. */
+  needs?: Permission;
 };
 
 const GROUPS: { title: string; entries: Entry[] }[] = [
   {
     title: "MANAGEMENT",
     entries: [
-      { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory" },
-      { label: "Table Management", icon: "table-furniture", route: "/tables" },
-      { label: "Customers Management", icon: "account-group-outline", route: "/customers" },
-      { label: "Staff Management", icon: "account-tie-outline", route: "/staff" },
-      { label: "Add Expense", icon: "cash-minus", route: "/expense-categories" },
-      { label: "Receipts", icon: "receipt", route: "/(tabs)/today" },
-      { label: "Activity History", icon: "history" },
+      { label: "VIP Orders (QR)", icon: "qrcode-scan", route: "/online-orders", needs: "sale:create" },
+      { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory", needs: "catalog:write" },
+      { label: "Table Management", icon: "table-furniture", route: "/tables", needs: "tables:manage" },
+      { label: "Customers Management", icon: "account-group-outline", route: "/customers", needs: "customers:manage" },
+      { label: "Staff Management", icon: "account-tie-outline", route: "/staff", needs: "staff:manage" },
+      { label: "Add Expense", icon: "cash-minus", route: "/expense-categories", needs: "expenses:manage" },
+      { label: "Receipts", icon: "receipt", route: "/(tabs)/today", needs: "reports:view" },
+      { label: "Activity History", icon: "history", needs: "reports:view" },
     ],
   },
   {
     title: "SETTINGS",
     entries: [
-      { label: "Receipt Settings", icon: "script-text-outline" },
-      { label: "Business Settings", icon: "store-cog-outline" },
-      { label: "Printer Setup", icon: "printer-outline" },
-      { label: "General settings", icon: "cog-outline", route: "/settings" },
+      { label: "Receipt Settings", icon: "script-text-outline", needs: "settings:manage" },
+      { label: "Business Settings", icon: "store-cog-outline", needs: "settings:manage" },
+      { label: "Printer Setup", icon: "printer-outline", route: "/printer-setup" },
+      { label: "General settings", icon: "cog-outline", route: "/settings", needs: "settings:manage" },
       { label: "Device Details", icon: "cellphone-cog" },
     ],
   },
@@ -40,6 +45,7 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
 export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const router = useRouter();
   const { store } = useStore();
+  const { can, signOut } = useAuth();
 
   const go = (route?: string) => {
     feedbackTap();
@@ -71,25 +77,38 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
           </View>
 
           <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
-            {GROUPS.map((g) => (
-              <View key={g.title}>
-                <Text style={styles.groupTitle}>{g.title}</Text>
-                {g.entries.map((e) => (
-                  <Pressable
-                    key={e.label}
-                    style={styles.row}
-                    onPress={() => go(e.route)}
-                    android_ripple={{ color: "#00000010" }}
-                  >
-                    <MaterialCommunityIcons name={e.icon} size={22} color={colors.primary} />
-                    <Text style={styles.rowLabel}>{e.label}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            ))}
+            {GROUPS.map((g) => {
+              // Only show what this role is allowed to reach.
+              const allowed = g.entries.filter((e) => !e.needs || can(e.needs));
+              if (allowed.length === 0) return null;
+              return (
+                <View key={g.title}>
+                  <Text style={styles.groupTitle}>{g.title}</Text>
+                  {allowed.map((e) => (
+                    <Pressable
+                      key={e.label}
+                      style={styles.row}
+                      onPress={() => go(e.route)}
+                      android_ripple={{ color: "#00000010" }}
+                    >
+                      <MaterialCommunityIcons name={e.icon} size={22} color={colors.primary} />
+                      <Text style={styles.rowLabel}>{e.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              );
+            })}
 
             <View style={styles.divider} />
-            <Pressable style={styles.row} onPress={() => go()} android_ripple={{ color: "#00000010" }}>
+            <Pressable
+              style={styles.row}
+              onPress={() => {
+                feedbackTap();
+                onClose();
+                void signOut();
+              }}
+              android_ripple={{ color: "#00000010" }}
+            >
               <MaterialCommunityIcons name="logout" size={22} color={colors.red500} />
               <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
             </Pressable>

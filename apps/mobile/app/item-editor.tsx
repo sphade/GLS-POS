@@ -1,17 +1,18 @@
-﻿import { useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { colors, currencySymbol } from "@/constants/theme";
+import { colors, formatMoney } from "@/constants/theme";
 import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, formStyles } from "@/components/form";
 import { VariantEditor, VARIANT_ICONS } from "@/components/VariantEditor";
 import { swatches, useCatalog } from "@/lib/catalog";
+import { getImageUri, removeImage, saveImage } from "@/lib/image-store";
 import { MEASURES, newVariant, type Measure, type SellBy, type Variant } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
 
-const SYM = currencySymbol("NGN");
+
 
 /**
  * Product editor, shared by the Items tab and Inventory ▸ Items.
@@ -32,7 +33,25 @@ export default function ItemEditorScreen() {
   const [measure, setMeasure] = useState<Measure>(existing?.measure ?? MEASURES[0]!);
   const [variants, setVariants] = useState<Variant[]>(existing?.variants ?? []);
 
-  const [image, setImage] = useState<string | undefined>(existing?.image);
+  /** Newly picked photo, held until save. null = user removed the existing one. */
+  const [pickedImage, setPickedImage] = useState<{ base64: string; mime: string } | null | undefined>(
+    undefined,
+  );
+  /** Preview URI for the already-stored image, if any. */
+  const [storedUri, setStoredUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (existing?.hasImage) void getImageUri(existing.id).then(setStoredUri);
+  }, [existing?.id, existing?.hasImage]);
+
+  // What to show in the circle: the fresh pick, else the stored image.
+  const previewUri =
+    pickedImage === null
+      ? undefined
+      : pickedImage
+        ? `data:${pickedImage.mime};base64,${pickedImage.base64}`
+        : (storedUri ?? undefined);
+  const hasAnyImage = !!previewUri;
 
   // Simple-mode stock control.
   const [trackStock, setTrackStock] = useState(existing ? existing.stockQuantity !== null : false);
@@ -78,8 +97,13 @@ export default function ItemEditorScreen() {
       variants: mode === "right" ? variants : undefined,
       stockQuantity: nextStock,
       lowStockAt: mode === "right" ? undefined : simpleLowAt,
-      image,
+      // Photo bytes live in `product_images`, not on the product document.
+      hasImage: pickedImage === null ? false : pickedImage ? true : existing?.hasImage,
     });
+
+    // Persist the image itself against the saved product's id.
+    if (pickedImage) saveImage(saved.id, pickedImage.base64, pickedImage.mime);
+    else if (pickedImage === null) removeImage(saved.id);
 
     // Audit trail: log the stock delta from a manual create/edit.
     if (nextStock !== null) {
@@ -118,8 +142,7 @@ export default function ItemEditorScreen() {
 
     if (!res || res.canceled || !res.assets?.[0]?.base64) return;
     const asset = res.assets[0];
-    const mime = asset.mimeType ?? "image/jpeg";
-    setImage(`data:${mime};base64,${asset.base64}`);
+    setPickedImage({ base64: asset.base64!, mime: asset.mimeType ?? "image/jpeg" });
     setTouched(true);
   };
 
@@ -128,7 +151,18 @@ export default function ItemEditorScreen() {
     Alert.alert("Item image", undefined, [
       { text: "Take photo", onPress: () => captureImage("camera") },
       { text: "Choose from library", onPress: () => captureImage("library") },
-      ...(image ? [{ text: "Remove image", style: "destructive" as const, onPress: () => { setImage(undefined); setTouched(true); } }] : []),
+      ...(hasAnyImage
+        ? [
+            {
+              text: "Remove image",
+              style: "destructive" as const,
+              onPress: () => {
+                setPickedImage(null);
+                setTouched(true);
+              },
+            },
+          ]
+        : []),
       { text: "Cancel", style: "cancel" as const },
     ]);
   };
@@ -254,12 +288,12 @@ export default function ItemEditorScreen() {
                 style={[styles.imageCircle, { backgroundColor: category?.color ?? "#EF3E36" }]}
                 onPress={onImagePress}
               >
-                {image && <Image source={{ uri: image }} style={styles.imageCirclePhoto} />}
+                {previewUri && <Image source={{ uri: previewUri }} style={styles.imageCirclePhoto} />}
                 <View style={styles.editBadge}>
-                  <Ionicons name={image ? "pencil" : "camera"} size={15} color={colors.primary} />
+                  <Ionicons name={hasAnyImage ? "pencil" : "camera"} size={15} color={colors.primary} />
                 </View>
               </Pressable>
-              <Text style={styles.changeImage}>{image ? "Change image" : "Add image"}</Text>
+              <Text style={styles.changeImage}>{hasAnyImage ? "Change image" : "Add image"}</Text>
             </View>
 
             <View style={styles.tipBanner}>
@@ -456,8 +490,8 @@ function VariantCard({
       </View>
 
       <View style={styles.variantFigures}>
-        <Figure label="Selling Price*" value={variant.price ? `${SYM}${variant.price / 100}` : `${SYM}0`} />
-        <Figure label="Cost Price" value={variant.cost ? `${SYM}${variant.cost / 100}` : "-"} />
+        <Figure label="Selling Price*" value={formatMoney(variant.price ?? 0)} />
+        <Figure label="Cost Price" value={variant.cost ? formatMoney(variant.cost) : "-"} />
         <Figure
           label={`Stock Available${measureUnit ? ` (${measureUnit})` : ""}`}
           value={variant.stock != null ? String(variant.stock) : "-"}

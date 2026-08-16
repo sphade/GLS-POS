@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import { colors } from "@/constants/theme";
 import { useAuth } from "@/lib/auth";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
@@ -58,9 +59,11 @@ export default function SignInScreen() {
       >
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
           <View style={styles.brand}>
-            <View style={styles.logo}>
-              <Ionicons name="storefront" size={34} color={colors.white} />
-            </View>
+            <Image
+              source={require("../assets/images/gls-logo-full.png")}
+              style={styles.logo}
+              contentFit="contain"
+            />
             <Text style={styles.brandName}>GLS POS</Text>
             <Text style={styles.brandSub}>
               {isUp ? "Create your owner account" : "Sign in to your store"}
@@ -165,16 +168,8 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
   body: { padding: 20, paddingTop: 40, paddingBottom: 40 },
   brand: { alignItems: "center", marginBottom: 26 },
-  logo: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.primary,
-    alignItems: "center",
-    justifyContent: "center",
-    elevation: 3,
-  },
-  brandName: { fontSize: 24, fontWeight: "800", color: colors.primary, marginTop: 12, letterSpacing: 0.5 },
+  logo: { width: 130, height: 130 },
+  brandName: { fontSize: 24, fontWeight: "800", color: colors.primary, marginTop: 8, letterSpacing: 0.5 },
   brandSub: { fontSize: 14, color: colors.grey600, marginTop: 4 },
 
   card: { backgroundColor: colors.card, borderRadius: 6, padding: 16, elevation: 1 },

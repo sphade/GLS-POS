@@ -1,16 +1,80 @@
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { colors, formatMoney, strings } from "@/constants/theme";
+import { useLocalSearchParams, useRouter, type Href } from "expo-router";
+import { colors, formatAmount, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
-import { feedbackTap } from "@/lib/feedback";
+import { useAuth } from "@/lib/auth";
+import { getSavedPrinter, printReceipt } from "@/lib/printer";
+import {
+  printViaSystem,
+  sendReceiptSms,
+  sendReceiptWhatsApp,
+  shareReceiptPdf,
+  shareReceiptText,
+} from "@/lib/receipt-share";
+import { feedbackError, feedbackTap } from "@/lib/feedback";
 
 export default function ReceiptScreen() {
   const { id, fromSale } = useLocalSearchParams<{ id: string; fromSale?: string }>();
   const router = useRouter();
-  const { receipts } = useCart();
+  const { receipts, markPaid } = useCart();
+  const { can } = useAuth();
+  const [busy, setBusy] = useState(false);
   const receipt = receipts.find((r) => r.id === id);
+
+  /** Run a share/print action, surfacing any failure instead of failing silently. */
+  const run = async (fn: () => Promise<void>) => {
+    feedbackTap();
+    try {
+      await fn();
+    } catch (e) {
+      feedbackError();
+      Alert.alert("Couldn't do that", (e as Error).message);
+    }
+  };
+
+  /**
+   * Print on the paired thermal printer. If none is set up (or it's a Classic
+   * printer we can't reach), offer the system print dialog / PDF instead.
+   */
+  const onPrint = async () => {
+    if (!receipt) return;
+    feedbackTap();
+    if (!getSavedPrinter()) {
+      Alert.alert("No printer paired", "Pair a Bluetooth printer, or use the phone's print dialog.", [
+        { text: "Printer setup", onPress: () => router.push("/printer-setup" as Href) },
+        { text: "Use phone print", onPress: () => void run(() => printViaSystem(receipt)) },
+        { text: "Cancel", style: "cancel" },
+      ]);
+      return;
+    }
+    setBusy(true);
+    try {
+      await printReceipt(receipt);
+    } catch (e) {
+      feedbackError();
+      Alert.alert("Print failed", (e as Error).message, [
+        { text: "Use phone print", onPress: () => void run(() => printViaSystem(receipt)) },
+        { text: "OK" },
+      ]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Settle an unpaid receipt once the transfer/card lands. */
+  const onMarkPaid = () => {
+    if (!receipt) return;
+    feedbackTap();
+    Alert.alert("Confirm payment", `Mark ${receipt.number} as paid?`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Card", onPress: () => markPaid(receipt.id, "Card") },
+      { text: "Transfer", onPress: () => markPaid(receipt.id, "Transfer") },
+      { text: "Cash", onPress: () => markPaid(receipt.id, "Cash") },
+    ]);
+  };
 
   if (!receipt) {
     return (
@@ -38,43 +102,62 @@ export default function ReceiptScreen() {
           <Ionicons name="arrow-back" size={24} color={colors.grey800} />
         </Pressable>
         <View style={styles.headerActions}>
-          <Pressable style={styles.actionBtn} onPress={feedbackTap}>
+          <Pressable style={styles.actionBtn} onPress={() => run(() => shareReceiptText(receipt))}>
             <Ionicons name="share-social-outline" size={22} color={colors.grey800} />
           </Pressable>
-          <Pressable style={styles.actionBtn} onPress={feedbackTap}>
+          <Pressable style={styles.actionBtn} onPress={() => run(() => sendReceiptSms(receipt))}>
             <MaterialCommunityIcons name="message-text-outline" size={22} color={colors.grey800} />
           </Pressable>
-          <Pressable style={styles.actionBtn} onPress={feedbackTap}>
+          <Pressable style={styles.actionBtn} onPress={() => run(() => sendReceiptWhatsApp(receipt))}>
             <MaterialCommunityIcons name="whatsapp" size={22} color={colors.grey800} />
           </Pressable>
-          <Pressable style={styles.actionBtn} onPress={feedbackTap}>
+          <Pressable style={styles.actionBtn} onPress={() => run(() => shareReceiptPdf(receipt))}>
             <Ionicons name="download-outline" size={22} color={colors.grey800} />
           </Pressable>
-          <Pressable style={styles.actionBtn} onPress={feedbackTap}>
-            <Ionicons name="print-outline" size={22} color={colors.grey800} />
+          <Pressable style={styles.actionBtn} onPress={onPrint} disabled={busy}>
+            {busy ? (
+              <ActivityIndicator size="small" color={colors.grey800} />
+            ) : (
+              <Ionicons name="print-outline" size={22} color={colors.grey800} />
+            )}
           </Pressable>
         </View>
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 10, paddingBottom: 24 }}>
+        {/* Unpaid receipts get the settle action; refunds need permission. */}
         <View style={styles.actionRow}>
-          <Pressable style={styles.outlineBtn} onPress={feedbackTap}>
-            <Text style={styles.outlineBtnText}>EDIT</Text>
-          </Pressable>
-          <Pressable style={[styles.outlineBtn, { borderColor: colors.red500 }]} onPress={feedbackTap}>
-            <Text style={[styles.outlineBtnText, { color: colors.red500 }]}>DELETE</Text>
-          </Pressable>
-          <Pressable style={styles.outlineBtn} onPress={feedbackTap}>
-            <Text style={styles.outlineBtnText}>RETURN</Text>
-          </Pressable>
+          {receipt.status === "unpaid" && (
+            <Pressable style={styles.paidBtn} onPress={onMarkPaid}>
+              <Ionicons name="checkmark-circle" size={16} color={colors.white} />
+              <Text style={styles.paidBtnText}>MARK AS PAID</Text>
+            </Pressable>
+          )}
+          {can("sale:refund") && (
+            <Pressable
+              style={[styles.outlineBtn, { borderColor: colors.red500 }]}
+              onPress={() =>
+                Alert.alert("Refunds", "Refunds aren't built yet — coming next.")
+              }
+            >
+              <Text style={[styles.outlineBtnText, { color: colors.red500 }]}>RETURN</Text>
+            </Pressable>
+          )}
         </View>
 
         <View style={styles.receiptCard}>
-          <Text style={styles.storeName}>GLS-POS</Text>
-          <Text style={styles.storeMeta}>Demo Business</Text>
+          <Text style={styles.storeName}>{receipt.storeName}</Text>
+          {receipt.storeReference ? <Text style={styles.storeMeta}>{receipt.storeReference}</Text> : null}
           <View style={styles.hr} />
 
-          <Text style={styles.line}>Served by: Owner</Text>
+          {receipt.status === "unpaid" && (
+            <View style={styles.unpaidStamp}>
+              <Text style={styles.unpaidStampText}>NOT PAID</Text>
+              <Text style={styles.unpaidStampSub}>Customer to pay {formatMoney(receipt.total, receipt.currency)}</Text>
+            </View>
+          )}
+
+          <Text style={styles.line}>Served by: {receipt.servedBy}</Text>
           {receipt.customerName ? <Text style={styles.line}>Customer: {receipt.customerName}</Text> : null}
           <Text style={styles.line}>Invoice: {receipt.number}</Text>
           <Text style={styles.line}>
@@ -100,9 +183,9 @@ export default function ReceiptScreen() {
               <Text style={[styles.itemText, { flex: 1 }]} numberOfLines={1}>
                 {l.name}
               </Text>
-              <Text style={[styles.itemText, styles.colPrice]}>{(l.price / 100).toFixed(2)}</Text>
+              <Text style={[styles.itemText, styles.colPrice]}>{formatAmount(l.price)}</Text>
               <Text style={[styles.itemText, styles.colQty]}>{l.qty}</Text>
-              <Text style={[styles.itemText, styles.colTotal]}>{((l.price * l.qty) / 100).toFixed(2)}</Text>
+              <Text style={[styles.itemText, styles.colTotal]}>{formatAmount(l.price * l.qty)}</Text>
             </View>
           ))}
 
@@ -183,6 +266,26 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginBottom: 8 },
   outlineBtn: { borderWidth: 1, borderColor: colors.primary, borderRadius: 4, paddingHorizontal: 12, paddingVertical: 6 },
   outlineBtnText: { color: colors.primary, fontWeight: "700", fontSize: 12 },
+  paidBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: colors.green,
+    borderRadius: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  paidBtnText: { color: colors.white, fontWeight: "800", fontSize: 12, letterSpacing: 0.4 },
+  unpaidStamp: {
+    borderWidth: 2,
+    borderColor: colors.red500,
+    borderRadius: 4,
+    paddingVertical: 8,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  unpaidStampText: { color: colors.red500, fontSize: 18, fontWeight: "800", letterSpacing: 1 },
+  unpaidStampSub: { color: colors.red500, fontSize: 11, fontWeight: "600", marginTop: 2 },
   receiptCard: { backgroundColor: colors.white, borderRadius: 4, padding: 14, elevation: 2 },
   storeName: { fontSize: 20, fontWeight: "800", color: colors.grey900, textAlign: "center" },
   storeMeta: { fontSize: 13, color: colors.grey600, textAlign: "center", marginTop: 2 },

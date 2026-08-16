@@ -9,7 +9,7 @@
     "newArchEnabled": true,
     "icon": "./assets/images/gls-logo.png",
     "splash": {
-      "image": "./assets/images/gls-logo.png",
+      "image": "./assets/images/gls-logo-full.png",
       "resizeMode": "contain",
       "backgroundColor": "#FFFFFF"
     },

@@ -23,6 +23,8 @@ export const COLLECTIONS = [
   "staff",
   "receipts",
   "stock_movements",
+  "product_images",
+  "web_orders",
 ] as const;
 
 export type Collection = (typeof COLLECTIONS)[number];
@@ -47,6 +49,28 @@ export function initDb() {
   }
   db.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
   ready = true;
+}
+
+/**
+ * A single record by id. Use this instead of scanning `loadAll` when you only
+ * need one document — important for large payloads like images, where loading
+ * the whole collection would pull every photo's base64 into memory.
+ */
+export function loadOne<T>(c: Collection, id: string): T | null {
+  initDb();
+  const row = db.getFirstSync<{ data: string }>(
+    `SELECT data FROM ${c} WHERE id = ? AND deleted = 0`,
+    id,
+  );
+  return row ? (JSON.parse(row.data) as T) : null;
+}
+
+/** Ids of all live records — cheap, no payload. */
+export function loadIds(c: Collection): string[] {
+  initDb();
+  return db
+    .getAllSync<{ id: string }>(`SELECT id FROM ${c} WHERE deleted = 0`)
+    .map((r) => r.id);
 }
 
 /** All live (non-deleted) records of a collection, in insertion order. */

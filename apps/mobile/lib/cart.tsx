@@ -1,4 +1,5 @@
 ﻿import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import type { WebOrder } from "@gls-pos/types";
 import { seedReceipts } from "./seed-receipts";
 import { loadAll, put as dbPut, seedOnce } from "./db";
 
@@ -77,9 +78,13 @@ export type Item = {
   stockQuantity: number | null;
   /** Warn/flag when stock drops to or below this (only when tracked). */
   lowStockAt?: number;
-  /** Item photo as a self-contained base64 data URI (stored in SQLite, no bucket). */
-  image?: string;
-  /** Remote source URL used once to hydrate `image` into SQLite; display fallback. */
+  /**
+   * True when a photo exists for this item. The bytes live in the separate
+   * `product_images` collection (see lib/image-store.ts) — never on this
+   * document, so reading the catalog stays fast.
+   */
+  hasImage?: boolean;
+  /** Remote source URL used once to hydrate the local image; display fallback. */
   imageUrl?: string;
   /** Free-text label when sellBy === "unit" (e.g. "plate", "cup"). */
   unit?: string;
@@ -116,11 +121,19 @@ export function newVariant(color: string): Variant {
   };
 }
 
+/**
+ * Whether the money has actually arrived. Most GLS sales are card/transfer, so
+ * the receipt is printed first and the customer pays against it — those start
+ * as "unpaid" and are settled afterwards.
+ */
+export type PaymentStatus = "paid" | "unpaid";
+
 export type Receipt = {
   id: string;
   number: string;
   customerName: string | null;
   mode: string;
+  status: PaymentStatus;
   itemCount: number;
   total: number;
   currency: string;
@@ -128,6 +141,12 @@ export type Receipt = {
   synced: boolean;
   lines: { name: string; qty: number; price: number }[];
   cashReceived?: number;
+  /** Snapshot of who/where sold it, so a reprint is always accurate. */
+  storeName: string;
+  storeReference?: string;
+  servedBy: string;
+  /** Set when an unpaid receipt is later settled. */
+  paidAt?: number;
 };
 
 type CartEntry = { item: Item; qty: number };
@@ -143,7 +162,29 @@ type CartState = {
   qtyOf: (id: string) => number;
   clear: () => void;
   receipts: Receipt[];
-  completeSale: (input: { mode: string; customerName: string | null; cashReceived?: number }) => Receipt;
+  completeSale: (input: {
+    mode: string;
+    customerName: string | null;
+    cashReceived?: number;
+    /** Defaults to "paid"; card/transfer flows pass "unpaid". */
+    status?: PaymentStatus;
+    storeName: string;
+    storeReference?: string;
+    servedBy: string;
+  }) => Receipt;
+  /** Settle an unpaid receipt once the transfer/card payment lands. */
+  markPaid: (id: string, mode?: string) => void;
+  /**
+   * Raise a receipt for a VIP web order. Bypasses the cart entirely — the order
+   * was already priced server-side — and starts unpaid, since the guest pays
+   * against the printed slip.
+   */
+  billWebOrder: (input: {
+    order: WebOrder;
+    storeName: string;
+    storeReference?: string;
+    servedBy: string;
+  }) => Receipt;
 };
 
 const CartContext = createContext<CartState | null>(null);
@@ -188,24 +229,74 @@ export function CartProvider({ children }: { children: ReactNode }) {
         }),
       clear: () => setEntries({}),
       receipts,
-      completeSale: ({ mode, customerName, cashReceived }) => {
+      completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
+        const now = Date.now();
+        const settled = status ?? "paid";
         const receipt: Receipt = {
-          id: `rcpt_${Date.now()}`,
+          id: `rcpt_${now}`,
           number: `#${1000 + receipts.length + 1}`,
           customerName,
           mode,
+          status: settled,
           itemCount: list.reduce((s, e) => s + e.qty, 0),
           total: subtotal + taxTotal,
           currency: list[0]?.item.currency ?? "NGN",
-          createdAt: Date.now(),
-          synced: Math.random() > 0.25,
+          createdAt: now,
+          synced: false,
           lines: list.map((e) => ({ name: e.item.name, qty: e.qty, price: e.item.price })),
           cashReceived,
+          storeName,
+          storeReference,
+          servedBy,
+          paidAt: settled === "paid" ? now : undefined,
         };
         dbPut("receipts", receipt);
         setReceipts((prev) => [receipt, ...prev]);
         setEntries({});
         return receipt;
+      },
+
+      billWebOrder: ({ order, storeName, storeReference, servedBy }) => {
+        const now = Date.now();
+        const receipt: Receipt = {
+          id: `rcpt_${now}`,
+          number: order.code,
+          customerName: order.guestName ?? null,
+          mode: "Unpaid",
+          status: "unpaid",
+          itemCount: order.lines.reduce((s, l) => s + l.quantity, 0),
+          total: order.total,
+          currency: order.currency,
+          createdAt: now,
+          synced: false,
+          lines: order.lines.map((l) => ({
+            name: l.name,
+            qty: l.quantity,
+            price: l.unitPrice,
+          })),
+          storeName,
+          storeReference,
+          servedBy,
+        };
+        dbPut("receipts", receipt);
+        setReceipts((prev) => [receipt, ...prev]);
+        return receipt;
+      },
+
+      markPaid: (id, mode) => {
+        setReceipts((prev) =>
+          prev.map((r) => {
+            if (r.id !== id || r.status === "paid") return r;
+            const updated: Receipt = {
+              ...r,
+              status: "paid",
+              paidAt: Date.now(),
+              mode: mode ?? r.mode,
+            };
+            dbPut("receipts", updated);
+            return updated;
+          }),
+        );
       },
     };
   }, [entries, receipts]);

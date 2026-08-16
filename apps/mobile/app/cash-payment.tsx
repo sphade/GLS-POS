@@ -6,6 +6,8 @@ import { useRouter, type Href } from "expo-router";
 import { colors, currencySymbol, denominationsFor, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
 
 /** Mirrors CashPaymentActivity: bill total, big amount-received input, short block, denomination pills. */
@@ -13,8 +15,10 @@ export default function CashPaymentScreen() {
   const router = useRouter();
   const { total, entries, completeSale } = useCart();
   const { recordSale } = useCatalog();
+  const { store } = useStore();
+  const { user } = useAuth();
   const [received, setReceived] = useState("");
-  const currency = "USD";
+  const currency = store.currency;
   const sym = currencySymbol(currency);
 
   const receivedMinor = Math.round((parseFloat(received || "0") || 0) * 100);
@@ -24,8 +28,9 @@ export default function CashPaymentScreen() {
 
   const addDenomination = (value: number) => {
     feedbackTap();
-    const next = (receivedMinor + value * 100) / 100;
-    setReceived(next.toFixed(2));
+    // Keep the field clean: whole naira stay whole, kobo only when needed.
+    const nextMinor = receivedMinor + value * 100;
+    setReceived(nextMinor % 100 === 0 ? String(nextMinor / 100) : (nextMinor / 100).toFixed(2));
   };
 
   const onConfirm = () => {
@@ -36,7 +41,15 @@ export default function CashPaymentScreen() {
     feedbackSaleComplete();
     // Snapshot cart lines before completeSale clears them, then decrement stock.
     const lines = Object.values(entries).map((e) => ({ productId: e.item.id, qty: e.qty }));
-    const receipt = completeSale({ mode: "Cash", customerName: null, cashReceived: receivedMinor });
+    const receipt = completeSale({
+      mode: "Cash",
+      customerName: null,
+      cashReceived: receivedMinor,
+      status: "paid",
+      storeName: store.name,
+      storeReference: store.reference,
+      servedBy: user?.name ?? "Staff",
+    });
     recordSale(lines, receipt.id);
     router.replace(`/sale-success?id=${receipt.id}` as Href);
   };

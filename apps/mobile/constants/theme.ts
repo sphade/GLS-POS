@@ -91,8 +91,28 @@ const symbols: Record<string, string> = { NGN: "₦", USD: "$", EUR: "€", GBP:
 export function currencySymbol(currency = "NGN") {
   return symbols[currency] ?? `${currency} `;
 }
+/**
+ * Format integer minor units for display, grouped for readability.
+ *
+ *   250000  -> "2,500"        (whole amounts drop the pointless ".00")
+ *   250050  -> "2,500.50"     (kobo shown only when non-zero)
+ *  1300000  -> "13,000"
+ *
+ * Grouping is done by hand rather than via Intl so output is identical on every
+ * device and JS engine.
+ */
+export function formatAmount(minor: number): string {
+  const sign = minor < 0 ? "-" : "";
+  const abs = Math.abs(Math.round(minor));
+  const whole = Math.floor(abs / 100);
+  const kobo = abs % 100;
+  const grouped = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${sign}${grouped}${kobo === 0 ? "" : `.${String(kobo).padStart(2, "0")}`}`;
+}
+
+/** Same as formatAmount, prefixed with the currency symbol (e.g. "₦2,500"). */
 export function formatMoney(minor: number, currency = "NGN"): string {
-  return `${currencySymbol(currency)}${(minor / 100).toFixed(2)}`;
+  return `${currencySymbol(currency)}${formatAmount(minor)}`;
 }
 
 /** Cash denominations per currency (from CashPaymentActivity). */
