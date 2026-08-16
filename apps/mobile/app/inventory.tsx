@@ -42,17 +42,33 @@ export default function InventoryScreen() {
                 emptyText="No items yet"
                 addLabel="New Item"
                 onAdd={() => router.push("/item-editor")}
-                renderRow={(p) => (
-                  <EntityRow
-                    initial={p.name.charAt(0).toUpperCase()}
-                    color={p.categoryColor}
-                    title={p.name}
-                    subtitle={`${formatMoney(p.price, p.currency)}${
-                      p.stockQuantity !== null ? ` · stock ${p.stockQuantity}` : " · no stock tracking"
-                    }`}
-                    onPress={() => router.push({ pathname: "/item-editor", params: { id: p.id } })}
-                  />
-                )}
+                renderRow={(p) => {
+                  const tracked = p.stockQuantity !== null;
+                  const low = tracked && p.stockQuantity! <= (p.lowStockAt ?? 3);
+                  const out = tracked && p.stockQuantity === 0;
+                  return (
+                    <EntityRow
+                      initial={p.name.charAt(0).toUpperCase()}
+                      color={p.categoryColor}
+                      title={p.name}
+                      subtitle={`${formatMoney(p.price, p.currency)}${
+                        tracked ? ` · stock ${p.stockQuantity}` : " · no stock tracking"
+                      }`}
+                      trailing={
+                        out ? (
+                          <View style={[styles.lowPill, { backgroundColor: colors.grey600 }]}>
+                            <Text style={styles.lowPillText}>OUT</Text>
+                          </View>
+                        ) : low ? (
+                          <View style={styles.lowPill}>
+                            <Text style={styles.lowPillText}>LOW</Text>
+                          </View>
+                        ) : undefined
+                      }
+                      onPress={() => router.push({ pathname: "/item-editor", params: { id: p.id } })}
+                    />
+                  );
+                }}
               />
             );
 

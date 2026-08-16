@@ -1,7 +1,9 @@
 import { createMiddleware } from "hono/factory";
+import type { Permission, StoreRole } from "@gls-pos/types";
+import { roleCan } from "@gls-pos/types";
 import type { StoreDurableObject } from "../durable-objects/store.do.js";
 import { HttpError } from "../lib/http-error.js";
-import { isMember } from "../modules/stores/stores.service.js";
+import { memberRole } from "../modules/stores/stores.service.js";
 import type { Env } from "../env.js";
 import type { AuthVariables } from "./auth.js";
 
@@ -9,6 +11,8 @@ import type { AuthVariables } from "./auth.js";
 export type StoreVariables = {
   storeId: string;
   store: DurableObjectStub<StoreDurableObject>;
+  /** The caller's role in this store, resolved from the control plane. */
+  role: StoreRole;
 };
 
 /**
@@ -30,11 +34,29 @@ export const withStore = createMiddleware<{
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
 
-  if (!(await isMember(c.env, user.id, storeId))) {
+  const role = await memberRole(c.env, user.id, storeId);
+  if (!role) {
     throw HttpError.forbidden("You are not a member of this store", "not_a_member");
   }
 
   c.set("storeId", storeId);
+  c.set("role", role);
   c.set("store", c.env.STORE.get(c.env.STORE.idFromName(storeId)));
   await next();
 });
+
+/**
+ * Route guard for a specific capability. Runs after `withStore` (which resolves
+ * the role). The server is authoritative: hiding a button in the UI is a
+ * convenience, this is the actual enforcement.
+ */
+export function requirePermission(permission: Permission) {
+  return createMiddleware<{ Bindings: Env; Variables: AuthVariables & StoreVariables }>(
+    async (c, next) => {
+      if (!roleCan(c.get("role"), permission)) {
+        throw HttpError.forbidden(`Your role cannot ${permission}`, "insufficient_permission");
+      }
+      await next();
+    },
+  );
+}

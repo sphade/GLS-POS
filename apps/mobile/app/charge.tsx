@@ -5,6 +5,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
+import { useCatalog } from "@/lib/catalog";
 import { paymentModes } from "@/lib/mock-items";
 import { feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
 
@@ -17,7 +18,8 @@ const modeIcon = (m: string) => {
 
 export default function ChargeScreen() {
   const router = useRouter();
-  const { total, completeSale } = useCart();
+  const { total, entries, completeSale } = useCart();
+  const { recordSale } = useCatalog();
   const [mode, setMode] = useState<string | null>(null);
   const [phone, setPhone] = useState("");
   const [name, setName] = useState("");
@@ -32,7 +34,10 @@ export default function ChargeScreen() {
       return;
     }
     feedbackSaleComplete();
+    // Snapshot cart lines before completeSale clears them, then decrement stock.
+    const lines = Object.values(entries).map((e) => ({ productId: e.item.id, qty: e.qty }));
     const receipt = completeSale({ mode, customerName: name.trim() || null });
+    recordSale(lines, receipt.id);
     router.replace(`/sale-success?id=${receipt.id}` as Href);
   };
 

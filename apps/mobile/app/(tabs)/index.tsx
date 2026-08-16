@@ -1,5 +1,6 @@
 ﻿import { useMemo, useState } from "react";
 import {
+  Image,
   LayoutAnimation,
   Platform,
   Pressable,
@@ -18,6 +19,7 @@ import { colors, formatMoney, strings } from "@/constants/theme";
 import { PosHeader, PosSearchBar } from "@/components/PosHeader";
 import { useCart, type Item } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 const NEW_ITEM_ID = "__new_item__";
@@ -60,6 +62,8 @@ export default function ItemsScreen() {
   const router = useRouter();
   const { add, remove, qtyOf, count } = useCart();
   const { products, categories } = useCatalog();
+  const { can } = useAuth();
+  const canEditCatalog = can("catalog:write");
   const [query, setQuery] = useState("");
   const [isGrid, setIsGrid] = useState(true);
   /** Which category is being viewed; ALL shows every group. */
@@ -129,16 +133,19 @@ export default function ItemsScreen() {
       if (loose.length > 0) grouped.push(build(UNCATEGORISED, UNCATEGORISED, loose));
     }
 
-    grouped.push({
-      id: NEW_ITEM_ID,
-      title: "",
-      total: 0,
-      collapsed: false,
-      data: [{ key: NEW_ITEM_ID, items: [{ id: NEW_ITEM_ID } as Item] }],
-    });
+    // Only roles that can edit the menu get the "new item" tile.
+    if (canEditCatalog) {
+      grouped.push({
+        id: NEW_ITEM_ID,
+        title: "",
+        total: 0,
+        collapsed: false,
+        data: [{ key: NEW_ITEM_ID, items: [{ id: NEW_ITEM_ID } as Item] }],
+      });
+    }
 
     return grouped;
-  }, [query, products, categories, cols, activeCat, collapsed]);
+  }, [query, products, categories, cols, activeCat, collapsed, canEditCatalog]);
 
   /** Add every item in a group to the cart in one tap. */
   const addSection = (section: ItemSection) => {
@@ -361,7 +368,8 @@ function Chip({
 }
 
 function Avatar({ item, size }: { item: Item; size: number }) {
-  const low = item.stockQuantity !== null && item.stockQuantity > 0 && item.stockQuantity <= 3;
+  const threshold = item.lowStockAt ?? 3;
+  const low = item.stockQuantity !== null && item.stockQuantity > 0 && item.stockQuantity <= threshold;
   return (
     <View
       style={[
@@ -369,6 +377,16 @@ function Avatar({ item, size }: { item: Item; size: number }) {
         { width: size, height: size, borderRadius: size / 2, backgroundColor: item.categoryColor ?? colors.red500 },
       ]}
     >
+      {item.image || item.imageUrl ? (
+        <Image
+          source={{ uri: item.image ?? item.imageUrl }}
+          style={{ width: size, height: size, borderRadius: size / 2 }}
+        />
+      ) : (
+        <Text style={[styles.avatarInitial, { fontSize: size * 0.4 }]}>
+          {item.name?.charAt(0).toUpperCase()}
+        </Text>
+      )}
       {low && <View style={styles.lowDot} />}
     </View>
   );
@@ -565,6 +583,7 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   avatar: { alignItems: "center", justifyContent: "center", overflow: "hidden" },
+  avatarInitial: { color: colors.white, fontWeight: "800" },
   lowDot: { position: "absolute", top: 4, left: 4, width: 10, height: 10, borderRadius: 5, backgroundColor: colors.white },
 
   /** Square zone that holds the circular avatar; overlays fill it. */

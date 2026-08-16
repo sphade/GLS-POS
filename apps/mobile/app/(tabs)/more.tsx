@@ -4,7 +4,9 @@ import { useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
+import type { Permission } from "@gls-pos/types";
 
 const CURRENCY = "NGN";
 
@@ -17,6 +19,8 @@ type Card = {
   valueColor?: string;
   isNew?: boolean;
   route?: string;
+  /** When set, the card is only shown to roles holding this permission. */
+  needs?: Permission;
 };
 
 /**
@@ -27,25 +31,29 @@ type Card = {
 export default function MoreScreen() {
   const router = useRouter();
   const { products } = useCatalog();
+  const { can } = useAuth();
 
   const lowStock = products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length;
   const stockCost = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * Math.round(i.price * 0.6), 0);
   const stockSell = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * i.price, 0);
 
-  const cards: Card[] = [
-    { key: "attendance", value: "Attendance", title: "Attendance Management", isNew: true },
-    { key: "payroll", value: "Manage Payroll", title: "Payments", isNew: true },
-    { key: "storefront", value: "0", title: "Shopfront" },
-    { key: "customers", value: "0", title: "All Customers", route: "/customers" },
-    { key: "due", value: "0", title: "Due Customers", valueColor: colors.green },
-    { key: "expense", value: formatMoney(0, CURRENCY), title: "Expense - Income\n(This Week)", route: "/expense-categories" },
-    { key: "lowStocks", value: String(lowStock), title: "Low Stocks", valueColor: colors.red500 },
-    { key: "staff", value: "0", title: "Staff and Partners", route: "/staff" },
-    { key: "items", value: String(products.length), title: "Items and SubItems", route: "/inventory" },
-    { key: "costPrice", value: formatMoney(stockCost, CURRENCY), title: "Stock Value Cost Price" },
-    { key: "sellingPrice", value: formatMoney(stockSell, CURRENCY), title: "Stock Value Selling Price" },
-    { key: "settings", value: "Settings", title: "Business & Preferences", route: "/settings" },
+  const allCards: Card[] = [
+    { key: "attendance", value: "Attendance", title: "Attendance Management", isNew: true, needs: "staff:manage" },
+    { key: "payroll", value: "Manage Payroll", title: "Payments", isNew: true, needs: "staff:manage" },
+    { key: "storefront", value: "0", title: "Shopfront", needs: "settings:manage" },
+    { key: "customers", value: "0", title: "All Customers", route: "/customers", needs: "customers:manage" },
+    { key: "due", value: "0", title: "Due Customers", valueColor: colors.green, needs: "customers:manage" },
+    { key: "expense", value: formatMoney(0, CURRENCY), title: "Expense - Income\n(This Week)", route: "/expense-categories", needs: "expenses:manage" },
+    { key: "lowStocks", value: String(lowStock), title: "Low Stocks", valueColor: colors.red500, needs: "inventory:adjust" },
+    { key: "staff", value: "0", title: "Staff and Partners", route: "/staff", needs: "staff:manage" },
+    { key: "items", value: String(products.length), title: "Items and SubItems", route: "/inventory", needs: "catalog:write" },
+    { key: "costPrice", value: formatMoney(stockCost, CURRENCY), title: "Stock Value Cost Price", needs: "reports:view" },
+    { key: "sellingPrice", value: formatMoney(stockSell, CURRENCY), title: "Stock Value Selling Price", needs: "reports:view" },
+    { key: "settings", value: "Settings", title: "Business & Preferences", route: "/settings", needs: "settings:manage" },
   ];
+
+  // Staff only see what their role allows. The server enforces the same matrix.
+  const cards = allCards.filter((c) => !c.needs || can(c.needs));
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>

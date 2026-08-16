@@ -75,6 +75,12 @@ export type Item = {
   currency: string;
   /** null = not stock-tracked */
   stockQuantity: number | null;
+  /** Warn/flag when stock drops to or below this (only when tracked). */
+  lowStockAt?: number;
+  /** Item photo as a self-contained base64 data URI (stored in SQLite, no bucket). */
+  image?: string;
+  /** Remote source URL used once to hydrate `image` into SQLite; display fallback. */
+  imageUrl?: string;
   /** Free-text label when sellBy === "unit" (e.g. "plate", "cup"). */
   unit?: string;
   sellBy?: SellBy;

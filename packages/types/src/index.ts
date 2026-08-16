@@ -153,6 +153,7 @@ export const SYNC_COLLECTIONS = [
   "customers",
   "staff",
   "receipts",
+  "stock_movements",
 ] as const;
 
 export type SyncCollection = (typeof SYNC_COLLECTIONS)[number];
@@ -191,7 +192,8 @@ export interface SyncPullResponse {
 // Store registry (control plane)
 // ---------------------------------------------------------------------------
 
-export type StoreRole = "owner" | "manager" | "cashier" | "waiter" | "kitchen";
+import type { StoreRole } from "./permissions.js";
+export * from "./permissions.js";
 
 /** A store the signed-in user belongs to, with their role in it. */
 export interface StoreMembership {

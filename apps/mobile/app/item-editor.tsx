@@ -1,10 +1,11 @@
 ﻿import { useState } from "react";
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, currencySymbol } from "@/constants/theme";
-import { EditorToolbar, FieldCard, PickerCard, Segmented, formStyles } from "@/components/form";
+import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, formStyles } from "@/components/form";
 import { VariantEditor, VARIANT_ICONS } from "@/components/VariantEditor";
 import { swatches, useCatalog } from "@/lib/catalog";
 import { MEASURES, newVariant, type Measure, type SellBy, type Variant } from "@/lib/cart";
@@ -20,7 +21,7 @@ const SYM = currencySymbol("NGN");
 export default function ItemEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
-  const { products, categories, upsertProduct, deleteProduct } = useCatalog();
+  const { products, categories, upsertProduct, deleteProduct, logStockChange } = useCatalog();
   const existing = products.find((p) => p.id === id);
 
   const [mode, setMode] = useState<"left" | "right">("left"); // Simple | Advance
@@ -30,6 +31,15 @@ export default function ItemEditorScreen() {
   const [sellBy, setSellBy] = useState<SellBy>(existing?.sellBy ?? "unit");
   const [measure, setMeasure] = useState<Measure>(existing?.measure ?? MEASURES[0]!);
   const [variants, setVariants] = useState<Variant[]>(existing?.variants ?? []);
+
+  const [image, setImage] = useState<string | undefined>(existing?.image);
+
+  // Simple-mode stock control.
+  const [trackStock, setTrackStock] = useState(existing ? existing.stockQuantity !== null : false);
+  const [stockQty, setStockQty] = useState(
+    existing?.stockQuantity != null ? String(existing.stockQuantity) : "",
+  );
+  const [lowAlert, setLowAlert] = useState(existing?.lowStockAt != null ? String(existing.lowStockAt) : "");
 
   const [catOpen, setCatOpen] = useState(false);
   const [sellByOpen, setSellByOpen] = useState(false);
@@ -50,7 +60,13 @@ export default function ItemEditorScreen() {
   const sellByLabel = isFraction ? `Sell by Fraction · ${measure.unit}` : "Sell by Unit";
 
   const onSave = () => {
-    upsertProduct({
+    // Simple mode: honour the Track Stock toggle. Advance mode still derives
+    // stock from the first variant.
+    const simpleStock = trackStock ? Math.max(0, Math.round(parseFloat(stockQty) || 0)) : null;
+    const simpleLowAt = trackStock && lowAlert.trim() ? Math.max(0, Math.round(parseFloat(lowAlert) || 0)) : undefined;
+    const nextStock = mode === "right" ? (variants[0]?.stock ?? null) : simpleStock;
+
+    const saved = upsertProduct({
       id: existing?.id,
       name: name.trim(),
       price: mode === "right" ? (variants[0]?.price ?? 0) : Math.round((parseFloat(price) || 0) * 100),
@@ -60,10 +76,61 @@ export default function ItemEditorScreen() {
       sellBy,
       measure: isFraction ? measure : undefined,
       variants: mode === "right" ? variants : undefined,
-      stockQuantity: mode === "right" ? (variants[0]?.stock ?? null) : null,
+      stockQuantity: nextStock,
+      lowStockAt: mode === "right" ? undefined : simpleLowAt,
+      image,
     });
+
+    // Audit trail: log the stock delta from a manual create/edit.
+    if (nextStock !== null) {
+      const before = existing?.stockQuantity ?? 0;
+      const delta = nextStock - before;
+      if (delta !== 0) {
+        logStockChange(saved, delta, existing?.stockQuantity == null ? "initial" : "adjustment", nextStock);
+      }
+    }
+
     feedbackTap();
     router.back();
+  };
+
+  /** Launch the library or camera, crop to a square, compress, and keep the
+   *  result as a base64 data URI so it lives in SQLite (no bucket, no upload). */
+  const captureImage = async (from: "camera" | "library") => {
+    const opts: ImagePicker.ImagePickerOptions = {
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.4,
+      base64: true,
+    };
+    const res =
+      from === "camera"
+        ? await (async () => {
+            const perm = await ImagePicker.requestCameraPermissionsAsync();
+            if (!perm.granted) {
+              Alert.alert("Camera permission needed", "Enable camera access to take a photo.");
+              return null;
+            }
+            return ImagePicker.launchCameraAsync(opts);
+          })()
+        : await ImagePicker.launchImageLibraryAsync(opts);
+
+    if (!res || res.canceled || !res.assets?.[0]?.base64) return;
+    const asset = res.assets[0];
+    const mime = asset.mimeType ?? "image/jpeg";
+    setImage(`data:${mime};base64,${asset.base64}`);
+    setTouched(true);
+  };
+
+  const onImagePress = () => {
+    feedbackTap();
+    Alert.alert("Item image", undefined, [
+      { text: "Take photo", onPress: () => captureImage("camera") },
+      { text: "Choose from library", onPress: () => captureImage("library") },
+      ...(image ? [{ text: "Remove image", style: "destructive" as const, onPress: () => { setImage(undefined); setTouched(true); } }] : []),
+      { text: "Cancel", style: "cancel" as const },
+    ]);
   };
 
   return (
@@ -154,22 +221,51 @@ export default function ItemEditorScreen() {
               valid={(parseFloat(price) || 0) > 0}
             />
 
+            <FeatureCard icon="cube-outline" label="Track stock" on={trackStock} onToggle={setTrackStock}>
+              <View style={styles.stockRow}>
+                <Text style={styles.stockLabel}>Quantity in stock</Text>
+                <TextInput
+                  style={styles.stockInput}
+                  value={stockQty}
+                  onChangeText={edit(setStockQty)}
+                  keyboardType="numeric"
+                  placeholder="0"
+                  placeholderTextColor={colors.hint}
+                />
+              </View>
+              <View style={styles.stockRow}>
+                <Text style={styles.stockLabel}>Alert when stock at or below</Text>
+                <TextInput
+                  style={styles.stockInput}
+                  value={lowAlert}
+                  onChangeText={edit(setLowAlert)}
+                  keyboardType="numeric"
+                  placeholder="—"
+                  placeholderTextColor={colors.hint}
+                />
+              </View>
+              <Text style={styles.stockHint}>
+                Stock goes down automatically with each sale{isFraction ? ` (per ${measure.unit})` : ""}.
+              </Text>
+            </FeatureCard>
+
             <View style={styles.imagePickerCard}>
               <Pressable
                 style={[styles.imageCircle, { backgroundColor: category?.color ?? "#EF3E36" }]}
-                onPress={feedbackTap}
+                onPress={onImagePress}
               >
+                {image && <Image source={{ uri: image }} style={styles.imageCirclePhoto} />}
                 <View style={styles.editBadge}>
-                  <Ionicons name="pencil" size={15} color={colors.primary} />
+                  <Ionicons name={image ? "pencil" : "camera"} size={15} color={colors.primary} />
                 </View>
               </Pressable>
-              <Text style={styles.changeImage}>Change image</Text>
+              <Text style={styles.changeImage}>{image ? "Change image" : "Add image"}</Text>
             </View>
 
             <View style={styles.tipBanner}>
               <MaterialCommunityIcons name="lightbulb-on-outline" size={22} color={colors.primary} />
               <Text style={styles.tipText}>
-                Pro Tip: Use advance mode for features like stock and profit tracking
+                Pro Tip: Use advance mode for variants and profit tracking
               </Text>
             </View>
           </>
@@ -464,8 +560,29 @@ const styles = StyleSheet.create({
   measureTitle: { fontSize: 15, fontWeight: "700", color: colors.primary },
   measureSub: { fontSize: 12, color: colors.grey700, marginTop: 2 },
 
+  stockRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingVertical: 6,
+  },
+  stockLabel: { flex: 1, fontSize: 15, color: colors.grey800 },
+  stockInput: {
+    minWidth: 76,
+    borderBottomWidth: 1,
+    borderColor: colors.grey400,
+    textAlign: "right",
+    fontSize: 16,
+    fontWeight: "700",
+    color: colors.grey900,
+    paddingVertical: 4,
+  },
+  stockHint: { fontSize: 12, color: colors.grey600, marginTop: 8 },
+
   imagePickerCard: { alignItems: "center", paddingVertical: 18 },
-  imageCircle: { width: 104, height: 104, borderRadius: 52, alignItems: "center", justifyContent: "center" },
+  imageCircle: { width: 104, height: 104, borderRadius: 52, alignItems: "center", justifyContent: "center", overflow: "hidden" },
+  imageCirclePhoto: { ...StyleSheet.absoluteFillObject, width: 104, height: 104, borderRadius: 52 },
   editBadge: {
     position: "absolute",
     bottom: 0,

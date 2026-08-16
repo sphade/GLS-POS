@@ -7,3 +7,11 @@ export const createStoreSchema = z.object({
 });
 
 export type CreateStoreInput = z.infer<typeof createStoreSchema>;
+
+/** Grant or change a member's role by email. */
+export const setRoleSchema = z.object({
+  email: z.string().email(),
+  role: z.enum(["owner", "manager", "cashier", "waiter", "kitchen"]),
+});
+
+export type SetRoleInput = z.infer<typeof setRoleSchema>;

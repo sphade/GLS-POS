@@ -119,7 +119,7 @@ export async function syncNow(storeId: string): Promise<number> {
  * offline/local demo with zero network calls. Flip it on by setting
  * EXPO_PUBLIC_ENABLE_SYNC=1 once a reachable backend is available.
  */
-export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC === "1";
+export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC !== "0";
 
 /**
  * Start periodic background sync for a store. Returns a stop function.

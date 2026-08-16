@@ -22,6 +22,7 @@ export const COLLECTIONS = [
   "customers",
   "staff",
   "receipts",
+  "stock_movements",
 ] as const;
 
 export type Collection = (typeof COLLECTIONS)[number];
@@ -75,6 +76,12 @@ export function put<T extends { id: string }>(c: Collection, item: T, dirty = tr
 export function softDelete(c: Collection, id: string) {
   initDb();
   db.runSync(`UPDATE ${c} SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?`, Date.now(), id);
+}
+
+/** Hard-wipe a collection. Used when re-seeding demo data (sync off). */
+export function resetCollection(c: Collection) {
+  initDb();
+  db.runSync(`DELETE FROM ${c}`);
 }
 
 // --- sync-facing helpers (used in Phase B2) --------------------------------

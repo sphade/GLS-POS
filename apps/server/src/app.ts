@@ -1,12 +1,14 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { ROLE_PERMISSIONS } from "@gls-pos/types";
 import type { AppEnv } from "./context.js";
 import { ok } from "./lib/response.js";
 import { onError, notFound } from "./middleware/error-handler.js";
 import { withAuth, requireAuth } from "./middleware/auth.js";
 import { withStore } from "./middleware/store.js";
 import { stores } from "./modules/stores/stores.routes.js";
+import { members } from "./modules/stores/members.routes.js";
 import { sync } from "./modules/sync/sync.routes.js";
 
 /**
@@ -46,6 +48,18 @@ export function createApp() {
   api.use("/stores/*", requireAuth);
   api.use("/stores", requireAuth);
   api.route("/stores", stores);
+
+  // Store-scoped staff & role management.
+  api.use("/members", requireAuth, withStore);
+  api.use("/members/*", requireAuth, withStore);
+  api.route("/members", members);
+
+  // The caller's role + effective permissions for the selected store, so the
+  // client can shape its UI from the same matrix the server enforces.
+  api.get("/session/store", requireAuth, withStore, (c) => {
+    const role = c.get("role");
+    return ok(c, { storeId: c.get("storeId"), role, permissions: ROLE_PERMISSIONS[role] });
+  });
 
   // Offline-first sync against the caller's store Durable Object.
   api.use("/sync", requireAuth, withStore);

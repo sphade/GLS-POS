@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { startAutoSync } from "./sync";
+import { useAuth } from "./auth";
 
 export type Store = {
   id: string;
@@ -7,19 +8,15 @@ export type Store = {
   /** Short label shown in the avatar circle. */
   initials: string;
   currency: string;
-  /** e.g. business phone / identifier shown under the name. */
+  /** The signed-in user's role in this store, shown under the name. */
   reference?: string;
 };
 
-/**
- * The stores (shops/branches) this account can switch between. The header
- * dropdown is a store switcher — one GLS business with multiple shops.
- */
-export const stores: Store[] = [
-  { id: "store_main", name: "GLS Main Shop", initials: "GM", currency: "NGN", reference: "+234 801 000 0001" },
-  { id: "store_jollof", name: "GLS Jollof Kitchen", initials: "JK", currency: "NGN", reference: "+234 801 000 0002" },
-  { id: "store_express", name: "GLS Express", initials: "GE", currency: "NGN", reference: "+234 801 000 0003" },
-];
+/** "GLS Kitchen & Bakery" -> "GK" */
+function initialsOf(name: string): string {
+  const words = name.replace(/[^A-Za-z0-9 ]/g, " ").trim().split(/\s+/).filter(Boolean);
+  return (words.slice(0, 2).map((w) => w[0]!).join("") || "ST").toUpperCase();
+}
 
 type StoreState = {
   store: Store;
@@ -29,20 +26,43 @@ type StoreState = {
 
 const StoreContext = createContext<StoreState | null>(null);
 
+/**
+ * The store switcher, backed by the user's real memberships from the control
+ * plane. Only mounts once the user is signed in and has at least one store
+ * (see the gate in app/_layout.tsx), so `activeStore` is always present.
+ *
+ * Also drives background sync for whichever store is active.
+ */
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [storeId, setStoreId] = useState(stores[0]!.id);
+  const { stores: memberships, activeStore, selectStore } = useAuth();
 
-  // Offline-first background sync for the active store. No-ops until the user is
-  // signed in and online, so the app keeps working entirely from local data.
-  useEffect(() => startAutoSync(storeId), [storeId]);
+  const stores = useMemo<Store[]>(
+    () =>
+      memberships.map((m) => ({
+        id: m.id,
+        name: m.name,
+        initials: initialsOf(m.name),
+        currency: m.currency,
+        reference: m.role.charAt(0).toUpperCase() + m.role.slice(1),
+      })),
+    [memberships],
+  );
+
+  const store = useMemo<Store>(() => {
+    const found = activeStore && stores.find((s) => s.id === activeStore.id);
+    return (
+      found ??
+      stores[0] ?? { id: "store_unknown", name: "My Store", initials: "MS", currency: "NGN" }
+    );
+  }, [activeStore, stores]);
+
+  // Offline-first background sync for the active store. No-ops when sync is
+  // disabled or there's no session, so the POS keeps working from local data.
+  useEffect(() => startAutoSync(store.id), [store.id]);
 
   const value = useMemo<StoreState>(
-    () => ({
-      store: stores.find((s) => s.id === storeId) ?? stores[0]!,
-      stores,
-      setStoreId,
-    }),
-    [storeId],
+    () => ({ store, stores, setStoreId: selectStore }),
+    [store, stores, selectStore],
   );
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

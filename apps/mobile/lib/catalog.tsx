@@ -1,7 +1,8 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Item } from "./cart";
-import { mockItems } from "./mock-items";
-import { loadAll, put as dbPut, seedOnce, softDelete } from "./db";
+import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
+import { ITEM_IMAGES } from "./item-images";
+import { loadAll, put as dbPut, metaGet, metaSet, resetCollection, seedOnce, softDelete } from "./db";
 
 /** Colour palette auto-assigned to new categories/items. */
 export const swatches = [
@@ -23,17 +24,28 @@ export type Table = { id: string; name: string; section: string; seats: number; 
 export type Customer = { id: string; name: string; phone?: string; email?: string; address?: string; due: number };
 export type StaffMember = { id: string; name: string; role: string; phone?: string; active: boolean };
 
+/** Why stock moved. Every change to a tracked item's stock writes one of these. */
+export type StockMovementReason = "sale" | "adjustment" | "initial" | "restock";
+export type StockMovement = {
+  id: string;
+  productId: string;
+  productName: string;
+  reason: StockMovementReason;
+  /** signed change, e.g. -2 for a sale of 2, +10 for a restock */
+  delta: number;
+  /** stock level after this movement */
+  resulting: number;
+  at: number;
+  /** optional link, e.g. a receipt id for sales */
+  ref?: string;
+};
+
 const uid = (p: string) => `${p}_${Date.now()}_${Math.round(Math.random() * 1e4)}`;
 
 // --- First-run defaults ----------------------------------------------------
 
-const DEFAULT_CATEGORIES: Category[] = [
-  { id: "c1", name: "Coffee", color: "#8D6E63" },
-  { id: "c2", name: "Food", color: "#EF6C00" },
-  { id: "c3", name: "Pizza", color: "#C62828" },
-  { id: "c4", name: "Drinks", color: "#F9A825" },
-  { id: "c5", name: "Desserts", color: "#6D4C41" },
-];
+/** Categories mirror the real GLS menu (see mock-items.ts). */
+const DEFAULT_CATEGORIES: Category[] = MENU_CATEGORIES;
 
 const DEFAULT_MODIFIERS: ModifierGroup[] = [
   {
@@ -86,15 +98,23 @@ const DEFAULT_STAFF: StaffMember[] = [
   { id: "s3", name: "Grace O.", role: "Waiter", phone: "+234 806 999 0000", active: true },
 ];
 
-/** Write the starter data into SQLite once, on the very first launch. */
-seedOnce("catalog_seeded", () => {
+/**
+ * Write the starter data into SQLite once. The flag is versioned: bumping it
+ * re-seeds. The GLS menu seed wipes the old placeholder catalog + categories
+ * first so switching menus never leaves duplicates behind.
+ */
+seedOnce("catalog_seeded_gls_v2", () => {
+  (["products", "categories", "modifiers", "ingredients", "tables", "customers", "staff"] as const).forEach(
+    resetCollection,
+  );
   DEFAULT_CATEGORIES.forEach((c) => dbPut("categories", c, false));
   DEFAULT_MODIFIERS.forEach((m) => dbPut("modifiers", m, false));
   DEFAULT_INGREDIENTS.forEach((i) => dbPut("ingredients", i, false));
   DEFAULT_TABLES.forEach((t) => dbPut("tables", t, false));
   DEFAULT_CUSTOMERS.forEach((c) => dbPut("customers", c, false));
   DEFAULT_STAFF.forEach((s) => dbPut("staff", s, false));
-  mockItems.forEach((p) => dbPut("products", p, false));
+  // Attach the source image URL; first launch hydrates it into a base64 `image`.
+  mockItems.forEach((p) => dbPut("products", { ...p, imageUrl: ITEM_IMAGES[p.name] }, false));
 });
 
 type CatalogState = {
@@ -121,6 +141,17 @@ type CatalogState = {
   deleteCustomer: (id: string) => void;
   upsertStaff: (s: Partial<StaffMember> & { name: string }) => StaffMember;
   deleteStaff: (id: string) => void;
+
+  /** Decrement stock for tracked items sold, logging a movement per line. */
+  recordSale: (lines: { productId: string; qty: number }[], ref?: string) => void;
+  /** Log a manual stock change (adjustment/initial/restock). Does not itself
+   *  write the product; the caller has already persisted the new quantity. */
+  logStockChange: (
+    product: Item,
+    delta: number,
+    reason: StockMovementReason,
+    resulting: number,
+  ) => void;
 };
 
 const CatalogContext = createContext<CatalogState | null>(null);
@@ -134,6 +165,50 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [tables, setTables] = useState<Table[]>(() => loadAll<Table>("tables"));
   const [customers, setCustomers] = useState<Customer[]>(() => loadAll<Customer>("customers"));
   const [staff, setStaff] = useState<StaffMember[]>(() => loadAll<StaffMember>("staff"));
+
+  // One-time image hydration: download each seeded item's photo and bake it
+  // into SQLite as a base64 data URI, so images become local + offline. Runs
+  // once (flag-guarded); silently skips failures and the app still works.
+  useEffect(() => {
+    if (metaGet("images_hydrated_v1")) return;
+    let cancelled = false;
+
+    const toDataUri = async (url: string): Promise<string | null> => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return await new Promise<string | null>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(blob);
+        });
+      } catch {
+        return null;
+      }
+    };
+
+    (async () => {
+      const targets = loadAll<Item>("products").filter((p) => p.imageUrl && !p.image);
+      let any = false;
+      for (const p of targets) {
+        if (cancelled) return;
+        const dataUri = await toDataUri(p.imageUrl!);
+        if (!dataUri || cancelled) continue;
+        const updated = { ...p, image: dataUri };
+        dbPut("products", updated); // dirty, so it syncs when enabled
+        setProducts((prev) => prev.map((x) => (x.id === p.id ? updated : x)));
+        any = true;
+      }
+      if (!cancelled && any) metaSet("images_hydrated_v1", "1");
+      else if (!cancelled && targets.length === 0) metaSet("images_hydrated_v1", "1");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const value = useMemo<CatalogState>(() => {
     /** Write-through upsert: persist to SQLite, then update the in-memory mirror. */
@@ -210,6 +285,47 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       upsertStaff: (s) =>
         upsert<StaffMember>(setStaff, "staff", "staff", s, { name: s.name, role: "Cashier", active: true }),
       deleteStaff: (id) => remove(setStaff, "staff", id),
+
+      recordSale: (lines, ref) => {
+        const now = Date.now();
+        setProducts((prev) => {
+          let changed = false;
+          const next = prev.map((p) => {
+            if (p.stockQuantity === null) return p; // not tracked
+            const line = lines.find((l) => l.productId === p.id);
+            if (!line || line.qty <= 0) return p;
+            const resulting = Math.max(0, p.stockQuantity - line.qty);
+            const updated = { ...p, stockQuantity: resulting };
+            dbPut("products", updated);
+            dbPut<StockMovement>("stock_movements", {
+              id: uid("mov"),
+              productId: p.id,
+              productName: p.name,
+              reason: "sale",
+              delta: -(p.stockQuantity - resulting),
+              resulting,
+              at: now,
+              ref,
+            });
+            changed = true;
+            return updated;
+          });
+          return changed ? next : prev;
+        });
+      },
+
+      logStockChange: (product, delta, reason, resulting) => {
+        if (delta === 0) return;
+        dbPut<StockMovement>("stock_movements", {
+          id: uid("mov"),
+          productId: product.id,
+          productName: product.name,
+          reason,
+          delta,
+          resulting,
+          at: Date.now(),
+        });
+      },
     };
   }, [products, categories, modifiers, ingredients, tables, customers, staff]);
 
