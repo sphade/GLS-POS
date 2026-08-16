@@ -313,6 +313,19 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
   function count() { var n = 0; for (var k in cart) n += cart[k].qty; return n; }
   function total() { var t = 0; for (var k in cart) t += cart[k].qty * cart[k].price; return t; }
 
+  /** Reset every row's stepper back to "Add" (used after an order is sent). */
+  function paintAll() {
+    [].forEach.call(document.querySelectorAll("[data-step]"), function (el) {
+      el.hidden = true;
+    });
+    [].forEach.call(document.querySelectorAll("[data-add]"), function (el) {
+      el.hidden = false;
+    });
+    var cta = document.getElementById("review");
+    cta.disabled = true;
+    cta.textContent = "Your order is empty";
+  }
+
   function paint(id) {
     var step = document.querySelector('[data-step="' + id + '"]');
     var add = document.querySelector('[data-add="' + id + '"]');
@@ -407,14 +420,22 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
         cart = {};
         cartDlg.close();
         document.getElementById("code").textContent = body.data.code;
-        document.getElementById("tbl").textContent =
-          document.querySelector("header .table strong").textContent;
+        // Read the table name defensively: a missing node must never turn a
+        // successful order into a scary error (this exact bug shipped once).
+        var seatedEl = document.querySelector("header .seated strong");
+        document.getElementById("tbl").textContent = seatedEl ? seatedEl.textContent : "your table";
+        paintAll();
         doneDlg.showModal();
       })
-      .catch(function () {
+      .catch(function (err) {
         btn.disabled = false;
         btn.textContent = "Send to kitchen";
-        alert("No connection just now. Please try again or ask a member of our team.");
+        // Only a genuine fetch rejection means the network failed. Anything
+        // else is our bug, so say so rather than blaming the connection.
+        var offline = (err && err.name === "TypeError") || !navigator.onLine;
+        alert(offline
+          ? "No connection just now. Please try again or ask a member of our team."
+          : "Your order may have gone through — please check with a member of our team before re-sending.");
       });
   });
 

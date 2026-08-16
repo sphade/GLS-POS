@@ -3,6 +3,7 @@ import type { Permission, StoreMembership, StoreRole } from "@gls-pos/types";
 import { ROLE_PERMISSIONS, roleCan } from "@gls-pos/types";
 import { authClient, authCookie } from "./auth-client";
 import { api } from "./api";
+import { unregisterPush } from "./push";
 import { metaGet, metaSet } from "./db";
 
 /**
@@ -118,6 +119,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
 
       signOut: async () => {
+        // Stop alerts for this device first, while the session cookie is valid.
+        await unregisterPush();
         await authClient.signOut();
         setUser(null);
         setStores([]);

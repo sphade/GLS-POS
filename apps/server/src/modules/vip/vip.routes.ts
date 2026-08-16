@@ -7,6 +7,7 @@ import { validate } from "../../lib/validator.js";
 import { HttpError } from "../../lib/http-error.js";
 import { placeWebOrderSchema } from "./vip.schema.js";
 import { renderVipPage } from "./vip.page.js";
+import { notifyStore } from "../push/push.service.js";
 
 /**
  * VIP guest ordering — the only PUBLIC part of the API.
@@ -88,6 +89,20 @@ vip.post(
       }
       throw HttpError.badRequest("None of those items are available right now", result.error);
     }
+    // Alert staff phones even if the app is closed or the screen is locked.
+    // Fired via waitUntil so the guest's response isn't held up by Expo, and
+    // wrapped so a push failure can never fail the order.
+    const items = result.order.lines.reduce((n, l) => n + l.quantity, 0);
+    c.executionCtx.waitUntil(
+      notifyStore(c.env, storeId, {
+        title: `New VIP order · ${result.order.tableName}`,
+        body: `${result.order.code} — ${items} item${items === 1 ? "" : "s"}, ${
+          store.currency
+        } ${(result.order.total / 100).toLocaleString()}`,
+        data: { kind: "web_order", orderId: result.order.id, storeId },
+      }).catch(() => undefined),
+    );
+
     return ok(c, { code: result.order.code, total: result.order.total, id: result.order.id }, 201);
   },
 );

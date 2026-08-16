@@ -93,3 +93,17 @@ export function feedbackError() {
 export function feedbackTap() {
   vibrate(Haptics.ImpactFeedbackStyle.Light);
 }
+
+/**
+ * A VIP order just arrived. Deliberately more insistent than other feedback:
+ * staff may not be looking at the screen, so it chimes twice and gives a
+ * heavier double buzz.
+ */
+export function feedbackNewOrder() {
+  playSound("coin");
+  notify(Haptics.NotificationFeedbackType.Success);
+  setTimeout(() => {
+    playSound("beep");
+    vibrate(Haptics.ImpactFeedbackStyle.Heavy);
+  }, 420);
+}

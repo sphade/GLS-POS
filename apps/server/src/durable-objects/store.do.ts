@@ -225,6 +225,10 @@ export class StoreDurableObject extends DurableObject<Env> {
 
     this.setSeq(seq);
 
+    // Let other devices know there's something to pull (e.g. one till marks an
+    // order READY and every other screen updates straight away).
+    if (request.changes.length > 0) this.broadcast("changes");
+
     const changes = this.changesSince(request.cursor);
     const nextCursor = changes.length ? seq : request.cursor;
     return { denied: [], changes, cursor: nextCursor };
@@ -250,6 +254,56 @@ export class StoreDurableObject extends DurableObject<Env> {
     }
 
     return false;
+  }
+
+  // --- Realtime (WebSocket) -------------------------------------------------
+
+  /**
+   * WebSocket upgrade for staff devices. The Worker forwards an authenticated
+   * upgrade request here; every connected till then gets a nudge the instant
+   * something changes, removing the 20s polling delay.
+   *
+   * Uses *hibernatable* WebSockets (`acceptWebSocket`) so the DO can be evicted
+   * from memory while sockets stay open — connections cost nothing while idle.
+   */
+  override async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("Expected a WebSocket upgrade", { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    // Hibernation-aware accept: no in-memory handler needed to keep it alive.
+    this.ctx.acceptWebSocket(pair[1]);
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** Keepalive from clients; anything else is ignored. */
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (message === "ping") ws.send("pong");
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    // 1000 = normal closure; anything else we still just let go.
+    try {
+      ws.close(code === 1006 ? 1000 : code, reason);
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /**
+   * Tell every connected till that something changed. The payload is only a
+   * hint — devices respond by running a normal sync, which keeps one code path
+   * for applying data and stays correct even if a message is missed.
+   */
+  private broadcast(event: string, detail?: unknown): void {
+    const payload = JSON.stringify({ event, detail });
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(payload);
+      } catch {
+        /* drop dead sockets silently */
+      }
+    }
   }
 
   // --- VIP web ordering -----------------------------------------------------
@@ -382,6 +436,10 @@ export class StoreDurableObject extends DurableObject<Env> {
       })
       .run();
     this.setSeq(seq);
+
+    // Nudge every connected till immediately — this is what makes a VIP order
+    // appear (and chime) in about a second instead of on the next poll.
+    this.broadcast("web_order", { code: order.code, tableName: order.tableName });
 
     return { ok: true, order };
   }

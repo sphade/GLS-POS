@@ -8,6 +8,7 @@ import { CartProvider } from "@/lib/cart";
 import { CatalogProvider } from "@/lib/catalog";
 import { StoreProvider } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
+import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { colors } from "@/constants/theme";
 
@@ -34,6 +35,8 @@ export default function RootLayout() {
                   <AuthGate>
                     <RootStack />
                   </AuthGate>
+                  {/* Floats above every screen so staff never miss an order. */}
+                  <NewOrderBanner />
                 </WebOrdersProvider>
               </CartProvider>
             </CatalogProvider>

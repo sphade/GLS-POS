@@ -73,6 +73,23 @@ export const store = sqliteTable("store", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
 
+/**
+ * Expo push tokens for staff devices, so the server can alert a locked/closed
+ * phone when a VIP order arrives. One row per device per store; the token is
+ * the natural key because Expo reissues it per install.
+ */
+export const pushToken = sqliteTable("push_token", {
+  token: text("token").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  storeId: text("store_id")
+    .notNull()
+    .references(() => store.id, { onDelete: "cascade" }),
+  platform: text("platform"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+
 /** Links a user to a store with a role. */
 export const member = sqliteTable("member", {
   id: text("id").primaryKey(),

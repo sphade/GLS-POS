@@ -10,6 +10,7 @@ import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { sendTestPush } from "@/lib/push";
 import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
 
 /**
@@ -58,6 +59,18 @@ export default function OnlineOrdersScreen() {
     );
   };
 
+  /** Verify notifications reach this device. */
+  const testPush = async () => {
+    feedbackTap();
+    const sent = await sendTestPush(store.id);
+    Alert.alert(
+      sent > 0 ? "Test sent" : "No devices registered",
+      sent > 0
+        ? `Sent to ${sent} device${sent === 1 ? "" : "s"}. It should arrive in a few seconds.`
+        : "This device isn't registered for notifications yet. That needs a development build with an EAS project id — the in-app chime still works.",
+    );
+  };
+
   const advance = (order: WebOrder, next: WebOrderStatus) => {
     feedbackTap();
     setStatus(order.id, next);
@@ -85,7 +98,12 @@ export default function OnlineOrdersScreen() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
-      <Toolbar title="VIP ORDERS" onBack={() => router.back()} onRefresh={reload} />
+      <Toolbar
+        title="VIP ORDERS"
+        onBack={() => router.back()}
+        onRefresh={reload}
+        onTestPush={testPush}
+      />
 
       <View style={styles.filterBar}>
         <Pressable
@@ -143,10 +161,12 @@ function Toolbar({
   title,
   onBack,
   onRefresh,
+  onTestPush,
 }: {
   title: string;
   onBack: () => void;
   onRefresh: () => void;
+  onTestPush?: () => void;
 }) {
   return (
     <View style={styles.toolbar}>
@@ -154,6 +174,11 @@ function Toolbar({
         <Ionicons name="arrow-back" size={24} color={colors.primary} />
       </Pressable>
       <Text style={styles.toolbarTitle}>{title}</Text>
+      {onTestPush && (
+        <Pressable onPress={onTestPush} style={styles.toolbarBtn} hitSlop={8}>
+          <Ionicons name="notifications-outline" size={21} color={colors.primary} />
+        </Pressable>
+      )}
       <Pressable
         onPress={() => {
           feedbackTap();

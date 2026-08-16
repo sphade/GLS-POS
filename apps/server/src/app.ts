@@ -12,6 +12,7 @@ import { stores } from "./modules/stores/stores.routes.js";
 import { members } from "./modules/stores/members.routes.js";
 import { sync } from "./modules/sync/sync.routes.js";
 import { vip } from "./modules/vip/vip.routes.js";
+import { push } from "./modules/push/push.routes.js";
 
 /**
  * Build the Hono application. New feature areas are added by creating a module
@@ -56,6 +57,10 @@ export function createApp() {
   api.use("/stores", requireAuth);
   api.route("/stores", stores);
 
+  // Push-token registration for staff devices.
+  api.use("/push/*", requireAuth, withStore);
+  api.route("/push", push);
+
   // Store-scoped staff & role management.
   api.use("/members", requireAuth, withStore);
   api.use("/members/*", requireAuth, withStore);
@@ -74,6 +79,18 @@ export function createApp() {
     if (!tableId) throw HttpError.badRequest("tableId is required");
     const base = c.env.BETTER_AUTH_URL.replace(/\/$/, "");
     return ok(c, { url: `${base}/vip/${c.get("storeId")}/${tableId}` });
+  });
+
+  /**
+   * Realtime channel. Authenticated + membership-checked here, then the upgrade
+   * is handed to the store's Durable Object, which holds the socket and pushes
+   * change notifications to every till.
+   */
+  api.get("/realtime", requireAuth, withStore, async (c) => {
+    if (c.req.header("Upgrade")?.toLowerCase() !== "websocket") {
+      throw HttpError.badRequest("Expected a WebSocket upgrade", "upgrade_required");
+    }
+    return c.get("store").fetch(new Request("https://do/realtime", c.req.raw));
   });
 
   // Offline-first sync against the caller's store Durable Object.

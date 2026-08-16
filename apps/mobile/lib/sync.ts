@@ -52,6 +52,29 @@ function collectDirty(): { changes: SyncChange[]; idsByCollection: Record<string
 let inFlight = false;
 
 /**
+ * Listeners notified after a sync applies remote changes, so features can react
+ * the instant data lands instead of polling their own timers.
+ */
+type SyncListener = (appliedCount: number) => void;
+const listeners = new Set<SyncListener>();
+
+/** Subscribe to sync completions. Returns an unsubscribe function. */
+export function onSynced(fn: SyncListener): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+function emitSynced(count: number) {
+  listeners.forEach((fn) => {
+    try {
+      fn(count);
+    } catch {
+      // A bad listener must never break syncing.
+    }
+  });
+}
+
+/**
  * Run one sync cycle for the given store. Returns the number of remote changes
  * applied, or -1 if it was skipped (offline / signed out / already running).
  */
@@ -105,6 +128,7 @@ export async function syncNow(storeId: string): Promise<number> {
     }
 
     metaSet(cursorKey(storeId), String(body.data.cursor));
+    if (body.data.changes.length > 0) emitSynced(body.data.changes.length);
     return body.data.changes.length;
   } catch (e) {
     console.warn("[sync] failed:", (e as Error).message);
