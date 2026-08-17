@@ -24,7 +24,6 @@ export default function SaleSuccessScreen() {
   const amount = receipt ? formatMoney(receipt.total, receipt.currency) : formatMoney(0);
   const receiptId = receipt?.number.replace(/^#/, "") ?? "—";
   const itemCount = receipt?.itemCount ?? 0;
-  const unpaid = receipt?.status === "unpaid";
 
   /**
    * Print on the paired thermal printer, falling back to the phone's print
@@ -60,22 +59,8 @@ export default function SaleSuccessScreen() {
   return (
     <SafeAreaView style={styles.root}>
       <View style={styles.center}>
-        <Ionicons
-          name={unpaid ? "time-outline" : "checkmark-circle-outline"}
-          size={96}
-          color={unpaid ? colors.primary : colors.green}
-        />
+        <Ionicons name="checkmark-circle-outline" size={96} color={colors.green} />
         <Text style={styles.amount}>{amount}</Text>
-        {unpaid && (
-          <View style={styles.unpaidChip}>
-            <Text style={styles.unpaidChipText}>AWAITING PAYMENT · {receipt?.mode.toUpperCase()}</Text>
-          </View>
-        )}
-        {unpaid && (
-          <Text style={styles.unpaidHint}>
-            Print the receipt and give it to the customer, then mark it paid.
-          </Text>
-        )}
       </View>
 
       <View style={styles.meta}>

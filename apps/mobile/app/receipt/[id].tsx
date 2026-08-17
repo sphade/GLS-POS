@@ -19,7 +19,7 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReceiptScreen() {
   const { id, fromSale } = useLocalSearchParams<{ id: string; fromSale?: string }>();
   const router = useRouter();
-  const { receipts, markPaid } = useCart();
+  const { receipts } = useCart();
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const receipt = receipts.find((r) => r.id === id);
@@ -64,17 +64,7 @@ export default function ReceiptScreen() {
     }
   };
 
-  /** Settle an unpaid receipt once the transfer/card lands. */
-  const onMarkPaid = () => {
-    if (!receipt) return;
-    feedbackTap();
-    Alert.alert("Confirm payment", `Mark ${receipt.number} as paid?`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Card", onPress: () => markPaid(receipt.id, "Card") },
-      { text: "Transfer", onPress: () => markPaid(receipt.id, "Transfer") },
-      { text: "Cash", onPress: () => markPaid(receipt.id, "Cash") },
-    ]);
-  };
+
 
   if (!receipt) {
     return (
@@ -125,14 +115,7 @@ export default function ReceiptScreen() {
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 10, paddingBottom: 24 }}>
-        {/* Unpaid receipts get the settle action; refunds need permission. */}
         <View style={styles.actionRow}>
-          {receipt.status === "unpaid" && (
-            <Pressable style={styles.paidBtn} onPress={onMarkPaid}>
-              <Ionicons name="checkmark-circle" size={16} color={colors.white} />
-              <Text style={styles.paidBtnText}>MARK AS PAID</Text>
-            </Pressable>
-          )}
           {can("sale:refund") && (
             <Pressable
               style={[styles.outlineBtn, { borderColor: colors.red500 }]}
@@ -149,13 +132,6 @@ export default function ReceiptScreen() {
           <Text style={styles.storeName}>{receipt.storeName}</Text>
           {receipt.storeReference ? <Text style={styles.storeMeta}>{receipt.storeReference}</Text> : null}
           <View style={styles.hr} />
-
-          {receipt.status === "unpaid" && (
-            <View style={styles.unpaidStamp}>
-              <Text style={styles.unpaidStampText}>NOT PAID</Text>
-              <Text style={styles.unpaidStampSub}>Customer to pay {formatMoney(receipt.total, receipt.currency)}</Text>
-            </View>
-          )}
 
           <Text style={styles.line}>Served by: {receipt.servedBy}</Text>
           {receipt.customerName ? <Text style={styles.line}>Customer: {receipt.customerName}</Text> : null}
@@ -266,26 +242,6 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginBottom: 8 },
   outlineBtn: { borderWidth: 1, borderColor: colors.primary, borderRadius: 4, paddingHorizontal: 12, paddingVertical: 6 },
   outlineBtnText: { color: colors.primary, fontWeight: "700", fontSize: 12 },
-  paidBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    backgroundColor: colors.green,
-    borderRadius: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-  },
-  paidBtnText: { color: colors.white, fontWeight: "800", fontSize: 12, letterSpacing: 0.4 },
-  unpaidStamp: {
-    borderWidth: 2,
-    borderColor: colors.red500,
-    borderRadius: 4,
-    paddingVertical: 8,
-    alignItems: "center",
-    marginBottom: 10,
-  },
-  unpaidStampText: { color: colors.red500, fontSize: 18, fontWeight: "800", letterSpacing: 1 },
-  unpaidStampSub: { color: colors.red500, fontSize: 11, fontWeight: "600", marginTop: 2 },
   receiptCard: { backgroundColor: colors.white, borderRadius: 4, padding: 14, elevation: 2 },
   storeName: { fontSize: 20, fontWeight: "800", color: colors.grey900, textAlign: "center" },
   storeMeta: { fontSize: 13, color: colors.grey600, textAlign: "center", marginTop: 2 },

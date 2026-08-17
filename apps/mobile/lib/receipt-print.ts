@@ -65,14 +65,8 @@ export function buildReceiptBytes(r: Receipt, paper: PaperWidth = 58): Uint8Arra
   b.rule();
   b.keyValue("Payment", r.mode.toUpperCase());
 
-  // An unpaid receipt is the customer's request to pay — make that unmissable.
-  if (r.status === "unpaid") {
-    b.align("center").bold(true).big(true).line("** NOT PAID **").big(false);
-    b.line("Please pay this amount").bold(false).align("left");
-  } else {
-    b.keyValue("Status", "PAID");
-  }
-
+  // Deliberately no paid/unpaid wording. The printed slip is just a receipt;
+  // staff stamp it by hand once the customer has paid.
   b.align("center").line().line("Thank you!").line("Powered by GLS POS").feed(3).cut();
   return b.build();
 }
@@ -127,11 +121,6 @@ export function buildReceiptHtml(r: Receipt): string {
   ${r.cashReceived != null ? row("Change", `${sym}${amount(Math.max(0, r.cashReceived - r.total))}`) : ""}
   <hr />
   ${row("Payment", r.mode.toUpperCase())}
-  ${
-    r.status === "unpaid"
-      ? `<div class="unpaid">NOT PAID<br/><span style="font-size:11px">Please pay this amount</span></div>`
-      : row("Status", "PAID")
-  }
   <div class="foot">Thank you!<br/>Powered by GLS POS</div>
 </body></html>`;
 }
@@ -152,7 +141,6 @@ export function buildReceiptText(r: Receipt): string {
     "",
     `TOTAL: ${money(r.total, r.currency)}`,
     `Payment: ${r.mode.toUpperCase()}`,
-    r.status === "unpaid" ? "STATUS: NOT PAID — please pay this amount" : "STATUS: PAID",
     "",
     "Thank you!",
   ];

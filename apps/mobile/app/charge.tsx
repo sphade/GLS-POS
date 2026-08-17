@@ -49,8 +49,6 @@ export default function ChargeScreen() {
     const receipt = completeSale({
       mode,
       customerName: name.trim() || null,
-      // Card/transfer/credit: the customer pays after getting the receipt.
-      status: "unpaid",
       storeName: store.name,
       storeReference: store.reference,
       servedBy: user?.name ?? "Staff",
@@ -147,23 +145,14 @@ export default function ChargeScreen() {
             ))}
           </View>
 
-          {/* Make the pay-after-receipt behaviour explicit before charging. */}
-          {selectedMode && !selectedMode.settlesNow && (
-            <View style={styles.unpaidNote}>
-              <MaterialCommunityIcons name="information-outline" size={18} color={colors.primary} />
-              <Text style={styles.unpaidNoteText}>
-                Receipt prints as NOT PAID. Give it to the customer, then mark it paid once the{" "}
-                {selectedMode.key.toLowerCase()} comes through.
-              </Text>
-            </View>
-          )}
+
         </View>
       </ScrollView>
 
       {mode && (
         <Pressable style={styles.charge} onPress={onCharge}>
           <Text style={styles.chargeText}>
-            {selectedMode?.settlesNow ? strings.charge : "PRINT RECEIPT"} {formatMoney(total, "NGN")}
+            {strings.charge} {formatMoney(total, "NGN")}
           </Text>
         </Pressable>
       )}
@@ -222,15 +211,7 @@ const styles = StyleSheet.create({
   },
   modeTileActive: { backgroundColor: colors.primary },
   modeText: { fontSize: 13, fontWeight: "700", color: colors.grey700, textAlign: "center" },
-  unpaidNote: {
-    flexDirection: "row",
-    gap: 8,
-    backgroundColor: colors.blue50,
-    borderRadius: 4,
-    padding: 10,
-    marginTop: 10,
-  },
-  unpaidNoteText: { flex: 1, fontSize: 12, color: colors.primary, lineHeight: 17 },
+
   charge: {
     margin: 10,
     height: 52,

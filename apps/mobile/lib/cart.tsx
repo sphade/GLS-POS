@@ -1,7 +1,6 @@
 ﻿import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { WebOrder } from "@gls-pos/types";
-import { seedReceipts } from "./seed-receipts";
-import { loadAll, put as dbPut, seedOnce } from "./db";
+import { loadAll, put as dbPut } from "./db";
 
 /**
  * How an item is sold:
@@ -172,8 +171,6 @@ type CartState = {
     storeReference?: string;
     servedBy: string;
   }) => Receipt;
-  /** Settle an unpaid receipt once the transfer/card payment lands. */
-  markPaid: (id: string, mode?: string) => void;
   /**
    * Raise a receipt for a VIP web order. Bypasses the cart entirely — the order
    * was already priced server-side — and starts unpaid, since the guest pays
@@ -192,10 +189,12 @@ const CartContext = createContext<CartState | null>(null);
 export function CartProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
   // Receipts persist in SQLite (offline-first). Seeded once for the demo.
-  const [receipts, setReceipts] = useState<Receipt[]>(() => {
-    seedOnce("receipts_seeded", () => seedReceipts().forEach((r) => dbPut("receipts", r, false)));
-    return loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt);
-  });
+  // Receipts are real sales only — no demo seeding. An earlier version seeded 17
+  // fake receipts (some flagged unsynced on purpose), which made the Receipts
+  // screen and its "not synced" warning show information that wasn't true.
+  const [receipts, setReceipts] = useState<Receipt[]>(() =>
+    loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt),
+  );
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
@@ -283,21 +282,6 @@ export function CartProvider({ children }: { children: ReactNode }) {
         return receipt;
       },
 
-      markPaid: (id, mode) => {
-        setReceipts((prev) =>
-          prev.map((r) => {
-            if (r.id !== id || r.status === "paid") return r;
-            const updated: Receipt = {
-              ...r,
-              status: "paid",
-              paidAt: Date.now(),
-              mode: mode ?? r.mode,
-            };
-            dbPut("receipts", updated);
-            return updated;
-          }),
-        );
-      },
     };
   }, [entries, receipts]);
 

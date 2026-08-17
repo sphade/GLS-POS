@@ -65,6 +65,18 @@ export function loadOne<T>(c: Collection, id: string): T | null {
   return row ? (JSON.parse(row.data) as T) : null;
 }
 
+/**
+ * How many records still need pushing to the server. This is the *real* sync
+ * state (the `dirty` column the sync engine clears), unlike any flag stored
+ * inside a document.
+ */
+export function countDirty(c: Collection): number {
+  initDb();
+  return (
+    db.getFirstSync<{ n: number }>(`SELECT COUNT(*) AS n FROM ${c} WHERE dirty = 1`)?.n ?? 0
+  );
+}
+
 /** Ids of all live records — cheap, no payload. */
 export function loadIds(c: Collection): string[] {
   initDb();
