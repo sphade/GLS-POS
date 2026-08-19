@@ -9,6 +9,7 @@ import { CatalogProvider } from "@/lib/catalog";
 import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { setActiveStore } from "@/lib/db";
+import { AUTO_AUTH } from "@/lib/device-account";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { colors } from "@/constants/theme";
@@ -87,6 +88,14 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     const root = segments[0];
     const onSignIn = root === "sign-in";
     const onCreateStore = root === "create-store";
+
+    // Auto-auth phase: the device signs itself in, so never block on a login
+    // screen. If provisioning failed (e.g. offline on first launch) we still let
+    // the POS through — it works from local data and syncs once it can.
+    if (AUTO_AUTH) {
+      if (onSignIn || onCreateStore) router.replace("/(tabs)");
+      return;
+    }
 
     if (!signedIn) {
       if (!onSignIn) router.replace("/sign-in");

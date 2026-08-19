@@ -200,9 +200,14 @@ const attemptedImages = new Set<string>();
  * True once a genuine store is selected. `store_unknown` is the placeholder the
  * store provider uses before sign-in / before memberships load.
  */
+/**
+ * True once we have a database worth seeding. Excludes only the pre-mount
+ * bootstrap database; the offline `local` store IS seeded, so the POS is usable
+ * before it can reach the server.
+ */
 function isRealStore(): boolean {
   const id = getActiveStore();
-  return !!id && id !== "bootstrap" && id !== "store_unknown";
+  return !!id && id !== "bootstrap";
 }
 
 /**

@@ -4,6 +4,13 @@ import { startRealtime } from "./realtime";
 import { registerForPush } from "./push";
 import { useAuth } from "./auth";
 
+/**
+ * Store id used before the device has a real store from the server (offline
+ * first launch). Its local database is seeded so the POS is usable, but it is
+ * never synced — there's no such store on the server.
+ */
+export const LOCAL_STORE_ID = "local";
+
 export type Store = {
   id: string;
   name: string;
@@ -54,7 +61,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const found = activeStore && stores.find((s) => s.id === activeStore.id);
     return (
       found ??
-      stores[0] ?? { id: "store_unknown", name: "My Store", initials: "MS", currency: "NGN" }
+      stores[0] ?? {
+        // Offline / not-yet-provisioned fallback. Stable id (not a random one)
+        // so the local database and its seeded catalog persist across launches
+        // and the POS is usable before it can reach the server.
+        id: LOCAL_STORE_ID,
+        name: "My Store",
+        initials: "MS",
+        currency: "NGN",
+      }
     );
   }, [activeStore, stores]);
 
@@ -69,7 +84,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Register this device for push, so a locked phone still gets alerted.
   // Silently no-ops on simulators or without an EAS project id.
   useEffect(() => {
-    if (store.id === "store_unknown") return;
+    if (store.id === LOCAL_STORE_ID) return;
     void registerForPush(store.id);
   }, [store.id]);
 

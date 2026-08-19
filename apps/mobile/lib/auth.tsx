@@ -3,6 +3,7 @@ import type { Permission, StoreMembership, StoreRole } from "@gls-pos/types";
 import { ROLE_PERMISSIONS, roleCan } from "@gls-pos/types";
 import { authClient, authCookie } from "./auth-client";
 import { api } from "./api";
+import { AUTO_AUTH, DEFAULT_STORE_NAME, ensureDeviceSession } from "./device-account";
 import { unregisterPush } from "./push";
 import { metaGet, metaSet } from "./db";
 
@@ -85,13 +86,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void (async () => {
       await refresh();
+
+      /**
+       * Auto-auth phase: rather than showing a login screen, provision a
+       * credential for this device and make sure it owns a store, so sync works
+       * out of the box. Server-side auth is untouched.
+       */
+      if (AUTO_AUTH && !authCookie()) {
+        const signedIn = await ensureDeviceSession();
+        if (signedIn) {
+          const list = await api.listStores();
+          if (list.ok && list.data.length === 0) {
+            await api.createStore({ name: DEFAULT_STORE_NAME, currency: "NGN" });
+          }
+          await refresh();
+        }
+      }
+
       setReady(true);
     })();
   }, [refresh]);
 
   const value = useMemo<AuthState>(() => {
     const activeStore = stores.find((s) => s.id === activeStoreId) ?? stores[0] ?? null;
-    const role = activeStore?.role ?? null;
+    /**
+     * Fall back to owner while auto-auth is on. Otherwise a device that hasn't
+     * finished provisioning (or is offline on first launch) would have no role,
+     * and the permission checks would hide every feature — making a working
+     * offline POS look broken.
+     */
+    const role: StoreRole | null = activeStore?.role ?? (AUTO_AUTH ? "owner" : null);
     const permissions = role ? ROLE_PERMISSIONS[role] : [];
 
     return {

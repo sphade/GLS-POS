@@ -6,6 +6,7 @@ import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { AUTO_AUTH } from "@/lib/device-account";
 
 type Entry = {
   label: string;
@@ -99,19 +100,25 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
               );
             })}
 
-            <View style={styles.divider} />
-            <Pressable
-              style={styles.row}
-              onPress={() => {
-                feedbackTap();
-                onClose();
-                void signOut();
-              }}
-              android_ripple={{ color: "#00000010" }}
-            >
-              <MaterialCommunityIcons name="logout" size={22} color={colors.red500} />
-              <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
-            </Pressable>
+            {/* Hidden while the device signs itself in — logging out would just
+                strand the user on a screen they can't get past. */}
+            {!AUTO_AUTH && (
+              <>
+                <View style={styles.divider} />
+                <Pressable
+                  style={styles.row}
+                  onPress={() => {
+                    feedbackTap();
+                    onClose();
+                    void signOut();
+                  }}
+                  android_ripple={{ color: "#00000010" }}
+                >
+                  <MaterialCommunityIcons name="logout" size={22} color={colors.red500} />
+                  <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
+                </Pressable>
+              </>
+            )}
           </ScrollView>
         </Pressable>
       </Pressable>
