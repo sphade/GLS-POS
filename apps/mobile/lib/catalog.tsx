@@ -3,7 +3,17 @@ import type { Item } from "./cart";
 import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
 import { ITEM_IMAGES } from "./item-images";
 import { loadImageIds, saveImage } from "./image-store";
-import { loadAll, put as dbPut, metaGet, metaSet, resetCollection, seedOnce, softDelete } from "./db";
+import {
+  getActiveStore,
+  loadAll,
+  markAllDirty,
+  put as dbPut,
+  metaGet,
+  metaSet,
+  resetCollection,
+  seedOnce,
+  softDelete,
+} from "./db";
 
 /** Colour palette auto-assigned to new categories/items. */
 export const swatches = [
@@ -100,34 +110,47 @@ const DEFAULT_STAFF: StaffMember[] = [
 ];
 
 /**
- * Write the starter data into SQLite once. The flag is versioned: bumping it
- * re-seeds. The GLS menu seed wipes the old placeholder catalog + categories
- * first so switching menus never leaves duplicates behind.
+ * Write the starter data into the ACTIVE store's database once.
+ *
+ * Called from the provider rather than at module load: with one database per
+ * store, importing this file used to seed whichever database happened to be
+ * active at import time — which was the bootstrap one, before any store was
+ * known. Each branch now seeds its own copy on first open.
  */
-seedOnce("catalog_seeded_gls_v3", () => {
-  // v3 moved photos out of the product document into `product_images`, so the
-  // old rows (which carried base64 inline) are cleared out entirely.
-  (
-    [
-      "products",
-      "categories",
-      "modifiers",
-      "ingredients",
-      "tables",
-      "customers",
-      "staff",
-      "product_images",
-    ] as const
-  ).forEach(resetCollection);
-  DEFAULT_CATEGORIES.forEach((c) => dbPut("categories", c, false));
-  DEFAULT_MODIFIERS.forEach((m) => dbPut("modifiers", m, false));
-  DEFAULT_INGREDIENTS.forEach((i) => dbPut("ingredients", i, false));
-  DEFAULT_TABLES.forEach((t) => dbPut("tables", t, false));
-  DEFAULT_CUSTOMERS.forEach((c) => dbPut("customers", c, false));
-  DEFAULT_STAFF.forEach((s) => dbPut("staff", s, false));
-  // Attach the source image URL; first launch hydrates it into a base64 `image`.
-  mockItems.forEach((p) => dbPut("products", { ...p, imageUrl: ITEM_IMAGES[p.name] }, false));
-});
+function seedStore() {
+  // Before sign-in the store is a placeholder; don't seed (or later download 62
+  // images into) a throwaway database.
+  if (!isRealStore()) return;
+
+  seedOnce("catalog_seeded_gls_v3", () => {
+    // v3 moved photos out of the product document into `product_images`, so the
+    // old rows (which carried base64 inline) are cleared out entirely.
+    (
+      [
+        "products",
+        "categories",
+        "modifiers",
+        "ingredients",
+        "tables",
+        "customers",
+        "staff",
+        "product_images",
+      ] as const
+    ).forEach(resetCollection);
+    // Seeded rows are written DIRTY so the first sync uploads them to the store's
+    // Durable Object. Writing them clean (as an earlier version did) meant the
+    // server never received the catalog or tables — which silently broke the VIP
+    // page, since it reads the menu and validates the table server-side.
+    DEFAULT_CATEGORIES.forEach((c) => dbPut("categories", c));
+    DEFAULT_MODIFIERS.forEach((m) => dbPut("modifiers", m));
+    DEFAULT_INGREDIENTS.forEach((i) => dbPut("ingredients", i));
+    DEFAULT_TABLES.forEach((t) => dbPut("tables", t));
+    DEFAULT_CUSTOMERS.forEach((c) => dbPut("customers", c));
+    DEFAULT_STAFF.forEach((s) => dbPut("staff", s));
+    // Attach the source image URL; first launch hydrates it into a stored image.
+    mockItems.forEach((p) => dbPut("products", { ...p, imageUrl: ITEM_IMAGES[p.name] }));
+  });
+}
 
 type CatalogState = {
   products: Item[];
@@ -173,11 +196,51 @@ type CatalogState = {
  */
 const attemptedImages = new Set<string>();
 
+/**
+ * True once a genuine store is selected. `store_unknown` is the placeholder the
+ * store provider uses before sign-in / before memberships load.
+ */
+function isRealStore(): boolean {
+  const id = getActiveStore();
+  return !!id && id !== "bootstrap" && id !== "store_unknown";
+}
+
+/**
+ * One-time repair for devices seeded by an earlier build.
+ *
+ * That build wrote the starter catalog and tables as already-synced, so the sync
+ * engine never uploaded them and the store's Durable Object stayed empty — which
+ * silently broke the VIP page (no menu, and the table id couldn't be found).
+ * Flagging the existing rows dirty makes the next sync upload what's already
+ * there, without wiping anything the user has since edited.
+ */
+function repairUnsyncedSeed() {
+  if (!isRealStore()) return;
+  seedOnce("seed_upload_repair_v1", () => {
+    (
+      [
+        "products",
+        "categories",
+        "modifiers",
+        "ingredients",
+        "tables",
+        "customers",
+        "staff",
+      ] as const
+    ).forEach(markAllDirty);
+  });
+}
+
 const CatalogContext = createContext<CatalogState | null>(null);
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
-  // In-memory mirror for React reactivity; SQLite is the durable source of truth.
-  const [products, setProducts] = useState<Item[]>(() => loadAll<Item>("products"));
+  // Seed this store's database before the first read below. The provider is
+  // keyed by store id (see app/_layout.tsx), so this runs once per branch.
+  const [products, setProducts] = useState<Item[]>(() => {
+    seedStore();
+    repairUnsyncedSeed();
+    return loadAll<Item>("products");
+  });
   const [categories, setCategories] = useState<Category[]>(() => loadAll<Category>("categories"));
   const [modifiers, setModifiers] = useState<ModifierGroup[]>(() => loadAll<ModifierGroup>("modifiers"));
   const [ingredients, setIngredients] = useState<Ingredient[]>(() => loadAll<Ingredient>("ingredients"));
@@ -195,6 +258,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
    * state is updated once at the end. Runs after first paint.
    */
   useEffect(() => {
+    if (!isRealStore()) return;
     let cancelled = false;
 
     /** Fetch to raw base64 (no data-URI prefix). */

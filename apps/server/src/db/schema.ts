@@ -90,6 +90,53 @@ export const pushToken = sqliteTable("push_token", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
 
+/**
+ * API keys for external systems (delivery apps, marketplaces, dashboards).
+ *
+ * Only a SHA-256 hash of the secret is stored, so a database leak can't be
+ * replayed against the API. The plaintext key is shown once at creation.
+ * `scopes` is a comma-separated allowlist, e.g. "catalog:read,stock:write".
+ */
+export const apiKey = sqliteTable("api_key", {
+  id: text("id").primaryKey(),
+  storeId: text("store_id")
+    .notNull()
+    .references(() => store.id, { onDelete: "cascade" }),
+  /** Human label, e.g. "Chowdeck integration". */
+  name: text("name").notNull(),
+  /** First few chars of the key, for identifying it in a list. */
+  prefix: text("prefix").notNull(),
+  keyHash: text("key_hash").notNull(),
+  scopes: text("scopes").notNull(),
+  createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+  /** Set when revoked; revoked keys are kept for audit rather than deleted. */
+  revokedAt: integer("revoked_at", { mode: "timestamp" }),
+});
+
+/**
+ * Outbound webhooks. Lets an external system be told about stock changes and
+ * orders instead of polling. Deliveries are signed with HMAC-SHA256 over the
+ * body using `secret`, sent in the `x-gls-signature` header.
+ */
+export const webhook = sqliteTable("webhook", {
+  id: text("id").primaryKey(),
+  storeId: text("store_id")
+    .notNull()
+    .references(() => store.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  secret: text("secret").notNull(),
+  /** Comma-separated event names, or "*" for everything. */
+  events: text("events").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  /** Consecutive failures; used to disable a persistently broken endpoint. */
+  failureCount: integer("failure_count").notNull().default(0),
+  lastStatus: integer("last_status"),
+  lastAttemptAt: integer("last_attempt_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+
 /** Links a user to a store with a role. */
 export const member = sqliteTable("member", {
   id: text("id").primaryKey(),

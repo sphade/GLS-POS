@@ -80,6 +80,9 @@ function emitSynced(count: number) {
  */
 export async function syncNow(storeId: string): Promise<number> {
   if (inFlight) return -1;
+  // Placeholder store before memberships load — nothing to sync, and pushing
+  // would target a store that doesn't exist.
+  if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") return -1;
 
   const cookie = authCookie();
   if (!cookie) return -1; // not signed in yet

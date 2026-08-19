@@ -9,8 +9,16 @@ import * as SQLite from "expo-sqlite";
  *  - dirty      : 1 = changed locally and not yet pushed to the server
  *
  * The UI reads/writes here synchronously (expo-sqlite sync API), so everything
- * works with no network. Phase B2 drains `dirty` rows to the store Durable
- * Object and applies remote changes back.
+ * works with no network; the sync engine drains `dirty` rows to the store
+ * Durable Object and applies remote changes back.
+ *
+ * SCOPING: one database FILE PER STORE (`gls-pos-<storeId>.db`).
+ *
+ * A store (branch) is its own Durable Object with its own catalog and stock, so
+ * the local mirror must be separated the same way. Sharing one file meant that
+ * a manager switching between GLS branches merged both catalogs and receipt
+ * histories into a single local database — Poka's stock showing up in Ikeja's
+ * item list, and dirty rows at risk of pushing to the wrong store.
  */
 
 export const COLLECTIONS = [
@@ -29,15 +37,26 @@ export const COLLECTIONS = [
 
 export type Collection = (typeof COLLECTIONS)[number];
 
-const db = SQLite.openDatabaseSync("gls-pos.db");
+/**
+ * Used before a store is known (app boot, sign-in screen). Nothing operational
+ * is written here; it just keeps reads from crashing during those first frames.
+ */
+const BOOTSTRAP = "bootstrap";
 
-let ready = false;
+const handles = new Map<string, SQLite.SQLiteDatabase>();
+let activeStoreId: string = BOOTSTRAP;
 
-export function initDb() {
-  if (ready) return;
-  db.execSync("PRAGMA journal_mode = WAL;");
+const fileFor = (storeId: string) => `gls-pos-${storeId.replace(/[^A-Za-z0-9_-]/g, "")}.db`;
+
+/** Open (once) and migrate the database for a store. */
+function open(storeId: string): SQLite.SQLiteDatabase {
+  const existing = handles.get(storeId);
+  if (existing) return existing;
+
+  const database = SQLite.openDatabaseSync(fileFor(storeId));
+  database.execSync("PRAGMA journal_mode = WAL;");
   for (const c of COLLECTIONS) {
-    db.execSync(
+    database.execSync(
       `CREATE TABLE IF NOT EXISTS ${c} (
         id TEXT PRIMARY KEY NOT NULL,
         data TEXT NOT NULL,
@@ -46,9 +65,37 @@ export function initDb() {
         dirty INTEGER NOT NULL DEFAULT 1
       );`,
     );
+    database.execSync(`CREATE INDEX IF NOT EXISTS ${c}_dirty_idx ON ${c} (dirty);`);
   }
-  db.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
-  ready = true;
+  database.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
+
+  handles.set(storeId, database);
+  return database;
+}
+
+/**
+ * Point all subsequent reads/writes at a store's database. Must be called
+ * before the data providers mount (see app/_layout.tsx), and again whenever the
+ * user switches store.
+ */
+export function setActiveStore(storeId: string): void {
+  if (!storeId) return;
+  open(storeId);
+  activeStoreId = storeId;
+}
+
+export function getActiveStore(): string {
+  return activeStoreId;
+}
+
+/** The database for the active store. */
+function conn(): SQLite.SQLiteDatabase {
+  return open(activeStoreId);
+}
+
+/** Kept for compatibility; schema creation now happens on open. */
+export function initDb() {
+  conn();
 }
 
 /**
@@ -57,7 +104,7 @@ export function initDb() {
  * the whole collection would pull every photo's base64 into memory.
  */
 export function loadOne<T>(c: Collection, id: string): T | null {
-  initDb();
+  const db = conn();
   const row = db.getFirstSync<{ data: string }>(
     `SELECT data FROM ${c} WHERE id = ? AND deleted = 0`,
     id,
@@ -71,7 +118,7 @@ export function loadOne<T>(c: Collection, id: string): T | null {
  * inside a document.
  */
 export function countDirty(c: Collection): number {
-  initDb();
+  const db = conn();
   return (
     db.getFirstSync<{ n: number }>(`SELECT COUNT(*) AS n FROM ${c} WHERE dirty = 1`)?.n ?? 0
   );
@@ -79,7 +126,7 @@ export function countDirty(c: Collection): number {
 
 /** Ids of all live records — cheap, no payload. */
 export function loadIds(c: Collection): string[] {
-  initDb();
+  const db = conn();
   return db
     .getAllSync<{ id: string }>(`SELECT id FROM ${c} WHERE deleted = 0`)
     .map((r) => r.id);
@@ -87,7 +134,7 @@ export function loadIds(c: Collection): string[] {
 
 /** All live (non-deleted) records of a collection, in insertion order. */
 export function loadAll<T>(c: Collection): T[] {
-  initDb();
+  const db = conn();
   const rows = db.getAllSync<{ data: string }>(
     `SELECT data FROM ${c} WHERE deleted = 0 ORDER BY rowid ASC`,
   );
@@ -96,7 +143,7 @@ export function loadAll<T>(c: Collection): T[] {
 
 /** Insert or update a record; marks it dirty for the next sync. */
 export function put<T extends { id: string }>(c: Collection, item: T, dirty = true) {
-  initDb();
+  const db = conn();
   db.runSync(
     `INSERT INTO ${c} (id, data, updated_at, deleted, dirty) VALUES (?, ?, ?, 0, ?)
      ON CONFLICT(id) DO UPDATE SET
@@ -110,13 +157,26 @@ export function put<T extends { id: string }>(c: Collection, item: T, dirty = tr
 
 /** Soft-delete (tombstone) so the deletion can sync. */
 export function softDelete(c: Collection, id: string) {
-  initDb();
+  const db = conn();
   db.runSync(`UPDATE ${c} SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?`, Date.now(), id);
+}
+
+/**
+ * Mark every row in a collection as needing upload.
+ *
+ * Used to repair devices seeded by an earlier build that wrote the starter
+ * catalog as already-synced, so the server never received it. Returns how many
+ * rows were flagged.
+ */
+export function markAllDirty(c: Collection): number {
+  const db = conn();
+  db.runSync(`UPDATE ${c} SET dirty = 1`);
+  return db.getFirstSync<{ n: number }>(`SELECT COUNT(*) AS n FROM ${c}`)?.n ?? 0;
 }
 
 /** Hard-wipe a collection. Used when re-seeding demo data (sync off). */
 export function resetCollection(c: Collection) {
-  initDb();
+  const db = conn();
   db.runSync(`DELETE FROM ${c}`);
 }
 
@@ -126,7 +186,7 @@ export type ChangeRow<T> = { id: string; data: T; updatedAt: number; deleted: bo
 
 /** Rows changed locally since the last push. */
 export function loadDirty<T>(c: Collection): ChangeRow<T>[] {
-  initDb();
+  const db = conn();
   const rows = db.getAllSync<{ id: string; data: string; updated_at: number; deleted: number }>(
     `SELECT id, data, updated_at, deleted FROM ${c} WHERE dirty = 1`,
   );
@@ -135,14 +195,14 @@ export function loadDirty<T>(c: Collection): ChangeRow<T>[] {
 
 export function clearDirty(c: Collection, ids: string[]) {
   if (ids.length === 0) return;
-  initDb();
+  const db = conn();
   const placeholders = ids.map(() => "?").join(",");
   db.runSync(`UPDATE ${c} SET dirty = 0 WHERE id IN (${placeholders})`, ...ids);
 }
 
 /** Apply a change pulled from the server (last-write-wins by updatedAt). */
 export function applyRemote<T extends { id: string }>(c: Collection, change: ChangeRow<T>) {
-  initDb();
+  const db = conn();
   const local = db.getFirstSync<{ updated_at: number; dirty: number }>(
     `SELECT updated_at, dirty FROM ${c} WHERE id = ?`,
     change.id,
@@ -161,12 +221,12 @@ export function applyRemote<T extends { id: string }>(c: Collection, change: Cha
 }
 
 export function metaGet(key: string): string | null {
-  initDb();
+  const db = conn();
   return db.getFirstSync<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key)?.value ?? null;
 }
 
 export function metaSet(key: string, value: string) {
-  initDb();
+  const db = conn();
   db.runSync(
     `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     key,

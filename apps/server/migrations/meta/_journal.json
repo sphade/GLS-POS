@@ -15,6 +15,13 @@
       "when": 1786893271474,
       "tag": "0001_curvy_archangel",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786943105652,
+      "tag": "0002_solid_blob",
+      "breakpoints": true
     }
   ]
 }

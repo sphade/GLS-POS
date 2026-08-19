@@ -132,10 +132,33 @@ export default function OnlineOrdersScreen() {
 
       <ScrollView contentContainerStyle={{ padding: 6, paddingBottom: 30 }}>
         {list.length === 0 && (
-          <View style={styles.empty}>
-            <MaterialCommunityIcons name="qrcode-scan" size={48} color={colors.grey400} />
-            <Text style={styles.emptyText}>
-              No VIP orders yet.{"\n"}Guests order by scanning the QR code on their table.
+          <View style={styles.setup}>
+            <MaterialCommunityIcons name="qrcode-scan" size={44} color={colors.primary} />
+            <Text style={styles.setupTitle}>No VIP orders yet</Text>
+            <Text style={styles.setupText}>
+              Guests order by scanning the QR code on their table. Each table has its own code —
+              that's how the order arrives labelled for the right table.
+            </Text>
+
+            <View style={styles.steps}>
+              <Step n={1} text="Create your VIP tables in Table Management" />
+              <Step n={2} text="Tap the green QR button on a table" />
+              <Step n={3} text="Print the card and place it on that table" />
+            </View>
+
+            <Pressable
+              style={styles.setupBtn}
+              onPress={() => {
+                feedbackTap();
+                router.push("/tables");
+              }}
+            >
+              <MaterialCommunityIcons name="table-furniture" size={18} color={colors.white} />
+              <Text style={styles.setupBtnText}>OPEN TABLE MANAGEMENT</Text>
+            </Pressable>
+
+            <Text style={styles.setupNote}>
+              Your menu must have synced at least once for the QR page to show items.
             </Text>
           </View>
         )}
@@ -291,6 +314,18 @@ function OrderCard({
   );
 }
 
+/** Numbered setup step in the empty state. */
+function Step({ n, text }: { n: number; text: string }) {
+  return (
+    <View style={styles.stepRow}>
+      <View style={styles.stepNum}>
+        <Text style={styles.stepNumText}>{n}</Text>
+      </View>
+      <Text style={styles.stepText}>{text}</Text>
+    </View>
+  );
+}
+
 function Action({
   label,
   onPress,
@@ -346,6 +381,48 @@ const styles = StyleSheet.create({
 
   empty: { alignItems: "center", justifyContent: "center", padding: 40, gap: 14 },
   emptyText: { color: colors.grey600, fontSize: 14, textAlign: "center", lineHeight: 20 },
+
+  setup: {
+    alignItems: "center",
+    backgroundColor: colors.card,
+    borderRadius: 6,
+    margin: 6,
+    padding: 22,
+    elevation: 1,
+  },
+  setupTitle: { fontSize: 17, fontWeight: "800", color: colors.grey900, marginTop: 12 },
+  setupText: {
+    fontSize: 13,
+    color: colors.grey600,
+    textAlign: "center",
+    lineHeight: 19,
+    marginTop: 6,
+  },
+  steps: { alignSelf: "stretch", gap: 10, marginTop: 18 },
+  stepRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  stepNum: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepNumText: { color: colors.white, fontSize: 11, fontWeight: "800" },
+  stepText: { flex: 1, fontSize: 13, color: colors.grey800 },
+  setupBtn: {
+    alignSelf: "stretch",
+    flexDirection: "row",
+    gap: 8,
+    height: 46,
+    borderRadius: 6,
+    backgroundColor: colors.green,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 20,
+  },
+  setupBtnText: { color: colors.white, fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
+  setupNote: { fontSize: 11, color: colors.grey500, textAlign: "center", marginTop: 12 },
 
   card: {
     backgroundColor: colors.card,

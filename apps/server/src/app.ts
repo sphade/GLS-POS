@@ -13,6 +13,9 @@ import { members } from "./modules/stores/members.routes.js";
 import { sync } from "./modules/sync/sync.routes.js";
 import { vip } from "./modules/vip/vip.routes.js";
 import { push } from "./modules/push/push.routes.js";
+import { v1 } from "./modules/integration/v1.routes.js";
+import { integrations } from "./modules/integration/integration.routes.js";
+import { withApiKey } from "./middleware/api-key.js";
 
 /**
  * Build the Hono application. New feature areas are added by creating a module
@@ -43,6 +46,14 @@ export function createApp() {
   // narrow read/write surface that makes this safe.
   app.route("/vip", vip);
 
+  /**
+   * Public integration API (v1) for external systems — delivery apps, etc.
+   * Authenticated by API key rather than a staff session, so it's mounted before
+   * withAuth and carries its own middleware.
+   */
+  app.use("/v1/*", withApiKey);
+  app.route("/v1", v1);
+
   // Resolve the per-request auth instance + session for every route.
   app.use("*", withAuth);
 
@@ -60,6 +71,10 @@ export function createApp() {
   // Push-token registration for staff devices.
   api.use("/push/*", requireAuth, withStore);
   api.route("/push", push);
+
+  // Staff manage API keys + webhooks for external systems here.
+  api.use("/integrations/*", requireAuth, withStore);
+  api.route("/integrations", integrations);
 
   // Store-scoped staff & role management.
   api.use("/members", requireAuth, withStore);

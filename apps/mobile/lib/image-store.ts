@@ -1,5 +1,5 @@
 import * as FileSystem from "expo-file-system";
-import { loadIds, loadOne, put as dbPut, softDelete } from "./db";
+import { getActiveStore, loadIds, loadOne, put as dbPut, softDelete } from "./db";
 
 /**
  * Item images, kept in SQLite but deliberately *out* of the product document.
@@ -22,34 +22,45 @@ export type ProductImage = {
   mime: string;
 };
 
-const DIR = `${FileSystem.cacheDirectory}item-images/`;
+/**
+ * Cache directory is per store. Seeded product ids are deterministic
+ * (`gls_1`…`gls_62`), so two branches would otherwise overwrite each other's
+ * photos in a shared folder.
+ */
+const dirFor = (storeId: string) =>
+  `${FileSystem.cacheDirectory}item-images/${storeId.replace(/[^A-Za-z0-9_-]/g, "")}/`;
 
-/** productId -> file:// URI, once materialised this session. */
+/** "<storeId>/<productId>" -> file:// URI, once materialised this session. */
 const fileCache = new Map<string, string>();
 /** In-flight materialisations, so concurrent cards don't duplicate work. */
 const pending = new Map<string, Promise<string | null>>();
 
-let dirReady: Promise<void> | null = null;
-function ensureDir(): Promise<void> {
-  if (!dirReady) {
-    dirReady = FileSystem.makeDirectoryAsync(DIR, { intermediates: true }).catch(() => {});
+const dirsReady = new Map<string, Promise<void>>();
+function ensureDir(storeId: string): Promise<void> {
+  let task = dirsReady.get(storeId);
+  if (!task) {
+    task = FileSystem.makeDirectoryAsync(dirFor(storeId), { intermediates: true }).catch(() => {});
+    dirsReady.set(storeId, task);
   }
-  return dirReady;
+  return task;
 }
+
+/** Scope cache keys by store so ids can't collide across branches. */
+const keyFor = (productId: string) => `${getActiveStore()}/${productId}`;
 
 const extFor = (mime: string) => (mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : "jpg");
 
 /** Save (or replace) a product's image. `base64` must exclude the data-URI prefix. */
 export function saveImage(productId: string, base64: string, mime = "image/jpeg"): void {
   dbPut<ProductImage>("product_images", { id: productId, base64, mime });
-  fileCache.delete(productId);
-  pending.delete(productId);
+  fileCache.delete(keyFor(productId));
+  pending.delete(keyFor(productId));
 }
 
 export function removeImage(productId: string): void {
   softDelete("product_images", productId);
-  fileCache.delete(productId);
-  pending.delete(productId);
+  fileCache.delete(keyFor(productId));
+  pending.delete(keyFor(productId));
 }
 
 /** Which products currently have an image — ids only, no base64 loaded. */
@@ -59,7 +70,7 @@ export function loadImageIds(): Set<string> {
 
 /** Synchronous peek: the file URI if it's already materialised. */
 export function cachedImageUri(productId: string): string | undefined {
-  return fileCache.get(productId);
+  return fileCache.get(keyFor(productId));
 }
 
 /**
@@ -67,10 +78,13 @@ export function cachedImageUri(productId: string): string | undefined {
  * directory on first request. Returns null when the product has no image.
  */
 export function getImageUri(productId: string): Promise<string | null> {
-  const hit = fileCache.get(productId);
+  const storeId = getActiveStore();
+  const key = `${storeId}/${productId}`;
+
+  const hit = fileCache.get(key);
   if (hit) return Promise.resolve(hit);
 
-  const inFlight = pending.get(productId);
+  const inFlight = pending.get(key);
   if (inFlight) return inFlight;
 
   const task = (async (): Promise<string | null> => {
@@ -79,8 +93,8 @@ export function getImageUri(productId: string): Promise<string | null> {
       const row = loadOne<ProductImage>("product_images", productId);
       if (!row?.base64) return null;
 
-      await ensureDir();
-      const path = `${DIR}${productId}.${extFor(row.mime)}`;
+      await ensureDir(storeId);
+      const path = `${dirFor(storeId)}${productId}.${extFor(row.mime)}`;
 
       const info = await FileSystem.getInfoAsync(path);
       if (!info.exists) {
@@ -88,16 +102,16 @@ export function getImageUri(productId: string): Promise<string | null> {
           encoding: FileSystem.EncodingType.Base64,
         });
       }
-      fileCache.set(productId, path);
+      fileCache.set(key, path);
       return path;
     } catch {
       return null;
     } finally {
-      pending.delete(productId);
+      pending.delete(key);
     }
   })();
 
-  pending.set(productId, task);
+  pending.set(key, task);
   return task;
 }
 
@@ -107,7 +121,7 @@ export function getImageUri(productId: string): Promise<string | null> {
  */
 export async function warmImageCache(productIds: string[]): Promise<void> {
   for (const id of productIds) {
-    if (fileCache.has(id)) continue;
+    if (fileCache.has(keyFor(id))) continue;
     await getImageUri(id);
   }
 }

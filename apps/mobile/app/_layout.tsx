@@ -6,8 +6,9 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { CartProvider } from "@/lib/cart";
 import { CatalogProvider } from "@/lib/catalog";
-import { StoreProvider } from "@/lib/store";
+import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
+import { setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { colors } from "@/constants/theme";
@@ -28,22 +29,42 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <AuthProvider>
           <StoreProvider>
-            <CatalogProvider>
-              <CartProvider>
-                <WebOrdersProvider>
-                  <StatusBar style="light" backgroundColor={colors.primaryDark} />
-                  <AuthGate>
-                    <RootStack />
-                  </AuthGate>
-                  {/* Floats above every screen so staff never miss an order. */}
-                  <NewOrderBanner />
-                </WebOrdersProvider>
-              </CartProvider>
-            </CatalogProvider>
+            <StoreScopedData />
           </StoreProvider>
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
+  );
+}
+
+/**
+ * Binds the data layer to the selected store.
+ *
+ * Each store (branch) has its own local SQLite file, so the active database
+ * must be selected BEFORE the data providers read from it — hence the
+ * synchronous `setActiveStore` in the render body rather than an effect.
+ *
+ * `key={store.id}` remounts the providers when the user switches branch, which
+ * discards the previous branch's in-memory state and re-reads from that
+ * branch's database. Without it, Poka's catalog would linger in Ikeja's till.
+ */
+function StoreScopedData() {
+  const { store } = useStore();
+  setActiveStore(store.id);
+
+  return (
+    <CatalogProvider key={`catalog-${store.id}`}>
+      <CartProvider key={`cart-${store.id}`}>
+        <WebOrdersProvider key={`orders-${store.id}`}>
+          <StatusBar style="light" backgroundColor={colors.primaryDark} />
+          <AuthGate>
+            <RootStack />
+          </AuthGate>
+          {/* Floats above every screen so staff never miss an order. */}
+          <NewOrderBanner />
+        </WebOrdersProvider>
+      </CartProvider>
+    </CatalogProvider>
   );
 }
 

@@ -4,9 +4,13 @@ import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlit
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 import { and, eq, gt, sql } from "drizzle-orm";
 import type {
+  ApiCategory,
+  ApiProduct,
+  ApiStockAdjustment,
   Permission,
   PlaceWebOrderRequest,
   PublicMenu,
+  StockState,
   StoreRole,
   SyncChange,
   SyncPullResponse,
@@ -24,6 +28,43 @@ const SEQ_KEY = "seq";
 /** Public VIP endpoint throttle: at most N orders per table per window. */
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ORDERS = 5;
+
+/** The product fields the server cares about; the doc may carry more. */
+type StoredProduct = {
+  id: string;
+  name: string;
+  price: number;
+  currency?: string;
+  categoryId?: string;
+  sku?: string;
+  barcode?: string;
+  stockQuantity: number | null;
+  lowStockAt?: number;
+};
+
+/** Before/after of a stock change, used to emit the right events. */
+export type StockTransition = {
+  productId: string;
+  name: string;
+  previousStock: number | null;
+  stock: number | null;
+  lowStockAt?: number;
+  stockState: StockState;
+};
+
+/**
+ * Single definition of stock state, so the POS, the VIP page and the public API
+ * never disagree about what "low" means. Default threshold matches the app (3).
+ */
+export function stockStateOf(p: {
+  stockQuantity?: number | null;
+  lowStockAt?: number;
+}): StockState {
+  const stock = p.stockQuantity;
+  if (stock === null || stock === undefined) return "untracked";
+  if (stock <= 0) return "out_of_stock";
+  return stock <= (p.lowStockAt ?? 3) ? "low_stock" : "in_stock";
+}
 
 type DocumentRow = typeof schema.documents.$inferSelect;
 
@@ -442,6 +483,212 @@ export class StoreDurableObject extends DurableObject<Env> {
     this.broadcast("web_order", { code: order.code, tableName: order.tableName });
 
     return { ok: true, order };
+  }
+
+  // --- Public integration API -----------------------------------------------
+
+  /** Shape a stored product into the stable public API shape. */
+  private toApiProduct(p: StoredProduct, categoryName?: string, updatedAt = 0): ApiProduct {
+    return {
+      id: p.id,
+      name: p.name,
+      price: p.price,
+      currency: p.currency ?? "NGN",
+      categoryId: p.categoryId,
+      categoryName,
+      sku: p.sku,
+      barcode: p.barcode,
+      stock: p.stockQuantity ?? null,
+      lowStockAt: p.lowStockAt,
+      stockState: stockStateOf(p),
+      available: p.stockQuantity === null || (p.stockQuantity ?? 0) > 0,
+      updatedAt,
+    };
+  }
+
+  /** Catalog for integrators, with resolved category names and stock state. */
+  async apiProducts(): Promise<ApiProduct[]> {
+    const categories = new Map(
+      this.docs<{ id: string; name: string }>("categories").map((c) => [c.id, c.name]),
+    );
+    const rows = this.db
+      .select({ data: schema.documents.data, updatedAt: schema.documents.updatedAt })
+      .from(schema.documents)
+      .where(
+        and(eq(schema.documents.collection, "products"), eq(schema.documents.deleted, false)),
+      )
+      .all();
+
+    return rows.map((r) => {
+      const p = JSON.parse(r.data) as StoredProduct;
+      return this.toApiProduct(p, p.categoryId ? categories.get(p.categoryId) : undefined, r.updatedAt);
+    });
+  }
+
+  async apiCategories(): Promise<ApiCategory[]> {
+    const products = this.docs<StoredProduct>("products");
+    return this.docs<{ id: string; name: string }>("categories").map((c) => ({
+      id: c.id,
+      name: c.name,
+      productCount: products.filter((p) => p.categoryId === c.id).length,
+    }));
+  }
+
+  /**
+   * Apply a stock change from an external system (delivery app marking items
+   * sold, warehouse recording a delivery).
+   *
+   * Authoritative here rather than in the caller: we read the current value,
+   * apply the delta, clamp at zero, log a movement for the audit trail, and
+   * return the before/after so the Worker can emit the right events.
+   */
+  async apiAdjustStock(
+    adjustments: ApiStockAdjustment[],
+    source: string,
+  ): Promise<{ applied: StockTransition[]; unknown: string[] }> {
+    const applied: StockTransition[] = [];
+    const unknown: string[] = [];
+    let seq = this.getSeq();
+    const now = Date.now();
+
+    for (const adj of adjustments) {
+      const [row] = this.db
+        .select({ data: schema.documents.data })
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.collection, "products"),
+            eq(schema.documents.id, adj.productId),
+          ),
+        )
+        .all();
+
+      if (!row) {
+        unknown.push(adj.productId);
+        continue;
+      }
+
+      const product = JSON.parse(row.data) as StoredProduct;
+      const previous = product.stockQuantity;
+
+      // An untracked item can't be adjusted without first being tracked.
+      if (previous === null || previous === undefined) {
+        unknown.push(adj.productId);
+        continue;
+      }
+
+      const next =
+        adj.stock !== undefined
+          ? Math.max(0, Math.round(adj.stock))
+          : Math.max(0, previous + Math.round(adj.delta ?? 0));
+      if (next === previous) continue;
+
+      const updated: StoredProduct = { ...product, stockQuantity: next };
+
+      seq += 1;
+      this.db
+        .insert(schema.documents)
+        .values({
+          collection: "products",
+          id: product.id,
+          data: JSON.stringify(updated),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .onConflictDoUpdate({
+          target: [schema.documents.collection, schema.documents.id],
+          set: { data: JSON.stringify(updated), updatedAt: now, serverSeq: seq },
+        })
+        .run();
+
+      // Audit trail, same shape the POS writes.
+      seq += 1;
+      const movementId = `mov_api_${now}_${Math.floor(Math.random() * 1e4)}`;
+      this.db
+        .insert(schema.documents)
+        .values({
+          collection: "stock_movements",
+          id: movementId,
+          data: JSON.stringify({
+            id: movementId,
+            productId: product.id,
+            productName: product.name,
+            reason: adj.reason ?? "adjustment",
+            delta: next - previous,
+            resulting: next,
+            at: now,
+            ref: `api:${source}`,
+            note: adj.note,
+          }),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .run();
+
+      applied.push({
+        productId: product.id,
+        name: product.name,
+        previousStock: previous,
+        stock: next,
+        lowStockAt: product.lowStockAt,
+        stockState: stockStateOf(updated),
+      });
+    }
+
+    if (applied.length > 0) {
+      this.setSeq(seq);
+      // Tills see the new stock straight away.
+      this.broadcast("changes");
+    }
+
+    return { applied, unknown };
+  }
+
+  /**
+   * Raw document changes since a sequence, for the public events feed. Reuses
+   * the same monotonic `server_seq` the device sync uses, so integrators get an
+   * exactly-resumable cursor for free.
+   */
+  async apiChangesSince(
+    cursor: number,
+    limit = 100,
+  ): Promise<{
+    rows: {
+      collection: string;
+      id: string;
+      data: string;
+      deleted: boolean;
+      updatedAt: number;
+      seq: number;
+    }[];
+    cursor: number;
+    hasMore: boolean;
+  }> {
+    const rows = this.db
+      .select()
+      .from(schema.documents)
+      .where(gt(schema.documents.serverSeq, cursor))
+      .orderBy(schema.documents.serverSeq)
+      .limit(limit + 1)
+      .all();
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    return {
+      rows: page.map((r) => ({
+        collection: r.collection,
+        id: r.id,
+        data: r.data,
+        deleted: r.deleted,
+        updatedAt: r.updatedAt,
+        seq: r.serverSeq,
+      })),
+      cursor: page.length ? page[page.length - 1]!.serverSeq : cursor,
+      hasMore,
+    };
   }
 
   /** Diagnostics: number of live (non-deleted) documents per collection. */

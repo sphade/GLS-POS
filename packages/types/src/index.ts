@@ -198,6 +198,7 @@ export interface SyncPullResponse {
 import type { StoreRole } from "./permissions";
 export * from "./permissions";
 export * from "./web-order";
+export * from "./integration";
 
 /** A store the signed-in user belongs to, with their role in it. */
 export interface StoreMembership {
