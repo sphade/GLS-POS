@@ -10,6 +10,7 @@ import { withAuth, requireAuth } from "./middleware/auth.js";
 import { withStore } from "./middleware/store.js";
 import { stores } from "./modules/stores/stores.routes.js";
 import { members } from "./modules/stores/members.routes.js";
+import { business } from "./modules/stores/business.routes.js";
 import { sync } from "./modules/sync/sync.routes.js";
 import { vip } from "./modules/vip/vip.routes.js";
 import { push } from "./modules/push/push.routes.js";
@@ -80,6 +81,10 @@ export function createApp() {
   api.use("/members", requireAuth, withStore);
   api.use("/members/*", requireAuth, withStore);
   api.route("/members", members);
+
+  // Business profile: name, address, contact, receipt lines. Owner-only to write.
+  api.use("/business", requireAuth, withStore);
+  api.route("/business", business);
 
   // The caller's role + effective permissions for the selected store, so the
   // client can shape its UI from the same matrix the server enforces.

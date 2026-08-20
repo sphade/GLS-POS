@@ -1,4 +1,4 @@
-import type { ApiResult, StoreMembership, StoreRole } from "@gls-pos/types";
+import type { ApiResult, StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
 import { API_URL, authCookie } from "./auth-client";
 
 /**
@@ -27,6 +27,8 @@ export type StoreMember = {
   userId: string;
   name: string;
   email: string;
+  /** Login handle; null for older accounts created before username login. */
+  username: string | null;
   role: StoreRole;
 };
 
@@ -40,6 +42,28 @@ export const api = {
   /** Staff roster for a store (requires staff:manage). */
   listMembers: (storeId: string) =>
     request<StoreMember[]>("/members", { headers: { "x-store-id": storeId } }),
+
+  /**
+   * Create a staff account outright. The owner supplies the person's name and a
+   * password; the username defaults to a handle derived from the name.
+   */
+  createStaff: (
+    storeId: string,
+    body: { name: string; username?: string; password: string; role: StoreRole },
+  ) =>
+    request<{ userId: string; username: string }>("/members/staff", {
+      method: "POST",
+      headers: { "x-store-id": storeId },
+      body: JSON.stringify(body),
+    }),
+
+  /** Reset a staff member's password (owner only). */
+  resetStaffPassword: (storeId: string, userId: string, password: string) =>
+    request<{ updated: boolean }>(`/members/${userId}/password`, {
+      method: "POST",
+      headers: { "x-store-id": storeId },
+      body: JSON.stringify({ password }),
+    }),
   /** Grant or change a member's role by email (owner only). */
   setMemberRole: (storeId: string, email: string, role: StoreRole) =>
     request<{ userId: string; role: StoreRole }>("/members", {
@@ -52,5 +76,15 @@ export const api = {
     request<{ removed: boolean }>(`/members/${userId}`, {
       method: "DELETE",
       headers: { "x-store-id": storeId },
+    }),
+
+  /** Business profile — readable by any member, writable by the owner. */
+  getBusiness: (storeId: string) =>
+    request<StoreProfile>("/business", { headers: { "x-store-id": storeId } }),
+  updateBusiness: (storeId: string, body: Partial<Omit<StoreProfile, "id">>) =>
+    request<StoreProfile>("/business", {
+      method: "PATCH",
+      headers: { "x-store-id": storeId },
+      body: JSON.stringify(body),
     }),
 };

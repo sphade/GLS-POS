@@ -15,4 +15,10 @@ export interface Env {
   BETTER_AUTH_URL: string;
   /** "development" | "production" — controls error verbosity. */
   ENVIRONMENT?: string;
+  /**
+   * Origin of the deployed Expo web build, if hosted (e.g.
+   * "https://pos.example.com"). Added to better-auth's trusted origins so web
+   * sign-in works; local dev origins are always trusted.
+   */
+  WEB_ORIGIN?: string;
 }

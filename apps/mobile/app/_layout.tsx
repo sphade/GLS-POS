@@ -9,7 +9,6 @@ import { CatalogProvider } from "@/lib/catalog";
 import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { setActiveStore } from "@/lib/db";
-import { AUTO_AUTH } from "@/lib/device-account";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { colors } from "@/constants/theme";
@@ -71,44 +70,49 @@ function StoreScopedData() {
 
 /**
  * Sends the user where they belong:
- *  - signed out            → /sign-in
- *  - signed in, no store   → /create-store
- *  - signed in with a store→ out of the auth screens and into the POS
+ *  - signed out                     → /sign-in
+ *  - signed in, confirmed no store  → /create-store
+ *  - signed in with a store         → out of the auth screens and into the POS
  *
- * Renders a spinner until the session has been resolved so we never redirect
- * on a half-known state.
+ * "Confirmed" matters. A cashier's memberships arrive a moment after their
+ * session does, and routing on that gap flashed "Create your store" at staff
+ * who already belong to a restaurant. So we hold on the splash spinner until
+ * the store list is known, and when it can't be fetched (offline) we let them
+ * into the POS on cached data rather than demanding they create a store.
  */
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { ready, signedIn, stores } = useAuth();
+  const { ready, signedIn, stores, storesStatus, canManageBusiness } = useAuth();
   const segments = useSegments();
   const router = useRouter();
 
+  const settling = signedIn && storesStatus === "pending";
+
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || settling) return;
     const root = segments[0];
     const onSignIn = root === "sign-in";
     const onCreateStore = root === "create-store";
-
-    // Auto-auth phase: the device signs itself in, so never block on a login
-    // screen. If provisioning failed (e.g. offline on first launch) we still let
-    // the POS through — it works from local data and syncs once it can.
-    if (AUTO_AUTH) {
-      if (onSignIn || onCreateStore) router.replace("/(tabs)");
-      return;
-    }
 
     if (!signedIn) {
       if (!onSignIn) router.replace("/sign-in");
       return;
     }
-    if (stores.length === 0) {
+    // Only send someone to create a store when the server actually told us they
+    // have none.
+    if (stores.length === 0 && storesStatus === "ok") {
       if (!onCreateStore) router.replace("/create-store");
       return;
     }
-    if (onSignIn || onCreateStore) router.replace("/(tabs)");
-  }, [ready, signedIn, stores.length, segments, router]);
+    // Existing owners may deliberately stay on this screen to open another
+    // location. Staff who deep-link here are sent back to the POS.
+    if (onCreateStore && !canManageBusiness) {
+      router.replace("/(tabs)");
+      return;
+    }
+    if (onSignIn) router.replace("/(tabs)");
+  }, [ready, settling, signedIn, stores.length, storesStatus, canManageBusiness, segments, router]);
 
-  if (!ready) {
+  if (!ready || settling) {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.screenBg }}>
         <ActivityIndicator size="large" color={colors.primary} />
@@ -151,6 +155,8 @@ function RootStack() {
       <Stack.Screen name="customer-editor" options={MODAL} />
       <Stack.Screen name="staff" options={MODAL} />
       <Stack.Screen name="staff-editor" options={MODAL} />
+      <Stack.Screen name="business-settings" options={MODAL} />
+      <Stack.Screen name="account-settings" options={MODAL} />
       <Stack.Screen name="expense-categories" options={MODAL} />
       <Stack.Screen name="add-entry" options={MODAL} />
       <Stack.Screen

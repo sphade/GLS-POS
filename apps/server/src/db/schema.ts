@@ -12,9 +12,17 @@ import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  /**
+   * Required by better-auth. For staff accounts this is a synthesised internal
+   * address (`<username>@staff.gls.local`) because they sign in with a username.
+   */
   email: text("email").notNull().unique(),
   emailVerified: integer("email_verified", { mode: "boolean" }).notNull().default(false),
   image: text("image"),
+  /** Added by the better-auth username plugin: the login handle (lower-cased). */
+  username: text("username").unique(),
+  /** The handle as typed, preserving capitalisation for display. */
+  displayUsername: text("display_username"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
@@ -61,7 +69,13 @@ export const verification = sqliteTable("verification", {
 
 // --- Store registry & membership (control plane) ---------------------------
 
-/** A restaurant/store. Its operational data lives in a Durable Object keyed by id. */
+/**
+ * A restaurant/store. Its operational data lives in a Durable Object keyed by id.
+ *
+ * The profile fields below are control-plane on purpose: they identify the
+ * business rather than describe a day's trading, and receipts need them even on
+ * a device that has never synced the store's DO.
+ */
 export const store = sqliteTable("store", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -69,6 +83,14 @@ export const store = sqliteTable("store", {
   ownerId: text("owner_id")
     .notNull()
     .references(() => user.id),
+  /** Street address, printed on receipts. */
+  address: text("address"),
+  /** Contact number for customers, printed on receipts. */
+  phone: text("phone"),
+  /** Optional line above the itemisation, e.g. a tagline or RC number. */
+  receiptHeader: text("receipt_header"),
+  /** Optional line below the total, e.g. "Thank you, come again". */
+  receiptFooter: text("receipt_footer"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });

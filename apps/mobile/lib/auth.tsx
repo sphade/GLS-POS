@@ -3,7 +3,6 @@ import type { Permission, StoreMembership, StoreRole } from "@gls-pos/types";
 import { ROLE_PERMISSIONS, roleCan } from "@gls-pos/types";
 import { authClient, authCookie } from "./auth-client";
 import { api } from "./api";
-import { AUTO_AUTH, DEFAULT_STORE_NAME, ensureDeviceSession } from "./device-account";
 import { unregisterPush } from "./push";
 import { metaGet, metaSet } from "./db";
 
@@ -18,7 +17,18 @@ import { metaGet, metaSet } from "./db";
  * same store with the last known role.
  */
 
-type User = { id: string; name: string; email: string };
+type User = { id: string; name: string; email: string; username?: string };
+
+/** Shape better-auth returns from a sign-in/sign-up call. */
+type AuthResult = { error?: { message?: string } | null };
+
+/**
+ * Whether we've actually heard back about this user's stores.
+ *  pending — still asking; don't route on `stores` yet
+ *  ok      — the list is authoritative, even if empty
+ *  failed  — offline; `stores` is whatever we already knew
+ */
+type StoresStatus = "pending" | "ok" | "failed";
 
 type AuthState = {
   ready: boolean;
@@ -26,14 +36,31 @@ type AuthState = {
   signedIn: boolean;
   /** Stores this user can access. */
   stores: StoreMembership[];
+  /** Guards routing: an empty list only means "no stores" once this is "ok". */
+  storesStatus: StoresStatus;
   activeStore: StoreMembership | null;
   role: StoreRole | null;
   permissions: readonly Permission[];
   /** Permission check used throughout the UI. */
   can: (p: Permission) => boolean;
+  /**
+   * Only owners open new locations, so only they see "Create Shop" / "Edit
+   * Business". A user with no memberships at all is a new owner registering
+   * their first restaurant. Enforced server-side too.
+   */
+  canManageBusiness: boolean;
 
-  signIn: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
-  signUp: (name: string, email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Staff sign in with the username the owner gave them. An email is also
+   * accepted, for accounts that predate username login.
+   */
+  signIn: (usernameOrEmail: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Owner self-registration: creates the first account for a new business. */
+  signUp: (
+    name: string,
+    username: string,
+    password: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
   signOut: () => Promise<void>;
   selectStore: (storeId: string) => void;
   /** Create the first store for a brand-new owner. */
@@ -49,27 +76,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [stores, setStores] = useState<StoreMembership[]>([]);
+  const [storesStatus, setStoresStatus] = useState<StoresStatus>("pending");
   const [activeStoreId, setActiveStoreId] = useState<string | null>(() => metaGet(ACTIVE_STORE_KEY));
 
-  /** Pull the session + store list from the server. Safe to call any time. */
+  /**
+   * Pull the session + store list from the server. Safe to call any time.
+   *
+   * The user and their stores are applied in the *same* tick on purpose. If we
+   * set the user first and awaited the store list afterwards, there'd be a
+   * render where someone is signed in with zero stores — and the router would
+   * bounce a cashier through "Create your store" before their membership
+   * arrived.
+   */
   const refresh = useCallback(async () => {
     try {
       // No cookie yet => definitely signed out; skip the round-trip.
       if (!authCookie()) {
         setUser(null);
         setStores([]);
+        setStoresStatus("ok");
         return;
       }
       const session = await authClient.getSession();
       const sessionUser = (session?.data?.user ?? null) as User | null;
-      setUser(sessionUser);
       if (!sessionUser) {
+        setUser(null);
         setStores([]);
+        setStoresStatus("ok");
         return;
       }
+
       const res = await api.listStores();
+
+      // Applied together, so no render observes "signed in, no stores" unless
+      // that is genuinely true.
+      setUser(sessionUser);
       if (res.ok) {
         setStores(res.data);
+        setStoresStatus("ok");
         // Fall back to the first store when the cached one is gone.
         setActiveStoreId((prev) => {
           const keep = prev && res.data.some((s) => s.id === prev);
@@ -77,45 +121,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (next) metaSet(ACTIVE_STORE_KEY, next);
           return next;
         });
+      } else {
+        // Reachable but unhappy — treat like offline rather than "no stores".
+        setStoresStatus("failed");
       }
     } catch {
       // Offline: keep whatever we already have so the POS stays usable.
+      setStoresStatus("failed");
     }
   }, []);
 
   useEffect(() => {
     void (async () => {
       await refresh();
-
-      /**
-       * Auto-auth phase: rather than showing a login screen, provision a
-       * credential for this device and make sure it owns a store, so sync works
-       * out of the box. Server-side auth is untouched.
-       */
-      if (AUTO_AUTH && !authCookie()) {
-        const signedIn = await ensureDeviceSession();
-        if (signedIn) {
-          const list = await api.listStores();
-          if (list.ok && list.data.length === 0) {
-            await api.createStore({ name: DEFAULT_STORE_NAME, currency: "NGN" });
-          }
-          await refresh();
-        }
-      }
-
       setReady(true);
     })();
   }, [refresh]);
 
   const value = useMemo<AuthState>(() => {
     const activeStore = stores.find((s) => s.id === activeStoreId) ?? stores[0] ?? null;
-    /**
-     * Fall back to owner while auto-auth is on. Otherwise a device that hasn't
-     * finished provisioning (or is offline on first launch) would have no role,
-     * and the permission checks would hide every feature — making a working
-     * offline POS look broken.
-     */
-    const role: StoreRole | null = activeStore?.role ?? (AUTO_AUTH ? "owner" : null);
+    const role = activeStore?.role ?? null;
     const permissions = role ? ROLE_PERMISSIONS[role] : [];
 
     return {
@@ -123,20 +148,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       signedIn: !!user,
       stores,
+      storesStatus,
       activeStore,
       role,
       permissions,
       can: (p) => roleCan(role, p),
+      canManageBusiness: stores.length === 0 || stores.some((s) => s.role === "owner"),
 
-      signIn: async (email, password) => {
-        const res = await authClient.signIn.email({ email, password });
-        if (res.error) return { ok: false, error: res.error.message ?? "Sign in failed" };
+      signIn: async (identifier, password) => {
+        const id = identifier.trim().toLowerCase();
+        const client = authClient as unknown as {
+          signIn: { username: (i: { username: string; password: string }) => Promise<AuthResult> };
+        };
+        // Accounts created before username login (the original owner) only have
+        // an email, so accept either credential and pick the right endpoint.
+        const res = id.includes("@")
+          ? await authClient.signIn.email({ email: id, password })
+          : await client.signIn.username({ username: id, password });
+        if (res.error) {
+          return {
+            ok: false,
+            error: res.error.message ?? "That username or password isn't right",
+          };
+        }
         await refresh();
         return { ok: true };
       },
 
-      signUp: async (name, email, password) => {
-        const res = await authClient.signUp.email({ name, email, password });
+      signUp: async (name, username, password) => {
+        // better-auth needs an email internally; staff never see or use it.
+        const handle = username.trim().toLowerCase();
+        const res = await authClient.signUp.email({
+          name: name.trim(),
+          email: `${handle}@staff.gls.local`,
+          password,
+          username: handle,
+          displayUsername: username.trim(),
+        } as never);
         if (res.error) return { ok: false, error: res.error.message ?? "Sign up failed" };
         await refresh();
         return { ok: true };
@@ -148,6 +196,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await authClient.signOut();
         setUser(null);
         setStores([]);
+        setStoresStatus("ok");
       },
 
       selectStore: (storeId) => {
@@ -164,7 +213,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       refresh,
     };
-  }, [ready, user, stores, activeStoreId, refresh]);
+  }, [ready, user, stores, storesStatus, activeStoreId, refresh]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

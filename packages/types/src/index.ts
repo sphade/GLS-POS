@@ -208,6 +208,20 @@ export interface StoreMembership {
   role: StoreRole;
 }
 
+/**
+ * The business profile behind a store: what gets printed on receipts and shown
+ * to customers. Editable by the owner in Business Settings.
+ */
+export interface StoreProfile {
+  id: ID;
+  name: string;
+  currency: CurrencyCode;
+  address: string | null;
+  phone: string | null;
+  receiptHeader: string | null;
+  receiptFooter: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // API envelope
 // ---------------------------------------------------------------------------

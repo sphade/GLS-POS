@@ -6,7 +6,6 @@ import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
-import { AUTO_AUTH } from "@/lib/device-account";
 
 type Entry = {
   label: string;
@@ -46,7 +45,7 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
 export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const router = useRouter();
   const { store } = useStore();
-  const { can, signOut } = useAuth();
+  const { can, canManageBusiness, signOut } = useAuth();
 
   const go = (route?: string) => {
     feedbackTap();
@@ -72,9 +71,12 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
                 <Text style={styles.storeRef}>{store.reference}</Text>
               </View>
             </View>
-            <Pressable onPress={() => go()} style={styles.editBusiness}>
-              <Text style={styles.editBusinessText}>Edit Business</Text>
-            </Pressable>
+            {/* Owner-only: staff can see which shop they're in, not change it. */}
+            {canManageBusiness && (
+              <Pressable onPress={() => go("/business-settings")} style={styles.editBusiness}>
+                <Text style={styles.editBusinessText}>Edit Business</Text>
+              </Pressable>
+            )}
           </View>
 
           <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
@@ -100,25 +102,19 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
               );
             })}
 
-            {/* Hidden while the device signs itself in — logging out would just
-                strand the user on a screen they can't get past. */}
-            {!AUTO_AUTH && (
-              <>
-                <View style={styles.divider} />
-                <Pressable
-                  style={styles.row}
-                  onPress={() => {
-                    feedbackTap();
-                    onClose();
-                    void signOut();
-                  }}
-                  android_ripple={{ color: "#00000010" }}
-                >
-                  <MaterialCommunityIcons name="logout" size={22} color={colors.red500} />
-                  <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
-                </Pressable>
-              </>
-            )}
+            <View style={styles.divider} />
+            <Pressable
+              style={styles.row}
+              onPress={() => {
+                feedbackTap();
+                onClose();
+                void signOut();
+              }}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <MaterialCommunityIcons name="logout" size={22} color={colors.red500} />
+              <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
+            </Pressable>
           </ScrollView>
         </Pressable>
       </Pressable>

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { useAuth } from "@/lib/auth";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
@@ -11,7 +12,9 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
  * its owner; from there they can invite staff and assign roles.
  */
 export default function CreateStoreScreen() {
-  const { createStore, signOut, user } = useAuth();
+  const router = useRouter();
+  const { createStore, signOut, user, stores } = useAuth();
+  const openingAnother = stores.length > 0;
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +29,9 @@ export default function CreateStoreScreen() {
     if (!res.ok) {
       feedbackError();
       setError(res.error ?? "Could not create the store");
+      return;
     }
+    router.replace("/(tabs)");
   };
 
   return (
@@ -35,9 +40,11 @@ export default function CreateStoreScreen() {
         <View style={styles.icon}>
           <Ionicons name="storefront-outline" size={34} color={colors.white} />
         </View>
-        <Text style={styles.title}>Set up your store</Text>
+        <Text style={styles.title}>{openingAnother ? "Open another shop" : "Set up your store"}</Text>
         <Text style={styles.sub}>
-          You're signed in as {user?.email}. Name your restaurant to get started — you'll be the owner.
+          {openingAnother
+            ? "Add another location under your owner account."
+            : `You're signed in as ${user?.email}. Name your restaurant to get started — you'll be the owner.`}
         </Text>
 
         <View style={styles.card}>
@@ -64,9 +71,15 @@ export default function CreateStoreScreen() {
           </Pressable>
         </View>
 
-        <Pressable style={styles.signOut} onPress={() => void signOut()}>
-          <Text style={styles.signOutText}>Sign out</Text>
-        </Pressable>
+        {openingAnother ? (
+          <Pressable style={styles.signOut} onPress={() => router.back()}>
+            <Text style={styles.signOutText}>Cancel</Text>
+          </Pressable>
+        ) : (
+          <Pressable style={styles.signOut} onPress={() => void signOut()}>
+            <Text style={styles.signOutText}>Sign out</Text>
+          </Pressable>
+        )}
       </View>
     </SafeAreaView>
   );

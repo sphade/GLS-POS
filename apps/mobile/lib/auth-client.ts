@@ -1,6 +1,7 @@
 import Constants from "expo-constants";
 import { createAuthClient } from "better-auth/react";
 import type { BetterAuthClientPlugin } from "better-auth/client";
+import { usernameClient } from "better-auth/client/plugins";
 import { expoClient } from "@better-auth/expo/client";
 import * as SecureStore from "expo-secure-store";
 
@@ -32,7 +33,9 @@ const expoPlugin = expoClient({
 
 export const authClient = createAuthClient({
   baseURL: API_URL,
-  plugins: [expoPlugin],
+  // usernameClient enables signIn.username — staff log in with a handle, not an
+  // email (see the server's auth factory for why).
+  plugins: [expoPlugin, usernameClient()],
 });
 
 export const { signIn, signUp, signOut, useSession } = authClient;

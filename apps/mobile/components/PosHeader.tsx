@@ -1,9 +1,11 @@
 ﻿import { useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { colors, strings } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 import { AppDrawer } from "@/components/AppDrawer";
 
 /**
@@ -34,6 +36,8 @@ export function PosHeader({
   onChat?: () => void;
 }) {
   const { store, stores, setStoreId } = useStore();
+  const { canManageBusiness } = useAuth();
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -156,15 +160,29 @@ export function PosHeader({
                 </Pressable>
               );
             })}
-            <View style={styles.sheetDivider} />
-            <Pressable style={styles.sheetAction} onPress={feedbackTap} android_ripple={{ color: "#00000010" }}>
-              <Ionicons name="add-circle-outline" size={22} color={colors.primary} />
-              <Text style={styles.sheetActionText}>Create Shop</Text>
-            </Pressable>
-            <Pressable style={styles.sheetAction} onPress={feedbackTap} android_ripple={{ color: "#00000010" }}>
-              <MaterialCommunityIcons name="store-cog-outline" size={22} color={colors.primary} />
-              <Text style={styles.sheetActionText}>Edit Business</Text>
-            </Pressable>
+            {/* Opening or editing a business is the owner's job. A cashier or
+                waiter only switches between the shops they've been added to. */}
+            {canManageBusiness && (
+              <>
+                <View style={styles.sheetDivider} />
+                <Pressable
+                  style={styles.sheetAction}
+                  onPress={() => {
+                    feedbackTap();
+                    setOpen(false);
+                    router.push("/create-store");
+                  }}
+                  android_ripple={{ color: "#00000010" }}
+                >
+                  <Ionicons name="add-circle-outline" size={22} color={colors.primary} />
+                  <Text style={styles.sheetActionText}>Create Shop</Text>
+                </Pressable>
+                <Pressable style={styles.sheetAction} onPress={() => { feedbackTap(); setOpen(false); router.push("/business-settings" as never); }} android_ripple={{ color: "#00000010" }}>
+                  <MaterialCommunityIcons name="store-cog-outline" size={22} color={colors.primary} />
+                  <Text style={styles.sheetActionText}>Edit Business</Text>
+                </Pressable>
+              </>
+            )}
           </Pressable>
         </Pressable>
       </Modal>

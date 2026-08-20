@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
 import { api, type StoreMember } from "@/lib/api";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
+import { CredentialsSheet, type Credentials } from "@/components/CredentialsSheet";
 
 /**
  * Staff & access. Lists everyone with access to the current store and lets an
@@ -27,6 +28,10 @@ export default function StaffScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [resetting, setResetting] = useState<StoreMember | null>(null);
+  /** Credentials to hand over, shown once after create or reset. */
+  const [handover, setHandover] = useState<Credentials | null>(null);
+  const [handoverTitle, setHandoverTitle] = useState("STAFF ACCOUNT CREATED");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -46,7 +51,7 @@ export default function StaffScreen() {
     feedbackTap();
     Alert.alert(
       member.name,
-      `Change role for ${member.email}`,
+      `Change role for ${member.username ? `@${member.username}` : member.email}`,
       [
         ...ALL_ROLES.map((r) => ({
           text: `${ROLE_LABELS[r]}${r === member.role ? " (current)" : ""}`,
@@ -130,7 +135,8 @@ export default function StaffScreen() {
                     {isMe ? " (you)" : ""}
                   </Text>
                   <Text style={styles.email} numberOfLines={1}>
-                    {m.email}
+                    {/* Synthetic staff emails are an implementation detail. */}
+                    {m.username ? `@${m.username}` : m.email}
                   </Text>
                   <Text style={styles.perms} numberOfLines={1}>
                     {ROLE_PERMISSIONS[m.role].length} permissions
@@ -143,9 +149,23 @@ export default function StaffScreen() {
                   </View>
                 </Pressable>
                 {isOwner && m.role !== "owner" && (
-                  <Pressable onPress={() => revoke(m)} hitSlop={8} style={{ paddingLeft: 6 }}>
-                    <Ionicons name="close-circle-outline" size={22} color={colors.grey500} />
-                  </Pressable>
+                  <>
+                    {/* There's no email to send a reset link to, so the owner
+                        sets a new password directly. */}
+                    <Pressable
+                      onPress={() => {
+                        feedbackTap();
+                        setResetting(m);
+                      }}
+                      hitSlop={8}
+                      style={{ paddingLeft: 6 }}
+                    >
+                      <Ionicons name="key-outline" size={20} color={colors.grey500} />
+                    </Pressable>
+                    <Pressable onPress={() => revoke(m)} hitSlop={8} style={{ paddingLeft: 6 }}>
+                      <Ionicons name="close-circle-outline" size={22} color={colors.grey500} />
+                    </Pressable>
+                  </>
                 )}
               </View>
             );
@@ -168,11 +188,33 @@ export default function StaffScreen() {
       <InviteSheet
         visible={inviteOpen}
         storeId={store.id}
+        storeName={store.name}
         onClose={() => setInviteOpen(false)}
-        onDone={() => {
+        onDone={(creds) => {
           setInviteOpen(false);
+          setHandoverTitle("STAFF ACCOUNT CREATED");
+          setHandover(creds);
           void load();
         }}
+      />
+
+      <ResetPasswordSheet
+        member={resetting}
+        storeId={store.id}
+        storeName={store.name}
+        onClose={() => setResetting(null)}
+        onDone={(creds) => {
+          setResetting(null);
+          setHandoverTitle("PASSWORD CHANGED");
+          setHandover(creds);
+        }}
+      />
+
+      {/* The one and only chance to see the password in plain text. */}
+      <CredentialsSheet
+        credentials={handover}
+        title={handoverTitle}
+        onClose={() => setHandover(null)}
       />
     </SafeAreaView>
   );
@@ -204,40 +246,80 @@ function roleColor(role: StoreRole): string {
   }
 }
 
+/** "Tunde A." -> "tunde.a" — mirrors the server's default handle. */
+function handleFromName(name: string): string {
+  const base = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 24);
+  return base.length >= 3 ? base : `${base}.staff`;
+}
+
 /**
- * Grant access by email. The person must already have a GLS POS account —
- * they sign up themselves, then the owner assigns their role here.
+ * Create a staff account. The owner types the person's name and a password and
+ * hands over the credentials — no email, no invitation to accept, because
+ * restaurant staff generally don't have work email addresses.
  */
 function InviteSheet({
   visible,
   storeId,
+  storeName,
   onClose,
   onDone,
 }: {
   visible: boolean;
   storeId: string;
+  storeName: string;
   onClose: () => void;
-  onDone: () => void;
+  /** Hands the credentials up so they can be copied/shared once. */
+  onDone: (credentials: Credentials) => void;
 }) {
-  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [role, setRole] = useState<StoreRole>("cashier");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Username follows the name until the owner edits it themselves.
+  const [handleEdited, setHandleEdited] = useState(false);
+  const effectiveHandle = handleEdited ? username : handleFromName(name);
+  const valid = name.trim().length > 0 && password.length >= 6 && effectiveHandle.length >= 3;
+
   const submit = async () => {
-    if (email.trim().length < 4 || busy) return;
+    if (!valid || busy) return;
     setBusy(true);
     setError(null);
-    const res = await api.setMemberRole(storeId, email.trim(), role);
+    const res = await api.createStaff(storeId, {
+      name: name.trim(),
+      username: effectiveHandle,
+      password,
+      role,
+    });
     setBusy(false);
     if (!res.ok) {
       feedbackError();
       setError(res.error.message);
       return;
     }
-    setEmail("");
+
+    const credentials: Credentials = {
+      name: name.trim(),
+      username: res.data.username,
+      password,
+      role: ROLE_LABELS[role],
+      storeName,
+    };
+
+    setName("");
+    setUsername("");
+    setPassword("");
+    setHandleEdited(false);
     setRole("cashier");
-    onDone();
+    // Parent shows the copy/share sheet — this is the only time the password is
+    // visible, so it must not be a dismissable toast.
+    onDone(credentials);
   };
 
   return (
@@ -252,18 +334,41 @@ function InviteSheet({
           </View>
 
           <View style={{ padding: 16 }}>
-            <Text style={styles.label}>Their account email</Text>
+            <Text style={styles.label}>Their name</Text>
             <TextInput
               style={styles.input}
-              placeholder="name@example.com"
+              placeholder="e.g. Tunde Adeyemi"
               placeholderTextColor={colors.hint}
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
+              value={name}
+              onChangeText={setName}
+              autoCapitalize="words"
+            />
+
+            <Text style={[styles.label, { marginTop: 14 }]}>Username they'll sign in with</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="tunde.adeyemi"
+              placeholderTextColor={colors.hint}
+              value={effectiveHandle}
+              onChangeText={(v) => {
+                setHandleEdited(true);
+                setUsername(v.toLowerCase().replace(/[^a-z0-9._-]/g, ""));
+              }}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+
+            <Text style={[styles.label, { marginTop: 14 }]}>Password</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="At least 6 characters"
+              placeholderTextColor={colors.hint}
+              value={password}
+              onChangeText={setPassword}
               autoCapitalize="none"
             />
             <Text style={styles.note}>
-              They must create an account first, then you can assign their role here.
+              Give them this username and password — they sign in with it on their own device.
             </Text>
 
             <Text style={[styles.label, { marginTop: 16 }]}>Role</Text>
@@ -291,14 +396,113 @@ function InviteSheet({
             {error && <Text style={styles.sheetError}>{error}</Text>}
 
             <Pressable
-              style={[styles.cta, (email.trim().length < 4 || busy) && { opacity: 0.5 }]}
+              style={[styles.cta, (!valid || busy) && { opacity: 0.5 }]}
               onPress={submit}
-              disabled={email.trim().length < 4 || busy}
+              disabled={!valid || busy}
             >
               {busy ? (
                 <ActivityIndicator color={colors.white} />
               ) : (
-                <Text style={styles.ctaText}>GRANT ACCESS</Text>
+                <Text style={styles.ctaText}>CREATE STAFF ACCOUNT</Text>
+              )}
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/**
+ * Set a new password for a staff member. Staff accounts have no real email, so
+ * the owner is the reset path — they type a new password and read it out.
+ */
+function ResetPasswordSheet({
+  member,
+  storeId,
+  storeName,
+  onClose,
+  onDone,
+}: {
+  member: StoreMember | null;
+  storeId: string;
+  storeName: string;
+  onClose: () => void;
+  onDone: (credentials: Credentials) => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const close = () => {
+    setPassword("");
+    setError(null);
+    onClose();
+  };
+
+  const submit = async () => {
+    if (!member || password.length < 6 || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await api.resetStaffPassword(storeId, member.userId, password);
+    setBusy(false);
+    if (!res.ok) {
+      feedbackError();
+      setError(res.error.message);
+      return;
+    }
+    const credentials: Credentials = {
+      name: member.name,
+      username: member.username ?? member.email,
+      password,
+      role: ROLE_LABELS[member.role],
+      storeName,
+    };
+    setPassword("");
+    setError(null);
+    // Same handover flow as creation — the new password needs sending on.
+    onDone(credentials);
+  };
+
+  return (
+    <Modal visible={!!member} transparent animationType="slide" onRequestClose={close}>
+      <Pressable style={styles.backdrop} onPress={close}>
+        <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>RESET PASSWORD</Text>
+            <Pressable onPress={close} hitSlop={8}>
+              <Ionicons name="close" size={24} color={colors.white} />
+            </Pressable>
+          </View>
+
+          <View style={{ padding: 16 }}>
+            <Text style={styles.label}>
+              {member?.username ? `@${member.username}` : (member?.name ?? "")}
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder="New password (at least 6 characters)"
+              placeholderTextColor={colors.hint}
+              value={password}
+              onChangeText={setPassword}
+              autoCapitalize="none"
+            />
+            <Text style={styles.note}>
+              Their old password stops working straight away, and they'll be signed out on other
+              devices.
+            </Text>
+
+            {error && <Text style={styles.sheetError}>{error}</Text>}
+
+            <Pressable
+              style={[styles.cta, (password.length < 6 || busy) && { opacity: 0.5 }]}
+              onPress={submit}
+              disabled={password.length < 6 || busy}
+            >
+              {busy ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <Text style={styles.ctaText}>SET NEW PASSWORD</Text>
               )}
             </Pressable>
           </View>
