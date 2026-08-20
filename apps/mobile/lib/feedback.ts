@@ -1,4 +1,4 @@
-import { createAudioPlayer, type AudioPlayer } from "expo-audio";
+import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from "expo-audio";
 import * as Haptics from "expo-haptics";
 
 /**
@@ -95,15 +95,66 @@ export function feedbackTap() {
 }
 
 /**
- * A VIP order just arrived. Deliberately more insistent than other feedback:
- * staff may not be looking at the screen, so it chimes twice and gives a
- * heavier double buzz.
+ * Critical in-app VIP alarm. It runs for roughly four seconds unless staff
+ * dismiss or attend first. We repeat the bundled sharp sounds because they cut
+ * through restaurant noise better than the short two-chime notification did.
+ * Device media volume/DND still sets the physical upper limit.
  */
+let vipPulseTimer: ReturnType<typeof setInterval> | null = null;
+let vipStopTimer: ReturnType<typeof setTimeout> | null = null;
+let vipPulse = 0;
+
+function playVipPulse() {
+  const name: SoundName = vipPulse++ % 3 === 0 ? "coin" : "beep";
+  if (soundEnabled) {
+    try {
+      let player = players[name];
+      if (!player) {
+        player = createAudioPlayer(sources[name]);
+        players[name] = player;
+      }
+      player.volume = 1;
+      player.seekTo(0);
+      player.play();
+    } catch {
+      /* haptics still draw attention if audio is unavailable */
+    }
+  }
+  vibrate(Haptics.ImpactFeedbackStyle.Heavy);
+}
+
+export function startVipOrderAlarm() {
+  stopVipOrderAlarm();
+  vipPulse = 0;
+  void setAudioModeAsync({
+    playsInSilentMode: true,
+    interruptionMode: "duckOthers",
+    allowsRecording: false,
+    shouldPlayInBackground: false,
+    shouldRouteThroughEarpiece: false,
+  }).catch(() => {});
+  playVipPulse();
+  vipPulseTimer = setInterval(playVipPulse, 600);
+  vipStopTimer = setTimeout(stopVipOrderAlarm, 4200);
+  notify(Haptics.NotificationFeedbackType.Warning);
+}
+
+export function stopVipOrderAlarm() {
+  if (vipPulseTimer) clearInterval(vipPulseTimer);
+  if (vipStopTimer) clearTimeout(vipStopTimer);
+  vipPulseTimer = null;
+  vipStopTimer = null;
+  for (const name of ["beep", "coin"] as const) {
+    try {
+      players[name]?.pause();
+      players[name]?.seekTo(0);
+    } catch {
+      /* already stopped */
+    }
+  }
+}
+
+/** Backward-compatible name for callers that only need to start the alarm. */
 export function feedbackNewOrder() {
-  playSound("coin");
-  notify(Haptics.NotificationFeedbackType.Success);
-  setTimeout(() => {
-    playSound("beep");
-    vibrate(Haptics.ImpactFeedbackStyle.Heavy);
-  }, 420);
+  startVipOrderAlarm();
 }

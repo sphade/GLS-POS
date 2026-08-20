@@ -10,6 +10,7 @@ import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
+import { GlobalRefreshButton } from "@/components/GlobalRefreshButton";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { colors } from "@/constants/theme";
 
@@ -62,6 +63,8 @@ function StoreScopedData() {
           </AuthGate>
           {/* Floats above every screen so staff never miss an order. */}
           <NewOrderBanner />
+          {/* Manual pull from any route when staff want fresh server data now. */}
+          <GlobalRefreshButton />
         </WebOrdersProvider>
       </CartProvider>
     </CatalogProvider>

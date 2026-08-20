@@ -11,8 +11,8 @@ import {
 import * as Notifications from "expo-notifications";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { loadAll, put as dbPut } from "./db";
-import { onSynced } from "./sync";
-import { feedbackNewOrder } from "./feedback";
+import { onSynced, syncNow } from "./sync";
+import { useStore } from "./store";
 
 /**
  * VIP web orders that arrived from the guest ordering site.
@@ -33,8 +33,9 @@ type WebOrdersState = {
   /** Link a web order to the receipt raised for it. */
   attachReceipt: (id: string, receiptId: string) => void;
   reload: () => void;
-  /** Newly-arrived order awaiting acknowledgement, for the alert banner. */
+  /** Oldest unacknowledged arrival is shown first; later orders queue behind it. */
   arrival: WebOrder | null;
+  /** Dismiss only the currently-visible arrival, then surface the next one. */
   dismissArrival: () => void;
 };
 
@@ -43,8 +44,9 @@ const OPEN: WebOrderStatus[] = ["received", "preparing", "ready"];
 const WebOrdersContext = createContext<WebOrdersState | null>(null);
 
 export function WebOrdersProvider({ children }: { children: ReactNode }) {
+  const { store } = useStore();
   const [orders, setOrders] = useState<WebOrder[]>(() => loadAll<WebOrder>("web_orders"));
-  const [arrival, setArrival] = useState<WebOrder | null>(null);
+  const [arrivals, setArrivals] = useState<WebOrder[]>([]);
   /** Ids seen at least once, so we only alert for genuinely new orders. */
   const seen = useRef<Set<string>>(new Set(loadAll<WebOrder>("web_orders").map((o) => o.id)));
 
@@ -58,12 +60,17 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
     const fresh = loadAll<WebOrder>("web_orders");
     setOrders(fresh);
 
-    const unseen = fresh.filter((o) => !seen.current.has(o.id) && o.status === "received");
+    const unseen = fresh
+      .filter((o) => !seen.current.has(o.id) && o.status === "received")
+      .sort((a, b) => a.createdAt - b.createdAt);
     fresh.forEach((o) => seen.current.add(o.id));
     if (unseen.length > 0) {
-      const newest = unseen.sort((a, b) => b.createdAt - a.createdAt)[0]!;
-      feedbackNewOrder();
-      setArrival(newest);
+      // Never overwrite one order with another. Restaurant bursts are common;
+      // staff must acknowledge each order in arrival order.
+      setArrivals((current) => {
+        const queued = new Set(current.map((o) => o.id));
+        return [...current, ...unseen.filter((o) => !queued.has(o.id))];
+      });
     }
   }, []);
 
@@ -74,13 +81,16 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
    * sync, so pull immediately when one lands or is tapped.
    */
   useEffect(() => {
-    const received = Notifications.addNotificationReceivedListener(() => refresh());
-    const tapped = Notifications.addNotificationResponseReceivedListener(() => refresh());
+    const pullThenRefresh = () => {
+      void syncNow(store.id).then(() => refresh());
+    };
+    const received = Notifications.addNotificationReceivedListener(pullThenRefresh);
+    const tapped = Notifications.addNotificationResponseReceivedListener(pullThenRefresh);
     return () => {
       received.remove();
       tapped.remove();
     };
-  }, [refresh]);
+  }, [refresh, store.id]);
 
   const value = useMemo<WebOrdersState>(() => {
     const byNewest = [...orders].sort((a, b) => b.createdAt - a.createdAt);
@@ -103,10 +113,10 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       setStatus: (id, status) => write(id, { status }),
       attachReceipt: (id, receiptId) => write(id, { receiptId, status: "served" }),
       reload: refresh,
-      arrival,
-      dismissArrival: () => setArrival(null),
+      arrival: arrivals[0] ?? null,
+      dismissArrival: () => setArrivals((current) => current.slice(1)),
     };
-  }, [orders, arrival, refresh]);
+  }, [orders, arrivals, refresh]);
 
   return <WebOrdersContext.Provider value={value}>{children}</WebOrdersContext.Provider>;
 }

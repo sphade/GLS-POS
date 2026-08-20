@@ -50,6 +50,8 @@ function collectDirty(): { changes: SyncChange[]; idsByCollection: Record<string
 }
 
 let inFlight = false;
+/** A realtime nudge received mid-sync is coalesced into one immediate follow-up. */
+let queuedStoreId: string | null = null;
 
 /**
  * Listeners notified after a sync applies remote changes, so features can react
@@ -79,7 +81,14 @@ function emitSynced(count: number) {
  * applied, or -1 if it was skipped (offline / signed out / already running).
  */
 export async function syncNow(storeId: string): Promise<number> {
-  if (inFlight) return -1;
+  if (inFlight) {
+    // Don't lose WebSocket order nudges that arrive during another sync. One
+    // follow-up is enough because sync uses a monotonic server cursor.
+    queuedStoreId = storeId;
+    // Queued is a successful accepted refresh request, not a failure. The
+    // follow-up runs as soon as the current cycle releases the lock.
+    return 0;
+  }
   // Placeholder store before memberships load — nothing to sync, and pushing
   // would target a store that doesn't exist.
   if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") return -1;
@@ -87,11 +96,16 @@ export async function syncNow(storeId: string): Promise<number> {
   const cookie = authCookie();
   if (!cookie) return -1; // not signed in yet
 
-  const netState = await Network.getNetworkStateAsync();
-  if (!netState.isInternetReachable) return -1;
-
+  // Mark the whole attempt in-flight, including the connectivity probe. That
+  // probe can throw on some devices; keeping it inside try/finally prevents a
+  // stuck "Uploading…" UI and guarantees the lock is released.
   inFlight = true;
   try {
+    const netState = await Network.getNetworkStateAsync();
+    // Expo reports `null` while reachability is still being established. That
+    // is unknown, not offline; let fetch decide instead of dropping the order.
+    if (netState.isInternetReachable === false) return -1;
+
     const cursor = Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
     const { changes, idsByCollection } = collectDirty();
 
@@ -131,13 +145,23 @@ export async function syncNow(storeId: string): Promise<number> {
     }
 
     metaSet(cursorKey(storeId), String(body.data.cursor));
-    if (body.data.changes.length > 0) emitSynced(body.data.changes.length);
+    // A push-only cycle is still a completion: dirty receipt flags were just
+    // cleared and the Today screen must refresh immediately, not four seconds
+    // later. `count` remains the number of remote rows applied.
+    emitSynced(body.data.changes.length);
     return body.data.changes.length;
   } catch (e) {
     console.warn("[sync] failed:", (e as Error).message);
     return -1;
   } finally {
     inFlight = false;
+    const followUpStore = queuedStoreId;
+    queuedStoreId = null;
+    if (followUpStore) {
+      // Schedule outside this promise so callers of the first cycle aren't
+      // blocked, while the queued VIP nudge is still handled immediately.
+      setTimeout(() => void syncNow(followUpStore), 0);
+    }
   }
 }
 

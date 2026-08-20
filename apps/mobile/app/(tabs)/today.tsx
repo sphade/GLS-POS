@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -9,7 +9,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { useCart, type Receipt } from "@/lib/cart";
 import { useWebOrders } from "@/lib/web-orders";
 import { useStore } from "@/lib/store";
-import { countDirty } from "@/lib/db";
+import { loadDirtyIds } from "@/lib/db";
 import { onSynced, syncNow } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 
@@ -29,23 +29,49 @@ export default function TodayScreen() {
   const [syncing, setSyncing] = useState(false);
 
   /**
-   * Real pending-upload count, read from the sync engine's `dirty` column.
-   * (This used to read a flag baked into seeded demo receipts, so it warned
-   * about receipts that were never actually out of sync.)
+   * Receipt upload state comes from SQLite's dirty column — the same source the
+   * sync engine clears — rather than the stale `receipt.synced` JSON property.
    */
-  const [pending, setPending] = useState(() => countDirty("receipts"));
-  useEffect(() => onSynced(() => setPending(countDirty("receipts"))), []);
+  const [pendingIds, setPendingIds] = useState(() => loadDirtyIds("receipts"));
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const pending = pendingIds.length;
+  const pendingSet = new Set(pendingIds);
+  /** This tab is Today, so older receipts belong in Reports, not this list. */
+  const todayReceipts = useMemo(() => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return receipts.filter((receipt) => receipt.createdAt >= start.getTime());
+  }, [receipts]);
+  const refreshPending = () => {
+    const ids = loadDirtyIds("receipts");
+    setPendingIds(ids);
+    if (ids.length === 0) setSyncError(null);
+  };
+
+  useEffect(() => onSynced(refreshPending), []);
   useEffect(() => {
-    const t = setInterval(() => setPending(countDirty("receipts")), 4000);
+    const t = setInterval(refreshPending, 4000);
     return () => clearInterval(t);
   }, []);
 
   const pushNow = async () => {
+    if (syncing) return;
     feedbackTap();
     setSyncing(true);
-    await syncNow(store.id);
-    setPending(countDirty("receipts"));
-    setSyncing(false);
+    setSyncError(null);
+    try {
+      const result = await syncNow(store.id);
+      const remaining = loadDirtyIds("receipts");
+      setPendingIds(remaining);
+      if (result < 0 && remaining.length > 0) {
+        setSyncError("Upload failed — check your connection, then tap to retry");
+      }
+    } catch {
+      refreshPending();
+      setSyncError("Upload failed — check your connection, then tap to retry");
+    } finally {
+      setSyncing(false);
+    }
   };
 
   return (
@@ -58,8 +84,8 @@ export default function TodayScreen() {
         <Pressable style={styles.syncBar} onPress={pushNow} disabled={syncing}>
           <Text style={styles.syncText}>
             {syncing
-              ? "Uploading…"
-              : `${pending} receipt${pending === 1 ? "" : "s"} not uploaded yet · tap to retry`}
+              ? "Uploading receipts…"
+              : syncError ?? `${pending} receipt${pending === 1 ? "" : "s"} waiting to upload · tap to retry`}
           </Text>
           <Ionicons name="sync" size={16} color={colors.white} />
         </Pressable>
@@ -88,7 +114,7 @@ export default function TodayScreen() {
 
       {tab === "pos" ? (
         <FlatList
-          data={receipts}
+          data={todayReceipts}
           keyExtractor={(r) => r.id}
           contentContainerStyle={{ paddingBottom: 24 }}
           ListEmptyComponent={
@@ -99,6 +125,7 @@ export default function TodayScreen() {
           renderItem={({ item }) => (
             <ReceiptRow
               receipt={item}
+              awaitingUpload={pendingSet.has(item.id)}
               onPress={() => router.push({ pathname: "/receipt/[id]", params: { id: item.id } })}
             />
           )}
@@ -123,7 +150,7 @@ export default function TodayScreen() {
   );
 }
 
-function ReceiptRow({ receipt, onPress }: { receipt: Receipt; onPress: () => void }) {
+function ReceiptRow({ receipt, awaitingUpload, onPress }: { receipt: Receipt; awaitingUpload: boolean; onPress: () => void }) {
   const time = new Date(receipt.createdAt);
   return (
     <Pressable style={styles.rcptCard} onPress={onPress} android_ripple={{ color: "#00000010" }}>
@@ -131,7 +158,7 @@ function ReceiptRow({ receipt, onPress }: { receipt: Receipt; onPress: () => voi
       <View style={{ flex: 1, paddingVertical: 6 }}>
         <View style={styles.rcptTopRow}>
           <Text style={styles.rcptNumber}>{receipt.number}</Text>
-          {!receipt.synced && <Ionicons name="sync" size={15} color={colors.red500} style={{ marginLeft: 4 }} />}
+          {awaitingUpload && <Ionicons name="sync" size={15} color={colors.red500} style={{ marginLeft: 4 }} />}
         </View>
         <Text style={styles.rcptName}>
           {receipt.customerName ?? strings.guest} {strings.by} {receipt.mode}

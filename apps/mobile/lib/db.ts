@@ -124,6 +124,17 @@ export function countDirty(c: Collection): number {
   );
 }
 
+/**
+ * Live rows currently waiting to upload. Unlike `countDirty`, this excludes
+ * tombstones: deleted receipts still sync, but must not appear as visible
+ * "receipts not uploaded" or row-level warning icons.
+ */
+export function loadDirtyIds(c: Collection): string[] {
+  return conn()
+    .getAllSync<{ id: string }>(`SELECT id FROM ${c} WHERE dirty = 1 AND deleted = 0`)
+    .map((row) => row.id);
+}
+
 /** Ids of all live records — cheap, no payload. */
 export function loadIds(c: Collection): string[] {
   const db = conn();
