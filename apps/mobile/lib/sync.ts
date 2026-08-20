@@ -25,13 +25,26 @@ import { API_URL, authCookie } from "./auth-client";
  */
 
 const cursorKey = (storeId: string) => `sync_cursor_${storeId}`;
+const SYNC_TIMEOUT_MS = 15_000;
 
-/** Gather every locally-dirty change across all collections into wire form. */
-function collectDirty(): { changes: SyncChange[]; idsByCollection: Record<string, string[]> } {
+export type SyncAttemptResult =
+  | { ok: true; appliedCount: number }
+  | {
+      ok: false;
+      kind: "invalid_store" | "auth" | "offline" | "server" | "network" | "timeout";
+      message: string;
+      status?: number;
+      code?: string;
+    };
+
+/** Gather dirty changes, optionally limiting the push to selected collections. */
+function collectDirty(
+  onlyCollections?: readonly SyncCollection[],
+): { changes: SyncChange[]; idsByCollection: Record<string, string[]> } {
   const changes: SyncChange[] = [];
   const idsByCollection: Record<string, string[]> = {};
 
-  for (const collection of SYNC_COLLECTIONS) {
+  for (const collection of onlyCollections ?? SYNC_COLLECTIONS) {
     const dirty = loadDirty<unknown>(collection);
     if (dirty.length === 0) continue;
     idsByCollection[collection] = dirty.map((d) => d.id);
@@ -48,10 +61,6 @@ function collectDirty(): { changes: SyncChange[]; idsByCollection: Record<string
 
   return { changes, idsByCollection };
 }
-
-let inFlight = false;
-/** A realtime nudge received mid-sync is coalesced into one immediate follow-up. */
-let queuedStoreId: string | null = null;
 
 /**
  * Listeners notified after a sync applies remote changes, so features can react
@@ -76,40 +85,91 @@ function emitSynced(count: number) {
   });
 }
 
-/**
- * Run one sync cycle for the given store. Returns the number of remote changes
- * applied, or -1 if it was skipped (offline / signed out / already running).
- */
-export async function syncNow(storeId: string): Promise<number> {
-  if (inFlight) {
-    // Don't lose WebSocket order nudges that arrive during another sync. One
-    // follow-up is enough because sync uses a monotonic server cursor.
-    queuedStoreId = storeId;
-    // Queued is a successful accepted refresh request, not a failure. The
-    // follow-up runs as soon as the current cycle releases the lock.
-    return 0;
+/** Apply a server pull and notify every local data provider immediately. */
+function applyPulled(storeId: string, data: SyncPullResponse, notify = true): number {
+  for (const change of data.changes) {
+    const row: ChangeRow<{ id: string }> = {
+      id: change.id,
+      data: change.data as { id: string },
+      updatedAt: change.updatedAt,
+      deleted: change.deleted,
+    };
+    applyRemote(change.collection as SyncCollection, row);
   }
-  // Placeholder store before memberships load — nothing to sync, and pushing
-  // would target a store that doesn't exist.
+  metaSet(cursorKey(storeId), String(data.cursor));
+  if (notify) emitSynced(data.changes.length);
+  return data.changes.length;
+}
+
+/** Fetch with a hard deadline so a publish screen cannot spin forever. */
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Pull server changes without uploading local dirty rows first. This guarantees
+ * incoming VIP orders still arrive when an unrelated local edit is denied.
+ * `fromBeginning` repairs older devices whose cursor advanced before
+ * `web_orders` existed locally.
+ */
+export async function pullNow(
+  storeId: string,
+  fromBeginning = false,
+  notify = true,
+): Promise<number> {
   if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") return -1;
-
   const cookie = authCookie();
-  if (!cookie) return -1; // not signed in yet
-
-  // Mark the whole attempt in-flight, including the connectivity probe. That
-  // probe can throw on some devices; keeping it inside try/finally prevents a
-  // stuck "Uploading…" UI and guarantees the lock is released.
-  inFlight = true;
+  if (!cookie) return -1;
   try {
     const netState = await Network.getNetworkStateAsync();
-    // Expo reports `null` while reachability is still being established. That
-    // is unknown, not offline; let fetch decide instead of dropping the order.
     if (netState.isInternetReachable === false) return -1;
+    const cursor = fromBeginning ? 0 : Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
+    const res = await fetch(`${API_URL}/api/sync?cursor=${cursor}`, {
+      headers: { Cookie: cookie, "x-store-id": storeId },
+    });
+    const body = (await res.json()) as
+      | { ok: true; data: SyncPullResponse }
+      | { ok: false; error: { message: string } };
+    if (!body.ok) return -1;
+    return applyPulled(storeId, body.data, notify);
+  } catch (e) {
+    console.warn("[sync] pull failed:", (e as Error).message);
+    return -1;
+  }
+}
+
+async function performSync(
+  storeId: string,
+  onlyCollections?: readonly SyncCollection[],
+): Promise<SyncAttemptResult> {
+  if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") {
+    return { ok: false, kind: "invalid_store", message: "No valid store is selected." };
+  }
+
+  const cookie = authCookie();
+  if (!cookie) {
+    return {
+      ok: false,
+      kind: "auth",
+      message: "Your sign-in session is unavailable. Sign out and sign in again, then retry.",
+    };
+  }
+
+  try {
+    const netState = await Network.getNetworkStateAsync();
+    if (netState.isInternetReachable === false) {
+      return { ok: false, kind: "offline", message: "This device is offline. Connect to the internet and retry." };
+    }
 
     const cursor = Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
-    const { changes, idsByCollection } = collectDirty();
-
-    const res = await fetch(`${API_URL}/api/sync`, {
+    const { changes, idsByCollection } = collectDirty(onlyCollections);
+    const res = await fetchWithTimeout(`${API_URL}/api/sync`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -119,50 +179,81 @@ export async function syncNow(storeId: string): Promise<number> {
       body: JSON.stringify({ cursor, changes }),
     });
 
-    const body = (await res.json()) as
+    let body:
       | { ok: true; data: SyncPullResponse }
-      | { ok: false; error: { code: string; message: string } };
-
-    if (!body.ok) {
-      console.warn("[sync] server rejected:", body.error.message);
-      return -1;
+      | { ok: false; error: { code?: string; message?: string } };
+    try {
+      body = (await res.json()) as typeof body;
+    } catch {
+      return {
+        ok: false,
+        kind: "server",
+        status: res.status,
+        message: `The server returned an invalid response (${res.status}).`,
+      };
     }
 
-    // Our pushes were accepted — clear their dirty flags.
+    if (!res.ok || !body.ok) {
+      const code = body.ok ? undefined : body.error.code;
+      const serverMessage = body.ok ? undefined : body.error.message;
+      const message =
+        res.status === 401
+          ? "Your session has expired. Sign out and sign in again, then retry."
+          : res.status === 403
+            ? serverMessage ?? "Your account does not have permission to publish this table."
+            : serverMessage ?? `The server rejected the update (${res.status}).`;
+      console.warn("[sync] server rejected:", message);
+      return {
+        ok: false,
+        kind: res.status === 401 ? "auth" : "server",
+        status: res.status,
+        code,
+        message,
+      };
+    }
+
     for (const [collection, ids] of Object.entries(idsByCollection)) {
       clearDirty(collection as SyncCollection, ids);
     }
 
-    // Apply everything the server sent back (last-write-wins in applyRemote).
-    for (const change of body.data.changes) {
-      const row: ChangeRow<{ id: string }> = {
-        id: change.id,
-        data: change.data as { id: string },
-        updatedAt: change.updatedAt,
-        deleted: change.deleted,
-      };
-      applyRemote(change.collection as SyncCollection, row);
-    }
-
-    metaSet(cursorKey(storeId), String(body.data.cursor));
-    // A push-only cycle is still a completion: dirty receipt flags were just
-    // cleared and the Today screen must refresh immediately, not four seconds
-    // later. `count` remains the number of remote rows applied.
-    emitSynced(body.data.changes.length);
-    return body.data.changes.length;
+    return { ok: true, appliedCount: applyPulled(storeId, body.data) };
   } catch (e) {
-    console.warn("[sync] failed:", (e as Error).message);
-    return -1;
-  } finally {
-    inFlight = false;
-    const followUpStore = queuedStoreId;
-    queuedStoreId = null;
-    if (followUpStore) {
-      // Schedule outside this promise so callers of the first cycle aren't
-      // blocked, while the queued VIP nudge is still handled immediately.
-      setTimeout(() => void syncNow(followUpStore), 0);
-    }
+    const error = e as Error;
+    const timedOut = error.name === "AbortError";
+    const message = timedOut
+      ? "The server took too long to respond. Check your connection and retry."
+      : `Could not reach the server: ${error.message}`;
+    console.warn("[sync] failed:", message);
+    return { ok: false, kind: timedOut ? "timeout" : "network", message };
   }
+}
+
+/**
+ * The active request is shared as a serialization barrier. A caller arriving
+ * mid-sync waits and then runs its own cycle, so it never mistakes "queued" for
+ * "published".
+ */
+let activeSync: Promise<SyncAttemptResult> | null = null;
+
+export function syncNowDetailed(
+  storeId: string,
+  onlyCollections?: readonly SyncCollection[],
+): Promise<SyncAttemptResult> {
+  if (activeSync) {
+    return activeSync.then(() => syncNowDetailed(storeId, onlyCollections));
+  }
+
+  const run = performSync(storeId, onlyCollections);
+  activeSync = run;
+  return run.finally(() => {
+    if (activeSync === run) activeSync = null;
+  });
+}
+
+/** Backward-compatible count result used by existing refresh UI. */
+export async function syncNow(storeId: string): Promise<number> {
+  const result = await syncNowDetailed(storeId);
+  return result.ok ? result.appliedCount : -1;
 }
 
 /**

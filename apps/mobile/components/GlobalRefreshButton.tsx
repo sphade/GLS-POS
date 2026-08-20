@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
-import { syncNow } from "@/lib/sync";
+import { pullNow, syncNow } from "@/lib/sync";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
 
 /**
@@ -27,9 +27,12 @@ export function GlobalRefreshButton() {
     feedbackTap();
     setBusy(true);
     try {
-      const result = await syncNow(store.id);
+      // Pull first so incoming orders are never blocked by an unrelated dirty
+      // local record; then run the normal bidirectional sync.
+      const pulled = await pullNow(store.id);
+      const pushed = await syncNow(store.id);
       await refreshAccount();
-      if (result < 0) {
+      if (pulled < 0 && pushed < 0) {
         feedbackError();
         Alert.alert("Could not refresh", "Check your internet connection and sign-in, then try again.");
       }

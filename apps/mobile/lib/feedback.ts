@@ -10,12 +10,14 @@ import * as Haptics from "expo-haptics";
  * Players are created lazily and cached so repeated triggers are instant.
  * Everything is wrapped defensively: audio must never break a sale.
  */
-type SoundName = "beep" | "coin" | "celebration";
+type SoundName = "beep" | "coin" | "celebration" | "vip";
 
 const sources: Record<SoundName, number> = {
   beep: require("../assets/sounds/beep.mp3"),
   coin: require("../assets/sounds/coin.mp3"),
   celebration: require("../assets/sounds/sfx_zd_celebration.ogg"),
+  /** Original four-second chime synthesized specifically for VIP table orders. */
+  vip: require("../assets/sounds/vip-order.wav"),
 };
 
 const players: Partial<Record<SoundName, AudioPlayer>> = {};
@@ -95,37 +97,32 @@ export function feedbackTap() {
 }
 
 /**
- * Critical in-app VIP alarm. It runs for roughly four seconds unless staff
- * dismiss or attend first. We repeat the bundled sharp sounds because they cut
- * through restaurant noise better than the short two-chime notification did.
+ * Critical in-app VIP alarm. The dedicated four-second sound starts as a
+ * premium door chime, then repeats a brighter two-note call so it remains
+ * recognisable in a noisy restaurant without sounding like a barcode scanner.
  * Device media volume/DND still sets the physical upper limit.
  */
-let vipPulseTimer: ReturnType<typeof setInterval> | null = null;
+let vipHapticTimer: ReturnType<typeof setInterval> | null = null;
 let vipStopTimer: ReturnType<typeof setTimeout> | null = null;
-let vipPulse = 0;
 
-function playVipPulse() {
-  const name: SoundName = vipPulse++ % 3 === 0 ? "coin" : "beep";
-  if (soundEnabled) {
-    try {
-      let player = players[name];
-      if (!player) {
-        player = createAudioPlayer(sources[name]);
-        players[name] = player;
-      }
-      player.volume = 1;
-      player.seekTo(0);
-      player.play();
-    } catch {
-      /* haptics still draw attention if audio is unavailable */
+function playVipSound() {
+  if (!soundEnabled) return;
+  try {
+    let player = players.vip;
+    if (!player) {
+      player = createAudioPlayer(sources.vip);
+      players.vip = player;
     }
+    player.volume = 1;
+    player.seekTo(0);
+    player.play();
+  } catch {
+    /* haptics still draw attention if audio is unavailable */
   }
-  vibrate(Haptics.ImpactFeedbackStyle.Heavy);
 }
 
 export function startVipOrderAlarm() {
   stopVipOrderAlarm();
-  vipPulse = 0;
   void setAudioModeAsync({
     playsInSilentMode: true,
     interruptionMode: "duckOthers",
@@ -133,24 +130,26 @@ export function startVipOrderAlarm() {
     shouldPlayInBackground: false,
     shouldRouteThroughEarpiece: false,
   }).catch(() => {});
-  playVipPulse();
-  vipPulseTimer = setInterval(playVipPulse, 600);
+  playVipSound();
+  vibrate(Haptics.ImpactFeedbackStyle.Heavy);
+  vipHapticTimer = setInterval(
+    () => vibrate(Haptics.ImpactFeedbackStyle.Heavy),
+    850,
+  );
   vipStopTimer = setTimeout(stopVipOrderAlarm, 4200);
   notify(Haptics.NotificationFeedbackType.Warning);
 }
 
 export function stopVipOrderAlarm() {
-  if (vipPulseTimer) clearInterval(vipPulseTimer);
+  if (vipHapticTimer) clearInterval(vipHapticTimer);
   if (vipStopTimer) clearTimeout(vipStopTimer);
-  vipPulseTimer = null;
+  vipHapticTimer = null;
   vipStopTimer = null;
-  for (const name of ["beep", "coin"] as const) {
-    try {
-      players[name]?.pause();
-      players[name]?.seekTo(0);
-    } catch {
-      /* already stopped */
-    }
+  try {
+    players.vip?.pause();
+    players.vip?.seekTo(0);
+  } catch {
+    /* already stopped */
   }
 }
 

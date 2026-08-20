@@ -20,6 +20,9 @@ export type WebOrderStatus =
 
 export interface WebOrderLine {
   productId: string;
+  /** Selected variant snapshot; absent for a simple single-price product. */
+  variantId?: string;
+  variantName?: string;
   name: string;
   /** Unit price in integer minor units, resolved server-side from the catalog. */
   unitPrice: number;
@@ -51,7 +54,7 @@ export interface WebOrder {
 
 /** What the guest's browser submits. Prices are deliberately absent. */
 export interface PlaceWebOrderRequest {
-  items: { productId: string; quantity: number; note?: string }[];
+  items: { productId: string; variantId?: string; quantity: number; note?: string }[];
   guestName?: string;
   guestPhone?: string;
   note?: string;
@@ -63,6 +66,14 @@ export interface PublicMenuItem {
   name: string;
   price: number;
   categoryId?: string;
+  /** Present for products whose sellable choices must be selected explicitly. */
+  variants?: {
+    id: string;
+    name: string;
+    /** Integer minor units. */
+    price: number;
+    available: boolean;
+  }[];
   /** False when out of stock, so the page can disable it. */
   available: boolean;
 }

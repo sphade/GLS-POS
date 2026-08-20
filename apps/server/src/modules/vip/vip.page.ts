@@ -105,6 +105,17 @@ const STYLES = `
   .add:active { background:var(--gold); color:var(--ink); }
   .add:disabled { border-color:var(--line); color:var(--muted); }
 
+  .item.choices { display:block; }
+  .variant-list { margin-top:13px; border-top:1px solid var(--line); }
+  .variant-row { display:flex; align-items:center; gap:12px; padding:12px 0; }
+  .variant-row + .variant-row { border-top:1px solid var(--line); }
+  .variant-info { flex:1; min-width:0; }
+  .variant-name { font-size:14px; color:var(--text); }
+  .variant-price { margin-top:4px; font-size:13px; color:var(--gold-soft); }
+  .variant-row.gone .variant-name, .variant-row.gone .variant-price { color:var(--muted); }
+  .variant-row .add { padding:8px 15px; }
+  .variant-row .stepper button { width:30px; height:30px; }
+
   .stepper { flex:0 0 auto; display:flex; align-items:center; gap:4px;
              background:var(--card); border:1px solid var(--line); border-radius:100px; padding:4px; }
   .stepper button {
@@ -198,8 +209,40 @@ export function renderVipPage(
 
   const sym = menu.currency === "NGN" ? "&#8358;" : esc(menu.currency) + " ";
 
-  const itemHtml = (i: PublicMenu["items"][number]) => `
-    <div class="item${i.available ? "" : " gone"}" data-id="${esc(i.id)}">
+  const itemHtml = (i: PublicMenu["items"][number]) => {
+    if (i.variants?.length) {
+      const variants = i.variants
+        .map((variant) => {
+          const key = `${i.id}:${variant.id}`;
+          return `<div class="variant-row${variant.available ? "" : " gone"}">
+            <div class="variant-info">
+              <div class="variant-name">${esc(variant.name)}</div>
+              <div class="variant-price">${sym}${money(variant.price)}</div>
+            </div>
+            ${
+              variant.available
+                ? `<button class="add" data-add="${esc(key)}" data-product="${esc(i.id)}" data-variant="${esc(variant.id)}" data-name="${esc(`${i.name} · ${variant.name}`)}" data-price="${variant.price}">Add</button>
+                   <div class="stepper" data-step="${esc(key)}" hidden>
+                     <button data-dec="${esc(key)}" aria-label="one fewer">&minus;</button>
+                     <span class="q" data-qty="${esc(key)}">0</span>
+                     <button data-inc="${esc(key)}" aria-label="one more">+</button>
+                   </div>`
+                : `<button class="add" disabled>Unavailable</button>`
+            }
+          </div>`;
+        })
+        .join("");
+
+      return `<div class="item choices${i.available ? "" : " gone"}" data-id="${esc(i.id)}">
+        <div class="info">
+          <div class="nm serif">${esc(i.name)}</div>
+          <div class="out">${i.available ? "Choose a variant" : "Unavailable"}</div>
+          <div class="variant-list">${variants}</div>
+        </div>
+      </div>`;
+    }
+
+    return `<div class="item${i.available ? "" : " gone"}" data-id="${esc(i.id)}">
       <div class="info">
         <div class="nm serif">${esc(i.name)}</div>
         ${
@@ -210,7 +253,7 @@ export function renderVipPage(
       </div>
       ${
         i.available
-          ? `<button class="add" data-add="${esc(i.id)}" data-name="${esc(i.name)}" data-price="${i.price}">Add</button>
+          ? `<button class="add" data-add="${esc(i.id)}" data-product="${esc(i.id)}" data-name="${esc(i.name)}" data-price="${i.price}">Add</button>
              <div class="stepper" data-step="${esc(i.id)}" hidden>
                <button data-dec="${esc(i.id)}" aria-label="one fewer">&minus;</button>
                <span class="q" data-qty="${esc(i.id)}">0</span>
@@ -219,6 +262,7 @@ export function renderVipPage(
           : `<button class="add" disabled>Add</button>`
       }
     </div>`;
+  };
 
   const sections = [
     ...used.map(
@@ -302,7 +346,7 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
   const sym = currency === "NGN" ? "\\u20A6" : currency + " ";
   return `
 (function () {
-  var cart = {};   // id -> { name, price, qty }
+  var cart = {};   // productId or productId:variantId -> selection
   var SYM = "${sym}";
 
   function money(minor) {
@@ -349,7 +393,13 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
     if (!id) return;
 
     if (t.hasAttribute("data-add")) {
-      cart[id] = { name: t.getAttribute("data-name"), price: +t.getAttribute("data-price"), qty: 1 };
+      cart[id] = {
+        productId: t.getAttribute("data-product"),
+        variantId: t.getAttribute("data-variant") || undefined,
+        name: t.getAttribute("data-name"),
+        price: +t.getAttribute("data-price"),
+        qty: 1
+      };
     } else if (t.hasAttribute("data-inc")) {
       if (cart[id] && cart[id].qty < 99) cart[id].qty++;
     } else {
@@ -380,8 +430,13 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
     box.innerHTML = "";
     for (var id in cart) {
       var c = cart[id], row = document.createElement("div");
+      var description = document.createElement("span");
+      var amount = document.createElement("span");
       row.className = "row";
-      row.innerHTML = "<span>" + c.qty + " \\u00D7 " + c.name + "</span><span>" + money(c.qty * c.price) + "</span>";
+      description.textContent = c.qty + " \\u00D7 " + c.name;
+      amount.textContent = money(c.qty * c.price);
+      row.appendChild(description);
+      row.appendChild(amount);
       box.appendChild(row);
     }
     document.getElementById("total").textContent = money(total());
@@ -397,7 +452,14 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
     btn.textContent = "Sending\\u2026";
 
     var items = [];
-    for (var id in cart) items.push({ productId: id, quantity: cart[id].qty });
+    for (var id in cart) {
+      var selection = cart[id];
+      items.push({
+        productId: selection.productId,
+        variantId: selection.variantId,
+        quantity: selection.qty
+      });
+    }
 
     fetch("/vip/api/${storeId}/${tableId}/order", {
       method: "POST",

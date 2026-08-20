@@ -11,13 +11,17 @@ import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
 import { API_URL } from "@/lib/auth-client";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
+import { syncNowDetailed } from "@/lib/sync";
+
+const VERIFY_TIMEOUT_MS = 12_000;
 
 /**
  * QR code for one table. Guests scan it to open the VIP ordering page already
  * scoped to that table, which is why every table needs its own code.
  *
- * The link is built locally (same shape the server's /api/vip-link returns) so
- * this screen works offline — handy when printing a batch of table cards.
+ * A table can be created while offline, but its QR is only displayed after the
+ * public server confirms that table exists. This prevents printing a code that
+ * still points at a local-only table.
  */
 export default function TableQrScreen() {
   const router = useRouter();
@@ -25,10 +29,80 @@ export default function TableQrScreen() {
   const { tables } = useCatalog();
   const { store } = useStore();
   const [busy, setBusy] = useState(false);
+  const [publishState, setPublishState] = useState<"checking" | "ready" | "error">("checking");
+  const [publishError, setPublishError] = useState("");
+  const verificationAttempt = useRef(0);
   const svgRef = useRef<{ toDataURL: (cb: (b64: string) => void) => void } | null>(null);
 
   const table = tables.find((t) => t.id === id);
   const url = table ? `${API_URL}/vip/${store.id}/${table.id}` : "";
+
+  const verifyOnline = async () => {
+    if (!table) return;
+    const attempt = ++verificationAttempt.current;
+    setPublishError("");
+    setPublishState("checking");
+
+    // Upload only table rows. An unrelated dirty catalog/staff record must not
+    // prevent an otherwise-authorized table from becoming available online.
+    const syncResult = await syncNowDetailed(store.id, ["tables"]);
+    if (attempt !== verificationAttempt.current) return;
+    if (!syncResult.ok) {
+      setPublishError(syncResult.message);
+      setPublishState("error");
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
+    try {
+      const response = await fetch(
+        `${API_URL}/vip/api/${encodeURIComponent(store.id)}/${encodeURIComponent(table.id)}/menu`,
+        { signal: controller.signal },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | { ok: false; error?: { code?: string; message?: string } }
+        | { ok: true }
+        | null;
+      if (attempt !== verificationAttempt.current) return;
+
+      if (response.ok) {
+        setPublishState("ready");
+        return;
+      }
+
+      const code = body && !body.ok ? body.error?.code : undefined;
+      const message = body && !body.ok ? body.error?.message : undefined;
+      setPublishError(
+        code === "table_not_found"
+          ? "The server did not receive this table. Retry publishing."
+          : code === "store_not_found"
+            ? "This store does not exist on the configured server. Sign out and sign in to the correct store."
+            : message ?? `The server could not verify this table (${response.status}).`,
+      );
+      setPublishState("error");
+    } catch (e) {
+      if (attempt !== verificationAttempt.current) return;
+      setPublishError(
+        (e as Error).name === "AbortError"
+          ? "The server took too long to verify the table. Check your connection and retry."
+          : `Could not verify the table: ${(e as Error).message}`,
+      );
+      setPublishState("error");
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  useEffect(() => {
+    void verifyOnline();
+    // Invalidate the result if this screen closes or changes to another table.
+    return () => {
+      verificationAttempt.current += 1;
+    };
+    // Table/store ids are the stable identity of this screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [table?.id, store.id]);
 
   /** Grab the rendered QR as base64 so it can go into printable HTML. */
   const qrBase64 = () =>
@@ -120,25 +194,52 @@ export default function TableQrScreen() {
           <Text style={styles.storeName}>{store.name}</Text>
           <Text style={styles.tableName}>{table.name}</Text>
 
-          <View style={styles.qrWrap}>
-            <QRCode
-              value={url || "https://gls.pos"}
-              size={230}
-              color="#111111"
-              backgroundColor="#FFFFFF"
-              getRef={(c) => (svgRef.current = c as never)}
-              ecl="M"
-            />
+          <View style={[styles.qrWrap, publishState !== "ready" && styles.qrStatusWrap]}>
+            {publishState === "ready" ? (
+              <QRCode
+                value={url}
+                size={230}
+                color="#111111"
+                backgroundColor="#FFFFFF"
+                getRef={(c) => (svgRef.current = c as never)}
+                ecl="M"
+              />
+            ) : publishState === "checking" ? (
+              <>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={styles.publishTitle}>Publishing table…</Text>
+                <Text style={styles.publishText}>Making this QR available to guests.</Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name="alert-circle-outline" size={42} color={colors.red800} />
+                <Text style={[styles.publishTitle, { color: colors.red800 }]}>Could not publish table</Text>
+                <Text style={styles.publishText}>{publishError}</Text>
+              </>
+            )}
           </View>
 
-          <Text style={styles.scanHint}>Scan to order</Text>
+          <Text style={styles.scanHint}>
+            {publishState === "ready" ? "Scan to order" : "QR unavailable until published"}
+          </Text>
           <Text style={styles.url} numberOfLines={3}>
             {url}
           </Text>
         </View>
 
+        {publishState === "error" && (
+          <Pressable style={styles.retryBtn} onPress={() => void verifyOnline()} disabled={busy}>
+            <Ionicons name="refresh" size={18} color={colors.primary} />
+            <Text style={styles.retryBtnText}>RETRY PUBLISHING</Text>
+          </Pressable>
+        )}
+
         <View style={styles.actions}>
-          <Pressable style={styles.primaryBtn} onPress={doPrint} disabled={busy}>
+          <Pressable
+            style={[styles.primaryBtn, publishState !== "ready" && styles.disabledBtn]}
+            onPress={doPrint}
+            disabled={busy || publishState !== "ready"}
+          >
             {busy ? (
               <ActivityIndicator color={colors.white} />
             ) : (
@@ -148,7 +249,11 @@ export default function TableQrScreen() {
               </>
             )}
           </Pressable>
-          <Pressable style={styles.secondaryBtn} onPress={doShare} disabled={busy}>
+          <Pressable
+            style={[styles.secondaryBtn, publishState !== "ready" && styles.disabledBtn]}
+            onPress={doShare}
+            disabled={busy || publishState !== "ready"}
+          >
             <Ionicons name="share-outline" size={19} color={colors.primary} />
             <Text style={styles.secondaryBtnText}>SHARE AS PDF</Text>
           </Pressable>
@@ -209,10 +314,28 @@ const styles = StyleSheet.create({
   storeName: { fontSize: 22, fontWeight: "800", color: colors.grey900, marginTop: 6, textAlign: "center" },
   tableName: { fontSize: 17, fontWeight: "700", color: colors.grey700, marginTop: 2, marginBottom: 18 },
   qrWrap: { padding: 12, backgroundColor: colors.white, borderRadius: 8 },
+  qrStatusWrap: { width: 254, height: 254, alignItems: "center", justifyContent: "center" },
+  publishTitle: { marginTop: 12, fontSize: 15, fontWeight: "800", color: colors.grey800 },
+  publishText: { marginTop: 5, fontSize: 12, color: colors.grey600, textAlign: "center" },
   scanHint: { marginTop: 16, fontSize: 15, fontWeight: "700", color: colors.grey800 },
   url: { marginTop: 8, fontSize: 10, color: colors.grey500, textAlign: "center" },
 
+  retryBtn: {
+    flexDirection: "row",
+    gap: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+    height: 44,
+    marginTop: 14,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.white,
+  },
+  retryBtnText: { color: colors.primary, fontSize: 13, fontWeight: "800" },
   actions: { alignSelf: "stretch", gap: 10, marginTop: 18 },
+  disabledBtn: { opacity: 0.45 },
   primaryBtn: {
     flexDirection: "row",
     gap: 8,

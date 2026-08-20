@@ -30,6 +30,39 @@ export interface Category {
   updatedAt: string;
 }
 
+export interface ProductVariant {
+  id: ID;
+  name: string;
+  color: string;
+  price: Money;
+  cost?: Money;
+  /** Undefined means this variant is not stock-tracked. */
+  stock?: number;
+  trackProfit: boolean;
+  lowStockAlert: boolean;
+  lowStockAt?: number;
+  autoUpdateStock: boolean;
+  barcodeOn: boolean;
+  barcode?: string;
+  expiryOn: boolean;
+  expiry?: string;
+  taxOn: boolean;
+  taxPercent?: number;
+  taxInclusive?: boolean;
+  notesOn: boolean;
+  notes?: string;
+  modifiersOn: boolean;
+  modifierIds: ID[];
+  recipeOn: boolean;
+  spacesOn: boolean;
+  tagsOn: boolean;
+  tags?: string;
+  compareOn: boolean;
+  comparePrice?: Money;
+  skuOn: boolean;
+  sku?: string;
+}
+
 export interface Product {
   id: ID;
   storeId: ID;
@@ -42,6 +75,8 @@ export interface Product {
   currency: CurrencyCode;
   /** null = not stock-tracked (Zobaze-style "sell without stock"). */
   stockQuantity: number | null;
+  /** When present, the base product is not directly sellable. */
+  variants?: ProductVariant[];
   taxRateBps?: number; // tax rate in basis points (e.g. 750 = 7.5%)
   imageUrl?: string;
   isActive: boolean;
@@ -66,6 +101,8 @@ export type PaymentMethod = "cash" | "card" | "wallet" | "transfer" | "other";
 export interface OrderItem {
   id: ID;
   productId?: ID;
+  variantId?: ID;
+  variantName?: string;
   name: string;
   unitPrice: Money;
   quantity: number;

@@ -167,7 +167,7 @@ export default function ItemsScreen() {
       return;
     }
     feedbackAddItem();
-    items.forEach(add);
+    items.forEach((item) => add(item));
   };
 
   const onAdd = (item: Item) => {

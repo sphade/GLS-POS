@@ -10,8 +10,8 @@ import {
 } from "react";
 import * as Notifications from "expo-notifications";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
-import { loadAll, put as dbPut } from "./db";
-import { onSynced, syncNow } from "./sync";
+import { loadAll, metaGet, metaSet, put as dbPut } from "./db";
+import { onSynced, pullNow, syncNow } from "./sync";
 import { useStore } from "./store";
 
 /**
@@ -32,6 +32,7 @@ type WebOrdersState = {
   setStatus: (id: string, status: WebOrderStatus) => void;
   /** Link a web order to the receipt raised for it. */
   attachReceipt: (id: string, receiptId: string) => void;
+  /** Pull server orders now, then reload local state. */
   reload: () => void;
   /** Oldest unacknowledged arrival is shown first; later orders queue behind it. */
   arrival: WebOrder | null;
@@ -74,7 +75,46 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /** Load historical/backfilled rows without alarming for every old order. */
+  const hydrateSilently = useCallback(() => {
+    const fresh = loadAll<WebOrder>("web_orders");
+    fresh.forEach((o) => seen.current.add(o.id));
+    setOrders(fresh);
+  }, []);
+
+  /** The screen refresh button now performs a real server pull. */
+  const reload = useCallback(() => {
+    void pullNow(store.id).then(() => refresh());
+  }, [store.id, refresh]);
+
   useEffect(() => onSynced(refresh), [refresh]);
+
+  /**
+   * Repair older devices once by replaying server history, then pull inbound
+   * changes every four seconds. This path is pull-only, so a denied local edit
+   * can never prevent a guest order from appearing.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const repairKey = `web_orders_backfill_v1_${store.id}`;
+    void (async () => {
+      const needsBackfill = !metaGet(repairKey);
+      const result = await pullNow(store.id, needsBackfill, !needsBackfill);
+      if (cancelled) return;
+      if (result >= 0 && needsBackfill) {
+        metaSet(repairKey, "1");
+        hydrateSilently();
+      } else {
+        refresh();
+      }
+    })();
+
+    const timer = setInterval(() => void pullNow(store.id), 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [store.id, refresh, hydrateSilently]);
 
   /**
    * A push notification arriving while the app is backgrounded doesn't run our
@@ -112,11 +152,11 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       pendingCount: byNewest.filter((o) => o.status === "received").length,
       setStatus: (id, status) => write(id, { status }),
       attachReceipt: (id, receiptId) => write(id, { receiptId, status: "served" }),
-      reload: refresh,
+      reload,
       arrival: arrivals[0] ?? null,
       dismissArrival: () => setArrivals((current) => current.slice(1)),
     };
-  }, [orders, arrivals, refresh]);
+  }, [orders, arrivals, refresh, reload]);
 
   return <WebOrdersContext.Provider value={value}>{children}</WebOrdersContext.Provider>;
 }

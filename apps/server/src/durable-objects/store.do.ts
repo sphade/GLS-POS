@@ -40,6 +40,14 @@ type StoredProduct = {
   barcode?: string;
   stockQuantity: number | null;
   lowStockAt?: number;
+  variants?: {
+    id: string;
+    name: string;
+    /** Integer minor units. */
+    price: number;
+    /** Undefined/null means stock is not tracked for this variant. */
+    stock?: number | null;
+  }[];
 };
 
 /** Before/after of a stock change, used to emit the right events. */
@@ -84,13 +92,34 @@ const WRITE_PERMISSION: Record<string, Permission> = {
   web_orders: "sale:create",
 };
 
+const stockDidNotIncrease = (before: unknown, after: unknown): boolean => {
+  if (JSON.stringify(before) === JSON.stringify(after)) return true;
+  return typeof before === "number" && typeof after === "number" && after <= before;
+};
+
+/** Variant arrays may differ only by one or more downward `stock` changes. */
+function variantStockDecrementOnly(prev: unknown, next: unknown): boolean {
+  if (JSON.stringify(prev) === JSON.stringify(next)) return true;
+  if (!Array.isArray(prev) || !Array.isArray(next) || prev.length !== next.length) return false;
+
+  return prev.every((before, index) => {
+    const after = next[index];
+    if (!before || typeof before !== "object" || !after || typeof after !== "object") return false;
+    const a = before as Record<string, unknown>;
+    const b = after as Record<string, unknown>;
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const key of keys) {
+      if (key === "stock") continue;
+      if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return false;
+    }
+    return stockDidNotIncrease(a.stock, b.stock);
+  });
+}
+
 /**
  * Selling has to decrement stock, which means a cashier must be able to write
- * to `products` — but only that one field, and only downward. Anything else
- * (price, name, restocking) still needs the full catalog/inventory permission.
- *
- * Returns true when `next` differs from `prev` in `stockQuantity` alone and the
- * value did not increase.
+ * to `products` — but only simple/variant stock, and only downward. Product and
+ * variant identity, names, prices, ordering, and every other field must match.
  */
 function isStockDecrementOnly(prev: unknown, next: unknown): boolean {
   if (!prev || typeof prev !== "object" || !next || typeof next !== "object") return false;
@@ -98,15 +127,15 @@ function isStockDecrementOnly(prev: unknown, next: unknown): boolean {
   const b = next as Record<string, unknown>;
 
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) {
-    if (k === "stockQuantity") continue;
-    if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false;
+  for (const key of keys) {
+    if (key === "stockQuantity" || key === "variants") continue;
+    if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return false;
   }
 
-  const before = a.stockQuantity;
-  const after = b.stockQuantity;
-  if (typeof before !== "number" || typeof after !== "number") return false;
-  return after <= before;
+  return (
+    stockDidNotIncrease(a.stockQuantity, b.stockQuantity) &&
+    variantStockDecrementOnly(a.variants, b.variants)
+  );
 }
 
 /**
@@ -375,21 +404,28 @@ export class StoreDurableObject extends DurableObject<Env> {
       name: c.name,
     }));
 
-    const items = this.docs<{
-      id: string;
-      name: string;
-      price: number;
-      categoryId?: string;
-      stockQuantity: number | null;
-      currency?: string;
-    }>("products").map((p) => ({
-      id: p.id,
-      name: p.name,
-      price: p.price,
-      categoryId: p.categoryId,
-      // null stock means "not tracked", which is still sellable.
-      available: p.stockQuantity === null || p.stockQuantity > 0,
-    }));
+    const items = this.docs<StoredProduct>("products").map((p) => {
+      const variants = p.variants?.length
+        ? p.variants.map((variant) => ({
+            id: variant.id,
+            name: variant.name,
+            price: variant.price,
+            available: variant.stock == null || variant.stock > 0,
+          }))
+        : undefined;
+      return {
+        id: p.id,
+        name: p.name,
+        price: p.price,
+        categoryId: p.categoryId,
+        variants,
+        // Variant products are available when at least one choice is sellable.
+        // null simple stock means "not tracked", which is still sellable.
+        available: variants
+          ? variants.some((variant) => variant.available)
+          : p.stockQuantity == null || p.stockQuantity > 0,
+      };
+    });
 
     return { storeName, currency, tableName: table.name, categories, items };
   }
@@ -420,28 +456,59 @@ export class StoreDurableObject extends DurableObject<Env> {
     recent.push(now);
     this.orderRate.set(tableId, recent);
 
-    const catalog = this.docs<{
-      id: string;
-      name: string;
-      price: number;
-      stockQuantity: number | null;
-    }>("products");
+    const catalog = this.docs<StoredProduct>("products");
 
-    const lines: WebOrderLine[] = [];
+    type ResolvedLine = {
+      productId: string;
+      variantId?: string;
+      variantName?: string;
+      name: string;
+      unitPrice: number;
+      quantity: number;
+      stock: number | null | undefined;
+      note?: string;
+    };
+    const requested = new Map<string, ResolvedLine>();
+
     for (const wanted of request.items) {
       const product = catalog.find((p) => p.id === wanted.productId);
-      if (!product) continue; // silently drop unknown ids
+      if (!product) continue; // preserve legacy behavior for unknown product ids
+
+      const hasVariants = !!product.variants?.length;
+      if (hasVariants && !wanted.variantId) return { ok: false, error: "missing_variant" };
+      if (!hasVariants && wanted.variantId) return { ok: false, error: "unexpected_variant" };
+
+      const variant = hasVariants
+        ? product.variants!.find((candidate) => candidate.id === wanted.variantId)
+        : undefined;
+      if (hasVariants && !variant) return { ok: false, error: "invalid_variant" };
+
       const qty = Math.max(1, Math.min(99, Math.floor(wanted.quantity)));
-      if (product.stockQuantity !== null && product.stockQuantity <= 0) continue; // sold out
-      lines.push({
+      const key = JSON.stringify([product.id, variant?.id ?? null]);
+      const existing = requested.get(key);
+      const quantity = (existing?.quantity ?? 0) + qty;
+      const stock = variant ? variant.stock : product.stockQuantity;
+
+      // Aggregate duplicates before checking stock, otherwise two individually
+      // valid lines could together order more than is available.
+      if (stock != null && quantity > stock) return { ok: false, error: "insufficient_stock" };
+
+      requested.set(key, {
         productId: product.id,
+        variantId: variant?.id,
+        variantName: variant?.name,
         name: product.name,
-        unitPrice: product.price,
-        quantity: qty,
-        lineTotal: product.price * qty,
-        note: wanted.note?.slice(0, 140),
+        unitPrice: variant?.price ?? product.price,
+        quantity,
+        stock,
+        note: existing?.note ?? wanted.note?.slice(0, 140),
       });
     }
+
+    const lines: WebOrderLine[] = [...requested.values()].map(({ stock: _stock, ...line }) => ({
+      ...line,
+      lineTotal: line.unitPrice * line.quantity,
+    }));
 
     if (lines.length === 0) return { ok: false, error: "no_valid_items" };
 

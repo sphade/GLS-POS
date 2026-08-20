@@ -1,5 +1,5 @@
 ﻿import { useState } from "react";
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, currencySymbol } from "@/constants/theme";
@@ -143,7 +143,21 @@ export function VariantEditor({
               <Text style={styles.deleteText}>DELETE</Text>
             </Pressable>
           )}
-          <Pressable style={styles.addBtn} onPress={() => onSave(draft)}>
+          <Pressable
+            style={styles.addBtn}
+            onPress={() => {
+              const name = draft.name.trim();
+              if (!name) {
+                Alert.alert("Variant name required", "Give this option a name such as Regular, Large, or 500g.");
+                return;
+              }
+              if (!Number.isInteger(draft.price) || draft.price <= 0) {
+                Alert.alert("Valid price required", "Enter a selling price greater than zero.");
+                return;
+              }
+              onSave({ ...draft, name });
+            }}
+          >
             <Text style={styles.addText}>ADD</Text>
           </Pressable>
         </View>

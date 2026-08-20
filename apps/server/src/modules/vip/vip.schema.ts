@@ -10,6 +10,7 @@ export const placeWebOrderSchema = z.object({
     .array(
       z.object({
         productId: z.string().min(1).max(64),
+        variantId: z.string().min(1).max(64).optional(),
         quantity: z.number().int().positive().max(99),
         note: z.string().max(140).optional(),
       }),

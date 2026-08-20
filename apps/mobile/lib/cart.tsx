@@ -1,5 +1,5 @@
 ﻿import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
-import type { WebOrder } from "@gls-pos/types";
+import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { loadAll, put as dbPut } from "./db";
 
 /**
@@ -33,39 +33,8 @@ export function formatFractionalQty(qty: number, measure: Measure): string {
   return `${sub} ${measure.subUnit}`;
 }
 
-/** One sellable variation of an item (e.g. 500gm, Blue, 1kg). */
-export type Variant = {
-  id: string;
-  name: string;
-  color: string;
-  /** integer minor units */
-  price: number;
-  cost?: number;
-  stock?: number;
-  trackProfit: boolean;
-  lowStockAlert: boolean;
-  lowStockAt?: number;
-  autoUpdateStock: boolean;
-  barcodeOn: boolean;
-  barcode?: string;
-  expiryOn: boolean;
-  expiry?: string;
-  taxOn: boolean;
-  taxPercent?: number;
-  taxInclusive?: boolean;
-  notesOn: boolean;
-  notes?: string;
-  modifiersOn: boolean;
-  modifierIds: string[];
-  recipeOn: boolean;
-  spacesOn: boolean;
-  tagsOn: boolean;
-  tags?: string;
-  compareOn: boolean;
-  comparePrice?: number;
-  skuOn: boolean;
-  sku?: string;
-};
+/** One sellable variation of an item (e.g. Regular, Large, 500gm). */
+export type Variant = ProductVariant;
 
 export type Item = {
   id: string;
@@ -97,6 +66,17 @@ export type Item = {
   variants?: Variant[];
 };
 
+export const hasVariants = (item: Item): boolean => !!item.variants?.length;
+export const variantAvailable = (variant: Variant): boolean => variant.stock == null || variant.stock > 0;
+export const itemAvailable = (item: Item): boolean =>
+  hasVariants(item) ? item.variants!.some(variantAvailable) : item.stockQuantity !== 0;
+export const itemDisplayPrice = (item: Item): number =>
+  hasVariants(item) ? Math.min(...item.variants!.map((variant) => variant.price)) : item.price;
+export const cartLineKey = (productId: string, variantId?: string): string =>
+  variantId ? `${productId}:${variantId}` : productId;
+export const displayItemName = (name: string, variantName?: string): string =>
+  variantName ? `${name} — ${variantName}` : name;
+
 export function newVariant(color: string): Variant {
   return {
     id: `var_${Date.now()}_${Math.round(Math.random() * 1e4)}`,
@@ -127,6 +107,15 @@ export function newVariant(color: string): Variant {
  */
 export type PaymentStatus = "paid" | "unpaid";
 
+export type ReceiptLine = {
+  productId?: string;
+  variantId?: string;
+  variantName?: string;
+  name: string;
+  qty: number;
+  price: number;
+};
+
 export type Receipt = {
   id: string;
   number: string;
@@ -138,7 +127,7 @@ export type Receipt = {
   currency: string;
   createdAt: number;
   synced: boolean;
-  lines: { name: string; qty: number; price: number }[];
+  lines: ReceiptLine[];
   cashReceived?: number;
   /** Snapshot of who/where sold it, so a reprint is always accurate. */
   storeName: string;
@@ -148,7 +137,7 @@ export type Receipt = {
   paidAt?: number;
 };
 
-type CartEntry = { item: Item; qty: number };
+export type CartEntry = { lineId: string; item: Item; variant?: Variant; qty: number };
 
 type CartState = {
   entries: Record<string, CartEntry>;
@@ -156,9 +145,11 @@ type CartState = {
   subtotal: number;
   taxTotal: number;
   total: number;
-  add: (item: Item) => void;
-  remove: (id: string) => void;
-  qtyOf: (id: string) => number;
+  add: (item: Item, variant?: Variant) => void;
+  /** Remove one unit by cart line key, not just product id. */
+  remove: (lineId: string) => void;
+  /** Total quantity across all variants of a product. */
+  qtyOf: (productId: string) => number;
   clear: () => void;
   receipts: Receipt[];
   completeSale: (input: {
@@ -198,33 +189,48 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
-    const subtotal = list.reduce((s, e) => s + e.qty * e.item.price, 0);
+    const priceOf = (entry: CartEntry) => entry.variant?.price ?? entry.item.price;
+    const taxRateOf = (entry: CartEntry) =>
+      entry.variant?.taxOn
+        ? Math.round((entry.variant.taxPercent ?? 0) * 100)
+        : (entry.item.taxRateBps ?? 0);
+    const subtotal = list.reduce((sum, entry) => sum + entry.qty * priceOf(entry), 0);
     const taxTotal = list.reduce(
-      (s, e) => s + Math.round((e.qty * e.item.price * (e.item.taxRateBps ?? 0)) / 10000),
+      (sum, entry) => sum + Math.round((entry.qty * priceOf(entry) * taxRateOf(entry)) / 10000),
       0,
     );
     return {
       entries,
-      count: list.reduce((s, e) => s + e.qty, 0),
+      count: list.reduce((sum, entry) => sum + entry.qty, 0),
       subtotal,
       taxTotal,
       total: subtotal + taxTotal,
-      qtyOf: (id) => entries[id]?.qty ?? 0,
-      add: (item) =>
-        setEntries((prev) => ({
-          ...prev,
-          [item.id]: { item, qty: (prev[item.id]?.qty ?? 0) + 1 },
-        })),
-      remove: (id) =>
+      qtyOf: (productId) =>
+        list.reduce((sum, entry) => sum + (entry.item.id === productId ? entry.qty : 0), 0),
+      add: (item, variant) => {
+        if (hasVariants(item) && !variant) return;
+        if (variant && !item.variants?.some((candidate) => candidate.id === variant.id)) return;
+        const lineId = cartLineKey(item.id, variant?.id);
         setEntries((prev) => {
-          const existing = prev[id];
+          const quantity = prev[lineId]?.qty ?? 0;
+          const stock = variant ? variant.stock : item.stockQuantity;
+          if (stock != null && quantity >= stock) return prev;
+          return {
+            ...prev,
+            [lineId]: { lineId, item, variant, qty: quantity + 1 },
+          };
+        });
+      },
+      remove: (lineId) =>
+        setEntries((prev) => {
+          const existing = prev[lineId];
           if (!existing) return prev;
           if (existing.qty <= 1) {
             const next = { ...prev };
-            delete next[id];
+            delete next[lineId];
             return next;
           }
-          return { ...prev, [id]: { ...existing, qty: existing.qty - 1 } };
+          return { ...prev, [lineId]: { ...existing, qty: existing.qty - 1 } };
         }),
       clear: () => setEntries({}),
       receipts,
@@ -242,7 +248,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
           currency: list[0]?.item.currency ?? "NGN",
           createdAt: now,
           synced: false,
-          lines: list.map((e) => ({ name: e.item.name, qty: e.qty, price: e.item.price })),
+          lines: list.map((entry) => ({
+            productId: entry.item.id,
+            variantId: entry.variant?.id,
+            variantName: entry.variant?.name,
+            name: displayItemName(entry.item.name, entry.variant?.name),
+            qty: entry.qty,
+            price: priceOf(entry),
+          })),
           cashReceived,
           storeName,
           storeReference,
@@ -268,10 +281,13 @@ export function CartProvider({ children }: { children: ReactNode }) {
           currency: order.currency,
           createdAt: now,
           synced: false,
-          lines: order.lines.map((l) => ({
-            name: l.name,
-            qty: l.quantity,
-            price: l.unitPrice,
+          lines: order.lines.map((line) => ({
+            productId: line.productId,
+            variantId: line.variantId,
+            variantName: line.variantName,
+            name: displayItemName(line.name, line.variantName),
+            qty: line.quantity,
+            price: line.unitPrice,
           })),
           storeName,
           storeReference,

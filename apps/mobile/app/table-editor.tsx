@@ -6,6 +6,8 @@ import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, formStyles } from "@/components/form";
 import { useCatalog } from "@/lib/catalog";
 import { feedbackTap } from "@/lib/feedback";
+import { useStore } from "@/lib/store";
+import { syncNowDetailed } from "@/lib/sync";
 
 const SEATS = [2, 4, 6, 8, 10];
 
@@ -13,6 +15,7 @@ export default function TableEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { tables, sections, upsertTable, deleteTable } = useCatalog();
+  const { store } = useStore();
   const existing = tables.find((t) => t.id === id);
 
   const [name, setName] = useState(existing?.name ?? "");
@@ -31,6 +34,9 @@ export default function TableEditorScreen() {
         onClose={() => router.back()}
         onSave={() => {
           upsertTable({ id: existing?.id, name: name.trim(), section, seats, reference: reference.trim() || undefined });
+          // The public QR page reads from the store Durable Object, not this
+          // phone's local SQLite. Push now instead of waiting for the 20s poll.
+          void syncNowDetailed(store.id, ["tables"]);
           feedbackTap();
           router.back();
         }}
@@ -38,6 +44,7 @@ export default function TableEditorScreen() {
           existing
             ? () => {
                 deleteTable(existing.id);
+                void syncNowDetailed(store.id, ["tables"]);
                 feedbackTap();
                 router.back();
               }
