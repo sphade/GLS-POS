@@ -25,7 +25,9 @@ export default function ItemEditorScreen() {
   const { products, categories, upsertProduct, deleteProduct, logStockChange } = useCatalog();
   const existing = products.find((p) => p.id === id);
 
-  const [mode, setMode] = useState<"left" | "right">("left"); // Simple | Advance
+  const [mode, setMode] = useState<"left" | "right">(
+    existing?.variants?.length ? "right" : "left",
+  ); // Simple | Advance
   const [name, setName] = useState(existing?.name ?? "");
   const [categoryId, setCategoryId] = useState<string | undefined>(existing?.categoryId);
   const [price, setPrice] = useState(existing ? String(existing.price / 100) : "");
@@ -78,23 +80,106 @@ export default function ItemEditorScreen() {
 
   const sellByLabel = isFraction ? `Sell by Fraction · ${measure.unit}` : "Sell by Unit";
 
+  const onModeChange = (next: "left" | "right") => {
+    if (next === mode) return;
+
+    /**
+     * Turning a plain priced item into a variant item keeps that price as a real
+     * "Regular" variant. Without this the original item silently stops being
+     * sellable the moment you add a second size, which is never what's meant.
+     */
+    if (next === "right" && variants.length === 0) {
+      const basePrice = Math.round((parseFloat(price) || 0) * 100);
+      if (basePrice > 0) {
+        const baseStock = trackStock ? Math.max(0, Math.round(parseFloat(stockQty) || 0)) : undefined;
+        const baseLowAt = lowAlert.trim() ? Math.max(0, Math.round(parseFloat(lowAlert) || 0)) : undefined;
+        setVariants([
+          {
+            ...newVariant(swatches[0]!),
+            name: "Regular",
+            price: basePrice,
+            stock: baseStock,
+            lowStockAlert: trackStock && baseLowAt != null,
+            lowStockAt: trackStock ? baseLowAt : undefined,
+          },
+        ]);
+      }
+    }
+
+    if (mode === "right" && next === "left" && variants.length > 0) {
+      Alert.alert(
+        "Remove all variants?",
+        "Saving this item in Simple mode will permanently remove its variants. This cannot be undone.",
+        [
+          { text: "Keep Advance mode", style: "cancel" },
+          {
+            text: "Switch to Simple",
+            style: "destructive",
+            onPress: () => {
+              setMode("left");
+              setTouched(true);
+            },
+          },
+        ],
+      );
+      return;
+    }
+    setMode(next);
+    setTouched(true);
+  };
+
   const onSave = () => {
-    // Simple mode: honour the Track Stock toggle. Advance mode still derives
-    // stock from the first variant.
+    let savedVariants: Variant[] | undefined;
+    if (mode === "right") {
+      if (variants.length === 0) {
+        Alert.alert("Variant required", "Add at least one variant before saving in Advance mode.");
+        return;
+      }
+
+      const names = variants.map((variant) => variant.name.trim());
+      if (names.some((variantName) => !variantName)) {
+        Alert.alert("Variant name required", "Every variant must have a name.");
+        return;
+      }
+      const normalizedNames = names.map((variantName) => variantName.toLocaleLowerCase());
+      if (new Set(normalizedNames).size !== normalizedNames.length) {
+        Alert.alert("Duplicate variant names", "Variant names must be unique, ignoring capitalisation.");
+        return;
+      }
+
+      const ids = variants.map((variant) => variant.id);
+      if (
+        ids.some((variantId) => !variantId || variantId.trim() !== variantId) ||
+        new Set(ids).size !== ids.length
+      ) {
+        Alert.alert("Invalid variant IDs", "Every variant must keep a stable, unique ID.");
+        return;
+      }
+      if (variants.some((variant) => !Number.isSafeInteger(variant.price) || variant.price <= 0)) {
+        Alert.alert("Valid variant prices required", "Every variant price must be a positive whole number of minor currency units.");
+        return;
+      }
+
+      savedVariants = variants.map((variant, index) => ({ ...variant, name: names[index]! }));
+    }
+
     const simpleStock = trackStock ? Math.max(0, Math.round(parseFloat(stockQty) || 0)) : null;
     const simpleLowAt = trackStock && lowAlert.trim() ? Math.max(0, Math.round(parseFloat(lowAlert) || 0)) : undefined;
-    const nextStock = mode === "right" ? (variants[0]?.stock ?? null) : simpleStock;
+    const nextStock = mode === "right" ? null : simpleStock;
+    const nextPrice = mode === "right"
+      ? Math.min(...savedVariants!.map((variant) => variant.price))
+      : Math.round((parseFloat(price) || 0) * 100);
 
     const saved = upsertProduct({
       id: existing?.id,
       name: name.trim(),
-      price: mode === "right" ? (variants[0]?.price ?? 0) : Math.round((parseFloat(price) || 0) * 100),
+      price: nextPrice,
       currency: "NGN",
       categoryId,
       categoryColor: category?.color ?? colors.primary,
       sellBy,
       measure: isFraction ? measure : undefined,
-      variants: mode === "right" ? variants : undefined,
+      variants: savedVariants,
       stockQuantity: nextStock,
       lowStockAt: mode === "right" ? undefined : simpleLowAt,
       // Photo bytes live in `product_images`, not on the product document.
@@ -242,7 +327,7 @@ export default function ItemEditorScreen() {
           </Pressable>
         )}
 
-        <Segmented left="Simple" right="Advance" value={mode} onChange={setMode} />
+        <Segmented left="Simple" right="Advance" value={mode} onChange={onModeChange} />
 
         {mode === "left" ? (
           <>

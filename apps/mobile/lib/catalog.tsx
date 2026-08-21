@@ -41,6 +41,9 @@ export type StockMovement = {
   id: string;
   productId: string;
   productName: string;
+  /** Selected variant snapshot; absent for simple products. */
+  variantId?: string;
+  variantName?: string;
   reason: StockMovementReason;
   /** signed change, e.g. -2 for a sale of 2, +10 for a restock */
   delta: number;
@@ -178,7 +181,7 @@ type CatalogState = {
   deleteStaff: (id: string) => void;
 
   /** Decrement stock for tracked items sold, logging a movement per line. */
-  recordSale: (lines: { productId: string; qty: number }[], ref?: string) => void;
+  recordSale: (lines: { productId: string; variantId?: string; qty: number }[], ref?: string) => void;
   /** Log a manual stock change (adjustment/initial/restock). Does not itself
    *  write the product; the caller has already persisted the new quantity. */
   logStockChange: (
@@ -400,21 +403,57 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
 
       recordSale: (lines, ref) => {
         const now = Date.now();
+        const quantities = new Map<string, number>();
+        for (const line of lines) {
+          if (!Number.isFinite(line.qty) || line.qty <= 0) continue;
+          const key = `${line.productId}\u0000${line.variantId ?? ""}`;
+          quantities.set(key, (quantities.get(key) ?? 0) + line.qty);
+        }
+
         setProducts((prev) => {
           let changed = false;
-          const next = prev.map((p) => {
-            if (p.stockQuantity === null) return p; // not tracked
-            const line = lines.find((l) => l.productId === p.id);
-            if (!line || line.qty <= 0) return p;
-            const resulting = Math.max(0, p.stockQuantity - line.qty);
-            const updated = { ...p, stockQuantity: resulting };
+          const next = prev.map((product) => {
+            if (product.variants?.length) {
+              let productChanged = false;
+              const variants = product.variants.map((variant) => {
+                const qty = quantities.get(`${product.id}\u0000${variant.id}`) ?? 0;
+                if (qty <= 0 || !variant.autoUpdateStock || variant.stock == null) return variant;
+                const resulting = Math.max(0, variant.stock - qty);
+                if (resulting === variant.stock) return variant;
+                productChanged = true;
+                dbPut<StockMovement>("stock_movements", {
+                  id: uid("mov"),
+                  productId: product.id,
+                  productName: product.name,
+                  variantId: variant.id,
+                  variantName: variant.name,
+                  reason: "sale",
+                  delta: -(variant.stock - resulting),
+                  resulting,
+                  at: now,
+                  ref,
+                });
+                return { ...variant, stock: resulting };
+              });
+              if (!productChanged) return product;
+              const updated = { ...product, variants };
+              dbPut("products", updated);
+              changed = true;
+              return updated;
+            }
+
+            const qty = quantities.get(`${product.id}\u0000`) ?? 0;
+            if (qty <= 0 || product.stockQuantity == null) return product;
+            const resulting = Math.max(0, product.stockQuantity - qty);
+            if (resulting === product.stockQuantity) return product;
+            const updated = { ...product, stockQuantity: resulting };
             dbPut("products", updated);
             dbPut<StockMovement>("stock_movements", {
               id: uid("mov"),
-              productId: p.id,
-              productName: p.name,
+              productId: product.id,
+              productName: product.name,
               reason: "sale",
-              delta: -(p.stockQuantity - resulting),
+              delta: -(product.stockQuantity - resulting),
               resulting,
               at: now,
               ref,

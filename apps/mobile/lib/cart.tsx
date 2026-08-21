@@ -191,8 +191,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
     const list = Object.values(entries);
     const priceOf = (entry: CartEntry) => entry.variant?.price ?? entry.item.price;
     const taxRateOf = (entry: CartEntry) =>
-      entry.variant?.taxOn
-        ? Math.round((entry.variant.taxPercent ?? 0) * 100)
+      entry.variant
+        ? entry.variant.taxOn
+          ? Math.round((entry.variant.taxPercent ?? 0) * 100)
+          : 0
         : (entry.item.taxRateBps ?? 0);
     const subtotal = list.reduce((sum, entry) => sum + entry.qty * priceOf(entry), 0);
     const taxTotal = list.reduce(
@@ -209,15 +211,18 @@ export function CartProvider({ children }: { children: ReactNode }) {
         list.reduce((sum, entry) => sum + (entry.item.id === productId ? entry.qty : 0), 0),
       add: (item, variant) => {
         if (hasVariants(item) && !variant) return;
-        if (variant && !item.variants?.some((candidate) => candidate.id === variant.id)) return;
-        const lineId = cartLineKey(item.id, variant?.id);
+        const selectedVariant = variant
+          ? item.variants?.find((candidate) => candidate.id === variant.id)
+          : undefined;
+        if (variant && !selectedVariant) return;
+        const lineId = cartLineKey(item.id, selectedVariant?.id);
         setEntries((prev) => {
           const quantity = prev[lineId]?.qty ?? 0;
-          const stock = variant ? variant.stock : item.stockQuantity;
-          if (stock != null && quantity >= stock) return prev;
+          const stock = selectedVariant ? selectedVariant.stock : item.stockQuantity;
+          if (stock != null && quantity + 1 > stock) return prev;
           return {
             ...prev,
-            [lineId]: { lineId, item, variant, qty: quantity + 1 },
+            [lineId]: { lineId, item, variant: selectedVariant, qty: quantity + 1 },
           };
         });
       },

@@ -40,7 +40,11 @@ export default function CashPaymentScreen() {
     }
     feedbackSaleComplete();
     // Snapshot cart lines before completeSale clears them, then decrement stock.
-    const lines = Object.values(entries).map((e) => ({ productId: e.item.id, qty: e.qty }));
+    const lines = Object.values(entries).map((e) => ({
+      productId: e.item.id,
+      variantId: e.variant?.id,
+      qty: e.qty,
+    }));
     const receipt = completeSale({
       mode: "Cash",
       customerName: null,

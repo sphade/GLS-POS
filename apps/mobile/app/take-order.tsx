@@ -14,7 +14,15 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
-import { useCart, type Item } from "@/lib/cart";
+import { VariantChooser } from "@/components/VariantChooser";
+import {
+  cartLineKey,
+  hasVariants,
+  itemAvailable,
+  itemDisplayPrice,
+  useCart,
+  type Item,
+} from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
@@ -36,6 +44,8 @@ export default function TakeOrderScreen() {
   const [index, setIndex] = useState(1); // start on the first category
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
+  /** Item whose variant sheet is open. The sheet both adds and removes. */
+  const [chooser, setChooser] = useState<Item | null>(null);
 
   const tabs = useMemo(() => [CURRENT, ...categories.map((c) => c.name.toUpperCase())], [categories]);
 
@@ -62,12 +72,27 @@ export default function TakeOrderScreen() {
   };
 
   const onAdd = (item: Item) => {
-    if (item.stockQuantity === 0) {
+    if (!itemAvailable(item)) {
       feedbackError();
+      return;
+    }
+    if (hasVariants(item)) {
+      feedbackTap();
+      setChooser(item);
       return;
     }
     feedbackAddItem();
     add(item);
+  };
+
+  const onRemove = (item: Item) => {
+    if (qtyOf(item.id) === 0) return;
+    feedbackTap();
+    if (hasVariants(item)) {
+      setChooser(item);
+      return;
+    }
+    remove(cartLineKey(item.id));
   };
 
   return (
@@ -148,20 +173,22 @@ export default function TakeOrderScreen() {
               <ScrollView contentContainerStyle={{ padding: 8, paddingBottom: 90 }}>
                 {items.map((item) => {
                   const qty = qtyOf(item.id);
+                  const available = itemAvailable(item);
+                  const displayPrice = itemDisplayPrice(item);
                   return (
                     <Pressable
                       key={item.id}
-                      style={styles.itemRow}
+                      style={[styles.itemRow, !available && styles.itemRowUnavailable]}
                       onPress={() => onAdd(item)}
-                      onLongPress={() => {
-                        feedbackTap();
-                        remove(item.id);
-                      }}
+                      onLongPress={() => onRemove(item)}
                       android_ripple={{ color: "#00000010" }}
                     >
                       <View style={{ flex: 1 }}>
                         <Text style={styles.itemName}>{item.name}</Text>
-                        <Text style={styles.itemPrice}>{formatMoney(item.price, item.currency)}</Text>
+                        <Text style={styles.itemPrice}>
+                          {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
+                          {!available ? " · Out of stock" : ""}
+                        </Text>
                       </View>
                       <Text style={[styles.itemQty, qty > 0 && { color: colors.primary }]}>x {qty}</Text>
                     </Pressable>
@@ -172,6 +199,8 @@ export default function TakeOrderScreen() {
           </View>
         ))}
       </ScrollView>
+
+      <VariantChooser item={chooser} visible={!!chooser} onClose={() => setChooser(null)} />
 
       {/* Review order */}
       <Pressable
@@ -224,6 +253,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     elevation: 1,
   },
+  itemRowUnavailable: { opacity: 0.55 },
   itemName: { fontSize: 17, color: colors.grey900, fontWeight: "500" },
   itemPrice: { fontSize: 14, color: colors.grey600, marginTop: 4 },
   itemQty: { fontSize: 18, fontWeight: "700", color: colors.grey700 },

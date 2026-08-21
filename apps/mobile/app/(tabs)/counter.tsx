@@ -5,7 +5,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { PosHeader, PosSearchBar } from "@/components/PosHeader";
-import { useCart } from "@/lib/cart";
+import { displayItemName, useCart } from "@/lib/cart";
 import { feedbackAddItem, feedbackTap } from "@/lib/feedback";
 
 /**
@@ -72,40 +72,45 @@ export default function CounterScreen() {
 
           <FlatList
             data={list}
-            keyExtractor={(e) => e.item.id}
+            keyExtractor={(entry) => entry.lineId}
             contentContainerStyle={{ padding: 8, paddingBottom: 8 }}
-            renderItem={({ item: entry }) => (
-              <View style={styles.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.name}>{entry.item.name}</Text>
-                  <Text style={styles.unitPrice}>{formatMoney(entry.item.price, entry.item.currency)}</Text>
+            renderItem={({ item: entry }) => {
+              const unitPrice = entry.variant?.price ?? entry.item.price;
+              return (
+                <View style={styles.row}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.name}>
+                      {displayItemName(entry.item.name, entry.variant?.name)}
+                    </Text>
+                    <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)}</Text>
+                  </View>
+                  <View style={styles.stepper}>
+                    <Pressable
+                      style={[styles.stepBtn, styles.stepMinus]}
+                      onPress={() => {
+                        feedbackTap();
+                        remove(entry.lineId);
+                      }}
+                    >
+                      <Ionicons name="remove" size={22} color={colors.white} />
+                    </Pressable>
+                    <Text style={styles.qty}>{entry.qty}</Text>
+                    <Pressable
+                      style={[styles.stepBtn, styles.stepPlus]}
+                      onPress={() => {
+                        feedbackAddItem();
+                        add(entry.item, entry.variant);
+                      }}
+                    >
+                      <Ionicons name="add" size={22} color={colors.white} />
+                    </Pressable>
+                  </View>
+                  <Text style={styles.lineTotal}>
+                    {formatMoney(unitPrice * entry.qty, entry.item.currency)}
+                  </Text>
                 </View>
-                <View style={styles.stepper}>
-                  <Pressable
-                    style={[styles.stepBtn, styles.stepMinus]}
-                    onPress={() => {
-                      feedbackTap();
-                      remove(entry.item.id);
-                    }}
-                  >
-                    <Ionicons name="remove" size={22} color={colors.white} />
-                  </Pressable>
-                  <Text style={styles.qty}>{entry.qty}</Text>
-                  <Pressable
-                    style={[styles.stepBtn, styles.stepPlus]}
-                    onPress={() => {
-                      feedbackAddItem();
-                      add(entry.item);
-                    }}
-                  >
-                    <Ionicons name="add" size={22} color={colors.white} />
-                  </Pressable>
-                </View>
-                <Text style={styles.lineTotal}>
-                  {formatMoney(entry.item.price * entry.qty, entry.item.currency)}
-                </Text>
-              </View>
-            )}
+              );
+            }}
           />
 
           <View style={styles.totalsCard}>

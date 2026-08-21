@@ -1,5 +1,6 @@
-﻿import { memo, useCallback, useEffect, useMemo, useState } from "react";
+﻿import { memo, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   LayoutAnimation,
   Platform,
   Pressable,
@@ -16,7 +17,15 @@ import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { PosHeader, PosSearchBar } from "@/components/PosHeader";
-import { useCart, type Item } from "@/lib/cart";
+import { VariantChooser } from "@/components/VariantChooser";
+import {
+  cartLineKey,
+  hasVariants,
+  itemAvailable,
+  itemDisplayPrice,
+  useCart,
+  type Item,
+} from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { ItemImage } from "@/components/ItemImage";
@@ -67,6 +76,8 @@ export default function ItemsScreen() {
   const canEditCatalog = can("catalog:write");
   const [query, setQuery] = useState("");
   const [isGrid, setIsGrid] = useState(true);
+  /** Item whose variant sheet is open. The sheet both adds and removes. */
+  const [chooser, setChooser] = useState<Item | null>(null);
   /** Which category is being viewed; ALL shows every group. */
   const [activeCat, setActiveCat] = useState<string>(ALL);
   /** Section ids the user has collapsed. */
@@ -159,31 +170,50 @@ export default function ItemsScreen() {
     return () => clearTimeout(t);
   }, [products]);
 
-  /** Add every item in a group to the cart in one tap. */
+  /** Add every available simple item in a group; variants require an explicit choice. */
   const addSection = (section: ItemSection) => {
-    const items = section.data.flatMap((r) => r.items).filter((i) => i.stockQuantity !== 0);
-    if (items.length === 0) {
+    const sectionItems = section.data.flatMap((row) => row.items);
+    const skippedVariants = sectionItems.filter(hasVariants).length;
+    const items = sectionItems.filter((item) => !hasVariants(item) && itemAvailable(item));
+
+    if (items.length > 0) {
+      feedbackAddItem();
+      items.forEach((item) => add(item));
+    } else {
       feedbackError();
-      return;
     }
-    feedbackAddItem();
-    items.forEach((item) => add(item));
+
+    if (skippedVariants > 0) {
+      Alert.alert(
+        "Variant items skipped",
+        `${skippedVariants} variant item${skippedVariants === 1 ? " was" : "s were"} skipped. Add each one separately to choose a variant.`,
+      );
+    }
   };
 
   const onAdd = (item: Item) => {
-    if (item.stockQuantity === 0) {
+    if (!itemAvailable(item)) {
       feedbackError();
+      return;
+    }
+    if (hasVariants(item)) {
+      feedbackTap();
+      setChooser(item);
       return;
     }
     feedbackAddItem();
     add(item);
   };
 
-  /** Long-press removes one from the cart (no-op if none). */
+  /** Long-press removes one simple item, or reopens the variant sheet. */
   const onRemove = (item: Item) => {
     if (qtyOf(item.id) === 0) return;
     feedbackTap();
-    remove(item.id);
+    if (hasVariants(item)) {
+      setChooser(item);
+      return;
+    }
+    remove(cartLineKey(item.id));
   };
 
   return (
@@ -352,6 +382,8 @@ export default function ItemsScreen() {
           </View>
         </Pressable>
       )}
+
+      <VariantChooser item={chooser} visible={!!chooser} onClose={() => setChooser(null)} />
     </View>
   );
 }
@@ -424,7 +456,8 @@ const ProductCard = memo(function ProductCard({
   onLongPress: () => void;
 }) {
   const circle = Math.min(width - 28, 78);
-  const out = item.stockQuantity === 0;
+  const out = !itemAvailable(item);
+  const displayPrice = itemDisplayPrice(item);
   // Band spans the full card width but only the image area's height (+ padding).
   const bandHeight = circle + 20;
   return (
@@ -443,7 +476,7 @@ const ProductCard = memo(function ProductCard({
         {item.name}
       </Text>
       <Text style={styles.price} numberOfLines={1}>
-        {formatMoney(item.price, item.currency)}
+        {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
       </Text>
 
       {/* Full-width band over the image area only — leaves name/price clear */}
@@ -474,7 +507,8 @@ const ProductRow = memo(function ProductRow({
   onPress: () => void;
   onLongPress: () => void;
 }) {
-  const out = item.stockQuantity === 0;
+  const out = !itemAvailable(item);
+  const displayPrice = itemDisplayPrice(item);
   return (
     <Pressable
       style={styles.row}
@@ -500,7 +534,9 @@ const ProductRow = memo(function ProductRow({
         <Text style={[styles.title, { textAlign: "left", marginTop: 0 }]} numberOfLines={1}>
           {item.name}
         </Text>
-        <Text style={[styles.price, { textAlign: "left", marginTop: 2 }]}>{formatMoney(item.price, item.currency)}</Text>
+        <Text style={[styles.price, { textAlign: "left", marginTop: 2 }]}>
+          {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
+        </Text>
       </View>
       {out && <Text style={styles.rowOosText}>Out of stock</Text>}
     </Pressable>

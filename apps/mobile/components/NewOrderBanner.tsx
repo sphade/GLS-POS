@@ -53,7 +53,7 @@ export function NewOrderBanner() {
         <ScrollView style={styles.items} contentContainerStyle={{ paddingVertical: 5 }}>
           {arrival.lines.map((line, i) => <View key={`${line.productId}-${i}`} style={styles.line}>
             <Text style={styles.qty}>{line.quantity}×</Text>
-            <View style={{ flex: 1 }}><Text style={styles.itemName}>{line.name}</Text>{line.note ? <Text style={styles.itemNote}>{line.note}</Text> : null}</View>
+            <View style={{ flex: 1 }}><Text style={styles.itemName}>{line.variantName ? `${line.name} — ${line.variantName}` : line.name}</Text>{line.note ? <Text style={styles.itemNote}>{line.note}</Text> : null}</View>
             <Text style={styles.price}>{formatMoney(line.lineTotal, arrival.currency)}</Text>
           </View>)}
         </ScrollView>

@@ -6,7 +6,7 @@ import { useRouter, type Href } from "expo-router";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { colors, formatMoney } from "@/constants/theme";
 import { useWebOrders } from "@/lib/web-orders";
-import { useCart } from "@/lib/cart";
+import { displayItemName, useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
@@ -47,7 +47,11 @@ export default function OnlineOrdersScreen() {
               servedBy: user?.name ?? "Staff",
             });
             recordSale(
-              order.lines.map((l) => ({ productId: l.productId, qty: l.quantity })),
+              order.lines.map((l) => ({
+                productId: l.productId,
+                variantId: l.variantId,
+                qty: l.quantity,
+              })),
               receipt.id,
             );
             attachReceipt(order.id, receipt.id);
@@ -273,7 +277,7 @@ function OrderCard({
           <View key={i} style={styles.lineRow}>
             <Text style={styles.lineQty}>{l.quantity}×</Text>
             <Text style={styles.lineName} numberOfLines={1}>
-              {l.name}
+              {displayItemName(l.name, l.variantName)}
             </Text>
             <Text style={styles.lineTotal}>{formatMoney(l.lineTotal, order.currency)}</Text>
           </View>
