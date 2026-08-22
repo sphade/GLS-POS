@@ -1,4 +1,4 @@
-﻿import { memo, useEffect, useMemo, useState } from "react";
+﻿import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   Alert,
   LayoutAnimation,
@@ -23,7 +23,9 @@ import {
   hasVariants,
   itemAvailable,
   itemDisplayPrice,
-  useCart,
+  useCartActions,
+  useCartCount,
+  useItemQty,
   type Item,
 } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
@@ -55,6 +57,8 @@ type ItemSection = {
   color?: string;
   total: number;
   collapsed: boolean;
+  /** Every item in this section, kept even when collapsed (for the select-all box). */
+  items: Item[];
   data: GridRow[];
 };
 
@@ -70,7 +74,9 @@ function chunk(items: Item[], size: number): GridRow[] {
 
 export default function ItemsScreen() {
   const router = useRouter();
-  const { add, remove, qtyOf, count } = useCart();
+  // Fast context only: stable actions + non-reactive readers. The screen must
+  // NOT subscribe to cart changes, or every tap re-renders the whole grid.
+  const { add, remove, getQtyOf } = useCartActions();
   const { products, categories } = useCatalog();
   const { can } = useAuth();
   const canEditCatalog = can("catalog:write");
@@ -127,6 +133,7 @@ export default function ItemsScreen() {
         color,
         total: items.length,
         collapsed: isCollapsed,
+        items,
         data: isCollapsed ? [] : chunk(items, cols),
       };
     };
@@ -152,6 +159,7 @@ export default function ItemsScreen() {
         title: "",
         total: 0,
         collapsed: false,
+        items: [],
         data: [{ key: NEW_ITEM_ID, items: [{ id: NEW_ITEM_ID } as Item] }],
       });
     }
@@ -170,25 +178,29 @@ export default function ItemsScreen() {
     return () => clearTimeout(t);
   }, [products]);
 
-  /** Add every available simple item in a group; variants require an explicit choice. */
-  const addSection = (section: ItemSection) => {
-    const sectionItems = section.data.flatMap((row) => row.items);
-    const skippedVariants = sectionItems.filter(hasVariants).length;
-    const items = sectionItems.filter((item) => !hasVariants(item) && itemAvailable(item));
+  /**
+   * Items in a section the select-all box can act on: simple, in-stock products.
+   * Variant products need an explicit choice, so they're never bulk-added.
+   */
+  const sellableOf = (section: ItemSection) =>
+    section.items.filter((item) => !hasVariants(item) && itemAvailable(item));
 
-    if (items.length > 0) {
-      feedbackAddItem();
-      items.forEach((item) => add(item));
-    } else {
+  /** Checkbox toggle: add one of each simple item, or clear them all out. */
+  const toggleSection = (section: ItemSection) => {
+    const sellable = sellableOf(section);
+    if (sellable.length === 0) {
       feedbackError();
+      return;
     }
-
-    if (skippedVariants > 0) {
-      Alert.alert(
-        "Variant items skipped",
-        `${skippedVariants} variant item${skippedVariants === 1 ? " was" : "s were"} skipped. Add each one separately to choose a variant.`,
-      );
+    const allAdded = sellable.every((item) => getQtyOf(item.id) > 0);
+    if (allAdded) {
+      sellable.forEach((item) => {
+        for (let n = getQtyOf(item.id); n > 0; n--) remove(cartLineKey(item.id));
+      });
+    } else {
+      sellable.forEach((item) => add(item));
     }
+    feedbackAddItem();
   };
 
   const onAdd = (item: Item) => {
@@ -207,7 +219,7 @@ export default function ItemsScreen() {
 
   /** Long-press removes one simple item, or reopens the variant sheet. */
   const onRemove = (item: Item) => {
-    if (qtyOf(item.id) === 0) return;
+    if (getQtyOf(item.id) === 0) return;
     feedbackTap();
     if (hasVariants(item)) {
       setChooser(item);
@@ -223,7 +235,6 @@ export default function ItemsScreen() {
           title={strings.items}
           showLayoutSwitch
           isGrid={isGrid}
-          showAddCustomer
           onLayoutSwitch={() => setIsGrid((v) => !v)}
         />
         <PosSearchBar value={query} onChangeText={setQuery} onScan={() => router.push("/scanner")} />
@@ -236,9 +247,8 @@ export default function ItemsScreen() {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipBarContent}
         >
-          <Chip
-            label="ALL"
-            count={products.length}
+          <CategoryTab
+            label="All"
             active={activeCat === ALL}
             onPress={() => {
               feedbackTap();
@@ -246,10 +256,9 @@ export default function ItemsScreen() {
             }}
           />
           {categories.map((c) => (
-            <Chip
+            <CategoryTab
               key={c.id}
-              label={c.name.toUpperCase()}
-              count={counts.get(c.id) ?? 0}
+              label={c.name}
               color={c.color}
               active={activeCat === c.id}
               onPress={() => {
@@ -259,9 +268,8 @@ export default function ItemsScreen() {
             />
           ))}
           {(counts.get(UNCATEGORISED) ?? 0) > 0 && (
-            <Chip
-              label={UNCATEGORISED}
-              count={counts.get(UNCATEGORISED) ?? 0}
+            <CategoryTab
+              label="Other"
               active={activeCat === UNCATEGORISED}
               onPress={() => {
                 feedbackTap();
@@ -289,39 +297,31 @@ export default function ItemsScreen() {
         windowSize={11}
         renderSectionHeader={({ section }) =>
           section.title ? (
-            <View style={styles.sectionHeader}>
-              {/* Tap the title area to collapse/expand the group. */}
-              <Pressable
-                style={styles.sectionTitleArea}
-                onPress={() => toggleCollapse(section.id)}
-                android_ripple={{ color: "#00000010" }}
-              >
+            // The whole white band toggles collapse/expand.
+            <Pressable
+              style={styles.sectionHeader}
+              onPress={() => toggleCollapse(section.id)}
+              android_ripple={{ color: "#00000010" }}
+            >
+              <View style={styles.sectionTitleArea}>
                 <Ionicons
                   name={section.collapsed ? "chevron-forward" : "chevron-down"}
-                  size={16}
-                  color={colors.grey600}
-                />
-                <View
-                  style={[styles.sectionDot, { backgroundColor: section.color ?? colors.grey400 }]}
+                  size={18}
+                  color={colors.grey700}
                 />
                 <Text style={styles.sectionTitle} numberOfLines={1}>
                   {section.title}
                 </Text>
-                <Text style={styles.sectionCount}>{section.total}</Text>
-              </Pressable>
+                <Text style={styles.sectionCount}>({section.total})</Text>
+              </View>
 
-              {/* Add every item in this group to the cart. */}
-              {!section.collapsed && (
-                <Pressable
-                  style={styles.addAllBtn}
-                  onPress={() => addSection(section)}
-                  android_ripple={{ color: "#FFFFFF33" }}
-                >
-                  <Ionicons name="add" size={14} color={colors.white} />
-                  <Text style={styles.addAllText}>ADD ALL</Text>
-                </Pressable>
+              {/* Select-all checkbox: adds one of each item in this category, or
+                  clears them. Variant items are left out — they need a choice.
+                  Nested Pressable, so tapping it doesn't also collapse. */}
+              {sellableOf(section).length > 0 && (
+                <SectionSelectAll items={sellableOf(section)} onToggle={() => toggleSection(section)} />
               )}
-            </View>
+            </Pressable>
           ) : null
         }
         renderItem={({ item: row }) => (
@@ -344,7 +344,6 @@ export default function ItemsScreen() {
                   key={item.id}
                   item={item}
                   width={cardWidth}
-                  qty={qtyOf(item.id)}
                   onPress={() => onAdd(item)}
                   onLongPress={() => onRemove(item)}
                 />
@@ -352,7 +351,6 @@ export default function ItemsScreen() {
                 <ProductRow
                   key={item.id}
                   item={item}
-                  qty={qtyOf(item.id)}
                   onPress={() => onAdd(item)}
                   onLongPress={() => onRemove(item)}
                 />
@@ -368,54 +366,35 @@ export default function ItemsScreen() {
         )}
       />
 
-      {count > 0 && (
-        <Pressable
-          style={styles.goToCounter}
-          onPress={() => {
-            feedbackTap();
-            router.navigate("/counter");
-          }}
-        >
-          <Text style={styles.goToCounterText}>{strings.goToCounter}</Text>
-          <View style={styles.goBadge}>
-            <Text style={styles.goBadgeText}>{count}</Text>
-          </View>
-        </Pressable>
-      )}
+      <GoToCounterBar onPress={() => { feedbackTap(); router.navigate("/counter"); }} />
 
       <VariantChooser item={chooser} visible={!!chooser} onClose={() => setChooser(null)} />
     </View>
   );
 }
 
-/** Category filter pill. Active state fills with the category's own colour. */
-function Chip({
+/**
+ * Category filter as an underlined text tab, matching how food apps (foodpanda,
+ * Keeta, Wolt) present menu categories: plain label, bold + underlined when
+ * active. The underline picks up the category's own colour when it has one.
+ */
+function CategoryTab({
   label,
-  count,
   color,
   active,
   onPress,
 }: {
   label: string;
-  count: number;
   color?: string;
   active: boolean;
   onPress: () => void;
 }) {
-  const fill = color ?? colors.primary;
   return (
-    <Pressable
-      style={[styles.chip, active && { backgroundColor: fill, borderColor: fill }]}
-      onPress={onPress}
-      android_ripple={{ color: "#00000010" }}
-    >
-      {!active && color && <View style={[styles.chipDot, { backgroundColor: color }]} />}
-      <Text style={[styles.chipText, active && styles.chipTextActive]} numberOfLines={1}>
+    <Pressable style={styles.catTab} onPress={onPress} android_ripple={{ color: "#00000008" }}>
+      <Text style={[styles.catTabText, active && styles.catTabTextActive]} numberOfLines={1}>
         {label}
       </Text>
-      <View style={[styles.chipCount, active && styles.chipCountActive]}>
-        <Text style={[styles.chipCountText, active && styles.chipTextActive]}>{count}</Text>
-      </View>
+      {active && <View style={[styles.catTabIndicator, { backgroundColor: color ?? colors.primary }]} />}
     </Pressable>
   );
 }
@@ -439,22 +418,67 @@ function Avatar({ item, size }: { item: Item; size: number }) {
 }
 
 /**
+ * Select-all checkbox for a category. Subscribes to just its own items'
+ * quantities, so its checked state stays live without the whole Items screen
+ * re-rendering on every cart change.
+ */
+function SectionSelectAll({ items, onToggle }: { items: Item[]; onToggle: () => void }) {
+  const { subscribe, getQtyOf } = useCartActions();
+  const allAdded = useSyncExternalStore(
+    subscribe,
+    () => items.length > 0 && items.every((i) => getQtyOf(i.id) > 0),
+  );
+  return (
+    <Pressable
+      style={styles.sectionCheck}
+      hitSlop={8}
+      onPress={onToggle}
+      android_ripple={{ color: "#00000010", borderless: true }}
+    >
+      <Ionicons
+        name={allAdded ? "checkbox" : "square-outline"}
+        size={24}
+        color={allAdded ? colors.primary : colors.grey500}
+      />
+    </Pressable>
+  );
+}
+
+/**
+ * The floating "Go To Counter" bar. Subscribes to the cart count on its own so
+ * a tap doesn't re-render the item grid above it.
+ */
+function GoToCounterBar({ onPress }: { onPress: () => void }) {
+  const count = useCartCount();
+  if (count === 0) return null;
+  return (
+    <Pressable style={styles.goToCounter} onPress={onPress}>
+      <Text style={styles.goToCounterText}>{strings.goToCounter}</Text>
+      <View style={styles.goBadge}>
+        <Text style={styles.goBadgeText}>{count}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+/**
  * Memoised so adding one item to the cart doesn't re-render (and re-decode the
  * image of) every other tile in the grid.
  */
 const ProductCard = memo(function ProductCard({
   item,
   width,
-  qty,
   onPress,
   onLongPress,
 }: {
   item: Item;
   width: number;
-  qty: number;
   onPress: () => void;
   onLongPress: () => void;
 }) {
+  // Subscribes to just this product's quantity, so a tap re-renders only the
+  // tile that changed rather than the whole grid.
+  const qty = useItemQty(item.id);
   const circle = Math.min(width - 28, 78);
   const out = !itemAvailable(item);
   const displayPrice = itemDisplayPrice(item);
@@ -498,15 +522,14 @@ const ProductCard = memo(function ProductCard({
 
 const ProductRow = memo(function ProductRow({
   item,
-  qty,
   onPress,
   onLongPress,
 }: {
   item: Item;
-  qty: number;
   onPress: () => void;
   onLongPress: () => void;
 }) {
+  const qty = useItemQty(item.id);
   const out = !itemAvailable(item);
   const displayPrice = itemDisplayPrice(item);
   return (
@@ -551,64 +574,45 @@ const styles = StyleSheet.create({
   /** One line of grid cards (or a single row in list mode). */
   gridRow: { flexDirection: "row", gap: GAP, paddingHorizontal: PAD },
 
-  /** Horizontal category filter bar, sits directly under the search row. */
-  chipBar: { backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.grey300 },
-  chipBarContent: { paddingHorizontal: PAD + 4, paddingVertical: 9, gap: 7 },
-  chip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    height: 30,
-    paddingHorizontal: 11,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: colors.grey300,
-    backgroundColor: colors.white,
+  /** Horizontal category tab bar, sits directly under the search row. */
+  chipBar: { backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.grey200 },
+  chipBarContent: { paddingHorizontal: PAD + 2, alignItems: "flex-end" },
+  catTab: { height: 46, paddingHorizontal: 14, justifyContent: "center", alignItems: "center" },
+  catTabText: { fontSize: 14, fontWeight: "600", letterSpacing: 0.2, color: colors.grey500 },
+  catTabTextActive: { color: colors.grey900, fontWeight: "800" },
+  catTabIndicator: {
+    position: "absolute",
+    bottom: 0,
+    left: 10,
+    right: 10,
+    height: 3,
+    borderRadius: 2,
   },
-  chipDot: { width: 8, height: 8, borderRadius: 4 },
-  chipText: { fontSize: 11, fontWeight: "800", letterSpacing: 0.4, color: colors.grey700 },
-  chipTextActive: { color: colors.white },
-  chipCount: {
-    minWidth: 18,
-    paddingHorizontal: 4,
-    height: 17,
-    borderRadius: 9,
-    backgroundColor: colors.grey200,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  chipCountActive: { backgroundColor: "#FFFFFF33" },
-  chipCountText: { fontSize: 10, fontWeight: "800", color: colors.grey700 },
 
   /** Caps category title above each group, per the app's section-title style. */
   sectionHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    paddingHorizontal: PAD + 4,
-    paddingTop: 14,
-    paddingBottom: 7,
+    backgroundColor: colors.white,
+    paddingHorizontal: PAD + 10,
+    paddingVertical: 16,
+    marginTop: 8,
+    marginBottom: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.grey200,
   },
-  sectionTitleArea: { flex: 1, flexDirection: "row", alignItems: "center", gap: 7, paddingVertical: 2 },
-  sectionDot: { width: 9, height: 9, borderRadius: 5 },
+  sectionTitleArea: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 2 },
   sectionTitle: {
     flexShrink: 1,
-    fontSize: 12,
+    fontSize: 16,
     fontWeight: "800",
-    letterSpacing: 0.8,
-    color: colors.grey600,
+    letterSpacing: 0.2,
+    color: colors.grey900,
   },
-  sectionCount: { fontSize: 12, fontWeight: "700", color: colors.grey500 },
-  addAllBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-    height: 26,
-    paddingHorizontal: 9,
-    borderRadius: 13,
-    backgroundColor: colors.green,
-  },
-  addAllText: { color: colors.white, fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
+  sectionCount: { fontSize: 13, fontWeight: "600", color: colors.grey500, marginLeft: 2 },
+  sectionCheck: { paddingLeft: 8, paddingVertical: 2 },
 
   card: {
     backgroundColor: colors.card,

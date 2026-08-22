@@ -24,6 +24,107 @@ const players: Partial<Record<SoundName, AudioPlayer>> = {};
 let soundEnabled = true;
 let hapticsEnabled = true;
 
+/**
+ * Last audio failure, kept so problems are diagnosable on a real device.
+ *
+ * Audio used to fail behind empty `catch {}` blocks, which meant a release
+ * build that played nothing gave no clue why. Errors are still non-fatal, but
+ * they are now recorded and surfaced in Settings ▸ Test sound.
+ */
+let lastAudioError: string | null = null;
+
+export function getLastAudioError(): string | null {
+  return lastAudioError;
+}
+
+const noteAudioError = (stage: string, error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  lastAudioError = `${stage}: ${message}`;
+};
+
+/**
+ * Configure the audio session once, at startup, rather than at the moment an
+ * alert needs to sound. `setAudioModeAsync` is async, so doing it inline with
+ * playback left the first sound racing against session configuration.
+ */
+let audioModeReady: Promise<void> | null = null;
+
+export function initAudio(): Promise<void> {
+  if (audioModeReady) return audioModeReady;
+  audioModeReady = (async () => {
+    try {
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        interruptionMode: "duckOthers",
+        allowsRecording: false,
+        shouldPlayInBackground: false,
+        shouldRouteThroughEarpiece: false,
+      });
+    } catch (error) {
+      noteAudioError("setAudioMode", error);
+    }
+    // Resolve and build every player up front so playback never waits on I/O.
+    await Promise.all((Object.keys(sources) as SoundName[]).map(loadPlayer));
+  })();
+  return audioModeReady;
+}
+
+/**
+ * Create and cache a player for `name` from its bundled module.
+ *
+ * Passing the `require()`d asset straight to expo-audio is the documented path
+ * and works in development. Errors are recorded (never swallowed) so if a
+ * release build behaves differently, Settings ▸ Test sound reports the real
+ * cause instead of failing silently.
+ */
+function loadPlayer(name: SoundName): AudioPlayer | null {
+  const existing = players[name];
+  if (existing) return existing;
+  try {
+    const player = createAudioPlayer(sources[name]);
+    players[name] = player;
+    return player;
+  } catch (error) {
+    noteAudioError(`load(${name})`, error);
+    return null;
+  }
+}
+
+/**
+ * Restart a sound from the beginning and play it.
+ *
+ * `seekTo` returns a promise that the previous version neither awaited nor
+ * caught, so a rejection surfaced as an unhandled rejection instead of an
+ * explanation. `play()` itself is synchronous and safe to call immediately —
+ * ExoPlayer honours it once the source reaches a ready state — so the rewind
+ * is best-effort and never gates playback.
+ */
+function restartAndPlay(name: SoundName, volume?: number): void {
+  const player = players[name];
+  if (!player) {
+    // Not loaded yet (very early tap, or a failed first attempt): resolve it
+    // now and play as soon as it's ready.
+    void initAudio().then(() => {
+      const ready = players[name];
+      if (ready) playLoaded(ready, name, volume);
+    });
+    return;
+  }
+  playLoaded(player, name, volume);
+}
+
+function playLoaded(player: AudioPlayer, name: SoundName, volume?: number): void {
+  try {
+    if (volume != null) player.volume = volume;
+    player.play();
+    void Promise.resolve(player.seekTo(0))
+      .then(() => player.play())
+      .catch((error) => noteAudioError(`seekTo(${name})`, error));
+  } catch (error) {
+    noteAudioError(`play(${name})`, error);
+  }
+}
+
 export function setSoundEnabled(enabled: boolean) {
   soundEnabled = enabled;
 }
@@ -39,17 +140,11 @@ export function isHapticsEnabled() {
 
 export function playSound(name: SoundName) {
   if (!soundEnabled) return;
-  try {
-    let player = players[name];
-    if (!player) {
-      player = createAudioPlayer(sources[name]);
-      players[name] = player;
-    }
-    player.seekTo(0);
-    player.play();
-  } catch {
-    // Non-fatal: audio is a nicety, never block the POS flow.
-  }
+  // Deferred by a tick so audio can never extend the tap handler that triggered
+  // it. Creating a player is a *synchronous* native call, so doing this inline
+  // made the first tap on an item stall before the cart or the haptic reacted.
+  // Non-fatal by design, but failures are recorded rather than discarded.
+  setTimeout(() => restartAndPlay(name), 0);
 }
 
 function vibrate(style: Haptics.ImpactFeedbackStyle) {
@@ -62,28 +157,35 @@ function notify(type: Haptics.NotificationFeedbackType) {
   Haptics.notificationAsync(type).catch(() => {});
 }
 
-/** Item added to the cart: short beep + light tap. */
+/**
+ * Haptics fire before sound in every helper below.
+ *
+ * The vibration is the confirmation a cashier actually feels, and it costs
+ * almost nothing, so it must never queue behind audio work.
+ */
+
+/** Item added to the cart: light tap + short beep. */
 export function feedbackAddItem() {
-  playSound("beep");
   vibrate(Haptics.ImpactFeedbackStyle.Light);
-}
-
-/** Barcode successfully scanned: beep + medium tap. */
-export function feedbackScan() {
   playSound("beep");
-  vibrate(Haptics.ImpactFeedbackStyle.Medium);
 }
 
-/** Sale completed: cash-register coin + success notification. */
+/** Barcode successfully scanned: medium tap + beep. */
+export function feedbackScan() {
+  vibrate(Haptics.ImpactFeedbackStyle.Medium);
+  playSound("beep");
+}
+
+/** Sale completed: success notification + cash-register coin. */
 export function feedbackSaleComplete() {
-  playSound("coin");
   notify(Haptics.NotificationFeedbackType.Success);
+  playSound("coin");
 }
 
 /** Milestone / celebration moment. */
 export function feedbackCelebrate() {
-  playSound("celebration");
   notify(Haptics.NotificationFeedbackType.Success);
+  playSound("celebration");
 }
 
 /** Blocked action (out of stock, invalid amount). */
@@ -107,31 +209,16 @@ let vipStopTimer: ReturnType<typeof setTimeout> | null = null;
 
 function playVipSound() {
   if (!soundEnabled) return;
-  try {
-    let player = players.vip;
-    if (!player) {
-      player = createAudioPlayer(sources.vip);
-      players.vip = player;
-    }
-    player.volume = 1;
-    player.seekTo(0);
-    player.play();
-  } catch {
-    /* haptics still draw attention if audio is unavailable */
-  }
+  // Haptics still draw attention if audio is unavailable; the cause is recorded.
+  restartAndPlay("vip", 1);
 }
 
 export function startVipOrderAlarm() {
   stopVipOrderAlarm();
-  void setAudioModeAsync({
-    playsInSilentMode: true,
-    interruptionMode: "duckOthers",
-    allowsRecording: false,
-    shouldPlayInBackground: false,
-    shouldRouteThroughEarpiece: false,
-  }).catch(() => {});
-  playVipSound();
+  // The session is configured at startup; if a cold start beat us to it, this
+  // resolves immediately and the sound still fires on the next tick.
   vibrate(Haptics.ImpactFeedbackStyle.Heavy);
+  void initAudio().then(playVipSound);
   vipHapticTimer = setInterval(
     () => vibrate(Haptics.ImpactFeedbackStyle.Heavy),
     850,
@@ -145,11 +232,13 @@ export function stopVipOrderAlarm() {
   if (vipStopTimer) clearTimeout(vipStopTimer);
   vipHapticTimer = null;
   vipStopTimer = null;
+  const player = players.vip;
+  if (!player) return;
   try {
-    players.vip?.pause();
-    players.vip?.seekTo(0);
-  } catch {
-    /* already stopped */
+    player.pause();
+    void Promise.resolve(player.seekTo(0)).catch(() => {});
+  } catch (error) {
+    noteAudioError("stopVip", error);
   }
 }
 

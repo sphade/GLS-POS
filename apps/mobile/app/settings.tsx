@@ -6,11 +6,14 @@ import { useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import {
   feedbackTap,
+  getLastAudioError,
+  initAudio,
   isHapticsEnabled,
   isSoundEnabled,
   playSound,
   setHapticsEnabled,
   setSoundEnabled,
+  startVipOrderAlarm,
 } from "@/lib/feedback";
 
 const GROUPS: { title: string; rows: { label: string; icon: React.ComponentProps<typeof MaterialCommunityIcons>["name"] }[] }[] = [
@@ -44,6 +47,8 @@ export default function SettingsScreen() {
   const router = useRouter();
   const [sound, setSound] = useState(isSoundEnabled());
   const [haptics, setHaptics] = useState(isHapticsEnabled());
+  /** Result of the last audio self-test, shown inline. */
+  const [audioStatus, setAudioStatus] = useState<string | null>(null);
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -86,6 +91,31 @@ export default function SettingsScreen() {
               thumbColor={haptics ? colors.primary : colors.grey100}
             />
           </View>
+
+          {/* Plays the real VIP alert and reports why it failed, if it did.
+              Audio problems are otherwise invisible on a release build. */}
+          <Pressable
+            style={styles.testRow}
+            onPress={async () => {
+              feedbackTap();
+              setAudioStatus("Playing VIP alert…");
+              await initAudio();
+              startVipOrderAlarm();
+              setTimeout(() => {
+                const error = getLastAudioError();
+                setAudioStatus(
+                  error
+                    ? `Audio error — ${error}`
+                    : "Audio reported no error. If you heard nothing, raise the phone's MEDIA volume (separate from ringer).",
+                );
+              }, 1200);
+            }}
+          >
+            <MaterialCommunityIcons name="bell-ring-outline" size={24} color={colors.primary} />
+            <Text style={styles.rowLabel}>Test VIP alert sound</Text>
+            <Ionicons name="play-circle" size={24} color={colors.green} />
+          </Pressable>
+          {audioStatus ? <Text style={styles.audioStatus}>{audioStatus}</Text> : null}
         </View>
 
         {GROUPS.map((g) => (
@@ -128,6 +158,22 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.grey200 },
   toggleRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 8 },
   rowLabel: { flex: 1, fontSize: 15, color: colors.grey800 },
+  testRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.grey200,
+  },
+  audioStatus: {
+    fontSize: 12,
+    color: colors.grey700,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    lineHeight: 17,
+  },
   logout: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 20, padding: 14 },
   logoutText: { color: colors.red500, fontWeight: "700", fontSize: 15 },
 });

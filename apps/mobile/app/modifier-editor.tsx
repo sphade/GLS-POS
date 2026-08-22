@@ -4,8 +4,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, currencySymbol } from "@/constants/theme";
-import { EditorToolbar, FieldCard, ToggleRow, formStyles } from "@/components/form";
+import { EditorToolbar, FieldCard, ToggleRow, confirmDelete, formStyles } from "@/components/form";
 import { useCatalog, type ModifierOption } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 const SYM = currencySymbol("NGN");
@@ -14,6 +15,8 @@ export default function ModifierEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { modifiers, upsertModifier, deleteModifier } = useCatalog();
+  const { can } = useAuth();
+  const canEdit = can("catalog:write");
   const existing = modifiers.find((m) => m.id === id);
 
   const [name, setName] = useState(existing?.name ?? "");
@@ -41,12 +44,13 @@ export default function ModifierEditorScreen() {
           router.back();
         }}
         onDelete={
-          existing
-            ? () => {
-                deleteModifier(existing.id);
-                feedbackTap();
-                router.back();
-              }
+          existing && canEdit
+            ? () =>
+                confirmDelete(`modifier set "${existing.name}"`, () => {
+                  deleteModifier(existing.id);
+                  feedbackTap();
+                  router.back();
+                })
             : undefined
         }
       />

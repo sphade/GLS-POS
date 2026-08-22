@@ -3,6 +3,7 @@ import type { Item } from "./cart";
 import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
 import { ITEM_IMAGES } from "./item-images";
 import { loadImageIds, saveImage } from "./image-store";
+import { logAudit } from "./audit";
 import {
   getActiveStore,
   loadAll,
@@ -55,6 +56,29 @@ export type StockMovement = {
 };
 
 const uid = (p: string) => `${p}_${Date.now()}_${Math.round(Math.random() * 1e4)}`;
+
+/** Singular, human label per collection for audit summaries. */
+const ENTITY_LABEL: Record<string, string> = {
+  products: "item",
+  categories: "category",
+  modifiers: "modifier",
+  ingredients: "ingredient",
+  tables: "table",
+  customers: "customer",
+  staff: "staff member",
+};
+
+/** Record a create/update/delete of a catalog entity in the audit trail. */
+function auditEntity(collection: string, verb: "create" | "update" | "delete", id: string, name?: string) {
+  const label = ENTITY_LABEL[collection] ?? collection;
+  const past = verb === "create" ? "Created" : verb === "update" ? "Updated" : "Deleted";
+  logAudit({
+    action: `${collection}.${verb}`,
+    entity: collection,
+    entityId: id,
+    summary: `${past} ${label}${name ? ` "${name}"` : ""}`,
+  });
+}
 
 // --- First-run defaults ----------------------------------------------------
 
@@ -151,7 +175,23 @@ function seedStore() {
     DEFAULT_CUSTOMERS.forEach((c) => dbPut("customers", c));
     DEFAULT_STAFF.forEach((s) => dbPut("staff", s));
     // Attach the source image URL; first launch hydrates it into a stored image.
-    mockItems.forEach((p) => dbPut("products", { ...p, imageUrl: ITEM_IMAGES[p.name] }));
+    mockItems.forEach((p) => {
+      dbPut("products", { ...p, imageUrl: ITEM_IMAGES[p.name] });
+      // Opening stock is recorded as an "initial" movement. The server rebuilds
+      // stock from the movement log (never from a product's absolute value), so
+      // without this the seeded stock would reset to zero on first sync.
+      if (typeof p.stockQuantity === "number" && p.stockQuantity !== 0) {
+        dbPut<StockMovement>("stock_movements", {
+          id: uid("mov"),
+          productId: p.id,
+          productName: p.name,
+          reason: "initial",
+          delta: p.stockQuantity,
+          resulting: p.stockQuantity,
+          at: Date.now(),
+        });
+      }
+    });
   });
 }
 
@@ -183,12 +223,14 @@ type CatalogState = {
   /** Decrement stock for tracked items sold, logging a movement per line. */
   recordSale: (lines: { productId: string; variantId?: string; qty: number }[], ref?: string) => void;
   /** Log a manual stock change (adjustment/initial/restock). Does not itself
-   *  write the product; the caller has already persisted the new quantity. */
+   *  write the product; the caller has already persisted the new quantity.
+   *  Pass `variant` when the change is to a specific variant's stock. */
   logStockChange: (
     product: Item,
     delta: number,
     reason: StockMovementReason,
     resulting: number,
+    variant?: { id: string; name: string },
   ) => void;
 };
 
@@ -335,9 +377,11 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       defaults: Omit<T, "id">,
     ): T {
       const id = draft.id ?? uid(prefix);
+      const isNew = !draft.id;
       const next = { ...defaults, ...draft, id } as T;
       dbPut(collection, next);
       setter((prev) => (prev.some((p) => p.id === id) ? prev.map((p) => (p.id === id ? next : p)) : [...prev, next]));
+      auditEntity(collection, isNew ? "create" : "update", id, (next as { name?: string }).name);
       return next;
     }
 
@@ -348,6 +392,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     ) {
       softDelete(collection, id);
       setter((prev) => prev.filter((p) => p.id !== id));
+      auditEntity(collection, "delete", id);
     }
 
     return {
@@ -465,12 +510,14 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         });
       },
 
-      logStockChange: (product, delta, reason, resulting) => {
+      logStockChange: (product, delta, reason, resulting, variant) => {
         if (delta === 0) return;
         dbPut<StockMovement>("stock_movements", {
           id: uid("mov"),
           productId: product.id,
           productName: product.name,
+          variantId: variant?.id,
+          variantName: variant?.name,
           reason,
           delta,
           resulting,

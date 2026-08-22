@@ -3,8 +3,9 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
-import { EditorToolbar, FieldCard, formStyles } from "@/components/form";
+import { EditorToolbar, FieldCard, confirmDelete, formStyles } from "@/components/form";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
 import { syncNowDetailed } from "@/lib/sync";
@@ -15,6 +16,8 @@ export default function TableEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { tables, sections, upsertTable, deleteTable } = useCatalog();
+  const { can } = useAuth();
+  const canEdit = can("tables:manage");
   const { store } = useStore();
   const existing = tables.find((t) => t.id === id);
 
@@ -41,13 +44,14 @@ export default function TableEditorScreen() {
           router.back();
         }}
         onDelete={
-          existing
-            ? () => {
-                deleteTable(existing.id);
-                void syncNowDetailed(store.id, ["tables"]);
-                feedbackTap();
-                router.back();
-              }
+          existing && canEdit
+            ? () =>
+                confirmDelete(`table "${existing.name}"`, () => {
+                  deleteTable(existing.id);
+                  void syncNowDetailed(store.id, ["tables"]);
+                  feedbackTap();
+                  router.back();
+                })
             : undefined
         }
       />

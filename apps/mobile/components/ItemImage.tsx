@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { PixelRatio, StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import { colors } from "@/constants/theme";
 import { cachedImageUri, getImageUri } from "@/lib/image-store";
@@ -45,6 +45,8 @@ export const ItemImage = memo(function ItemImage({
 
   const source = uri ?? (hasImage ? remoteUrl : undefined);
   const radius = size / 2;
+  // Physical pixels for this view, so the bitmap is crisp but not oversized.
+  const decodePx = Math.round(size * PixelRatio.get());
 
   return (
     <View
@@ -55,9 +57,20 @@ export const ItemImage = memo(function ItemImage({
     >
       {source ? (
         <Image
-          source={{ uri: source }}
+          /**
+           * The decode size is pinned to the size actually drawn.
+           *
+           * Product photos are full-resolution (the seeded menu is 1600x900),
+           * which decodes to ~5.5MB of bitmap *each*. Rendered untouched into a
+           * ~78px circle, a catalog of 62 items needs ~341MB — past Android's
+           * 256MB heap ceiling, which is what produced the OutOfMemoryError.
+           * Handing the decoder a target size keeps each bitmap at thumbnail
+           * cost while staying sharp on high-density screens.
+           */
+          source={{ uri: source, width: decodePx, height: decodePx }}
           style={{ width: size, height: size, borderRadius: radius }}
           contentFit="cover"
+          allowDownscaling
           recyclingKey={productId}
           cachePolicy="memory-disk"
           transition={80}

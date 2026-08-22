@@ -25,6 +25,7 @@ export type Permission =
   | "staff:manage"
   | "settings:manage"
   | "tables:manage"
+  | "audit:view"
   // Kitchen
   | "kitchen:view";
 
@@ -47,6 +48,7 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "staff:manage",
     "settings:manage",
     "tables:manage",
+    "audit:view",
     "kitchen:view",
   ],
   manager: [
@@ -61,6 +63,7 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "expenses:manage",
     "customers:manage",
     "tables:manage",
+    "audit:view",
     "kitchen:view",
   ],
   // Sells and takes payment, but no back office and no reversing money.

@@ -18,22 +18,16 @@ export function PosHeader({
   showLayoutSwitch = false,
   isGrid = true,
   showAddCustomer = false,
-  showShare = false,
   onLayoutSwitch,
   onAddCustomer,
-  onShare,
-  onChat,
 }: {
   /** When set, replaces the store dropdown with a static title. */
   title?: string;
   showLayoutSwitch?: boolean;
   isGrid?: boolean;
   showAddCustomer?: boolean;
-  showShare?: boolean;
   onLayoutSwitch?: () => void;
   onAddCustomer?: () => void;
-  onShare?: () => void;
-  onChat?: () => void;
 }) {
   const { store, stores, setStoreId } = useStore();
   const { canManageBusiness } = useAuth();
@@ -105,29 +99,6 @@ export function PosHeader({
           </Pressable>
         )}
 
-        {showShare && (
-          <Pressable
-            style={styles.iconBtn}
-            hitSlop={8}
-            onPress={() => {
-              feedbackTap();
-              onShare?.();
-            }}
-          >
-            <Ionicons name="share-social" size={22} color={colors.white} />
-          </Pressable>
-        )}
-
-        <Pressable
-          style={styles.chatBtn}
-          hitSlop={8}
-          onPress={() => {
-            feedbackTap();
-            onChat?.();
-          }}
-        >
-          <MaterialCommunityIcons name="message-text" size={20} color={colors.primary} />
-        </Pressable>
       </View>
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
@@ -218,15 +189,17 @@ export function PosSearchBar({
           </Pressable>
         )}
       </View>
-      <Pressable
-        style={styles.scanButton}
-        onPress={() => {
-          feedbackTap();
-          onScan?.();
-        }}
-      >
-        <MaterialCommunityIcons name="barcode-scan" size={26} color={colors.white} />
-      </Pressable>
+      {onScan && (
+        <Pressable
+          style={styles.scanButton}
+          onPress={() => {
+            feedbackTap();
+            onScan();
+          }}
+        >
+          <MaterialCommunityIcons name="barcode-scan" size={26} color={colors.white} />
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -246,14 +219,6 @@ const styles = StyleSheet.create({
   storeSelector: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
   storeName: { color: colors.white, fontSize: 19, fontWeight: "600", flexShrink: 1 },
   iconBtn: { paddingHorizontal: 2 },
-  chatBtn: {
-    width: 34,
-    height: 30,
-    borderRadius: 5,
-    backgroundColor: colors.white,
-    alignItems: "center",
-    justifyContent: "center",
-  },
 
   searchRow: {
     flexDirection: "row",

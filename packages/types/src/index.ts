@@ -193,9 +193,32 @@ export const SYNC_COLLECTIONS = [
   "stock_movements",
   "product_images",
   "web_orders",
+  "audit_log",
 ] as const;
 
 export type SyncCollection = (typeof SYNC_COLLECTIONS)[number];
+
+/**
+ * An audit trail entry: who did what, when. Append-only and attributed to the
+ * signed-in staff member. Synced like any other collection so every device (and
+ * the owner's other locations) sees the same history.
+ */
+export interface AuditEntry {
+  id: ID;
+  /** Event time, ms since epoch. */
+  at: number;
+  /** Acting user. */
+  actorId: ID;
+  actorName: string;
+  actorRole: StoreRole;
+  /** Machine action key, e.g. "sale.complete", "product.update". */
+  action: string;
+  /** Entity kind touched, e.g. "receipt", "product", "staff". */
+  entity: string;
+  entityId?: ID;
+  /** Human-readable one-line description shown in the log. */
+  summary: string;
+}
 
 /**
  * A single document change moving in either direction. `updatedAt` is the

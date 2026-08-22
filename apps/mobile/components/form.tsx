@@ -1,8 +1,24 @@
 ﻿import { type ReactNode } from "react";
-import { Image, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Alert, Image, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
+
+/**
+ * Confirm a destructive delete before it happens. Every editor routes its
+ * delete through this, so nothing is removed on a single stray tap.
+ */
+export function confirmDelete(label: string, onConfirm: () => void): void {
+  Alert.alert(
+    `Delete ${label}?`,
+    "This can't be undone.",
+    [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: onConfirm },
+    ],
+    { cancelable: true },
+  );
+}
 
 /** Toolbar used by every editor: âœ• Â· TITLE Â· optional actions Â· SAVE. */
 export function EditorToolbar({

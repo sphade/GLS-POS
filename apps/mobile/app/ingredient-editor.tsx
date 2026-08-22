@@ -3,8 +3,9 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
-import { EditorToolbar, FieldCard, formStyles } from "@/components/form";
+import { EditorToolbar, FieldCard, confirmDelete, formStyles } from "@/components/form";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 const UNITS = ["kg", "g", "ltr", "ml", "pcs", "pack", "crate"];
@@ -13,6 +14,8 @@ export default function IngredientEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { ingredients, upsertIngredient, deleteIngredient } = useCatalog();
+  const { can } = useAuth();
+  const canEdit = can("catalog:write");
   const existing = ingredients.find((i) => i.id === id);
 
   const [name, setName] = useState(existing?.name ?? "");
@@ -41,12 +44,13 @@ export default function IngredientEditorScreen() {
           router.back();
         }}
         onDelete={
-          existing
-            ? () => {
-                deleteIngredient(existing.id);
-                feedbackTap();
-                router.back();
-              }
+          existing && canEdit
+            ? () =>
+                confirmDelete(`ingredient "${existing.name}"`, () => {
+                  deleteIngredient(existing.id);
+                  feedbackTap();
+                  router.back();
+                })
             : undefined
         }
       />

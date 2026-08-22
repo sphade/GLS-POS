@@ -33,6 +33,7 @@ export const COLLECTIONS = [
   "stock_movements",
   "product_images",
   "web_orders",
+  "audit_log",
 ] as const;
 
 export type Collection = (typeof COLLECTIONS)[number];
@@ -152,6 +153,19 @@ export function loadAll<T>(c: Collection): T[] {
   return rows.map((r) => JSON.parse(r.data) as T);
 }
 
+/**
+ * Called after a local write marks something dirty, so the sync engine can push
+ * promptly instead of waiting for the next 20s poll. Registered by sync.ts; a
+ * plain callback avoids an import cycle (sync.ts imports db.ts, not the reverse).
+ */
+let localWriteListener: (() => void) | null = null;
+export function onLocalWrite(cb: (() => void) | null): void {
+  localWriteListener = cb;
+}
+const notifyLocalWrite = () => {
+  if (localWriteListener) localWriteListener();
+};
+
 /** Insert or update a record; marks it dirty for the next sync. */
 export function put<T extends { id: string }>(c: Collection, item: T, dirty = true) {
   const db = conn();
@@ -164,12 +178,14 @@ export function put<T extends { id: string }>(c: Collection, item: T, dirty = tr
     Date.now(),
     dirty ? 1 : 0,
   );
+  if (dirty) notifyLocalWrite();
 }
 
 /** Soft-delete (tombstone) so the deletion can sync. */
 export function softDelete(c: Collection, id: string) {
   const db = conn();
   db.runSync(`UPDATE ${c} SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?`, Date.now(), id);
+  notifyLocalWrite();
 }
 
 /**

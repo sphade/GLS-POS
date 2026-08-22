@@ -90,6 +90,9 @@ const WRITE_PERMISSION: Record<string, Permission> = {
   product_images: "catalog:write",
   // Staff advance a web order through preparing → ready → served while selling.
   web_orders: "sale:create",
+  // Every signed-in role appends audit entries for its own actions; the base
+  // read permission (held by all roles) gates it. Viewing is gated separately.
+  audit_log: "catalog:read",
 };
 
 const stockDidNotIncrease = (before: unknown, after: unknown): boolean => {
@@ -263,17 +266,38 @@ export class StoreDurableObject extends DurableObject<Env> {
       return { denied: [...new Set(denied)], changes: [], cursor: request.cursor };
     }
 
+    // Movements are the authority for stock, so apply their deltas only for
+    // ones we've never seen before (idempotent on retry). Captured against the
+    // pre-push state, and applied after all product docs are written below.
+    const newMovements: SyncChange[] = [];
+
     for (const change of request.changes) {
       const existing = stored.get(`${change.collection}/${change.id}`);
 
       // Stored version is strictly newer — keep it, drop the incoming change.
       if (existing && existing.updatedAt > change.updatedAt) continue;
 
+      // Never trust a product's absolute stock off the wire. Two tills or a
+      // long-offline device would otherwise overwrite each other's counts with
+      // last-write-wins. Stock is preserved from the server's current value
+      // (0 for a brand-new tracked product) and only moved by the movement log.
+      let data = change.data;
+      if (change.collection === "products" && !change.deleted) {
+        data = this.sanitizeProductStock(change.data, existing?.data);
+      }
+      if (
+        change.collection === "stock_movements" &&
+        !existing &&
+        !change.deleted
+      ) {
+        newMovements.push(change);
+      }
+
       seq += 1;
       const row = {
         collection: change.collection,
         id: change.id,
-        data: JSON.stringify(change.data),
+        data: JSON.stringify(data),
         updatedAt: change.updatedAt,
         deleted: change.deleted,
         serverSeq: seq,
@@ -291,6 +315,11 @@ export class StoreDurableObject extends DurableObject<Env> {
           },
         })
         .run();
+    }
+
+    // Apply the new movements' deltas to the (now-written) product docs.
+    for (const movement of newMovements) {
+      seq = this.applyMovementDelta(movement, seq);
     }
 
     this.setSeq(seq);
@@ -377,6 +406,97 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   // --- VIP web ordering -----------------------------------------------------
+
+  /**
+   * Replace a pushed product's stock with the server's authoritative value.
+   *
+   * `null` stockQuantity stays null (untracked). Otherwise the server's current
+   * value wins — or 0 for a product it has never seen, since its opening stock
+   * arrives as an "initial" movement. Variant stocks follow the same rule,
+   * matched by variant id. Every non-stock field is taken from the client.
+   */
+  private sanitizeProductStock(incoming: unknown, storedJson?: string): unknown {
+    if (!incoming || typeof incoming !== "object") return incoming;
+    const next = { ...(incoming as Record<string, unknown>) } as StoredProduct;
+    const current = storedJson ? (JSON.parse(storedJson) as StoredProduct) : null;
+
+    if (next.stockQuantity !== null && next.stockQuantity !== undefined) {
+      next.stockQuantity =
+        typeof current?.stockQuantity === "number" ? current.stockQuantity : 0;
+    }
+
+    if (Array.isArray(next.variants)) {
+      next.variants = next.variants.map((variant) => {
+        if (variant.stock === null || variant.stock === undefined) return variant;
+        const currentVariant = current?.variants?.find((v) => v.id === variant.id);
+        return {
+          ...variant,
+          stock: typeof currentVariant?.stock === "number" ? currentVariant.stock : 0,
+        };
+      });
+    }
+    return next;
+  }
+
+  /**
+   * Apply one stock movement's signed delta to its product (or variant),
+   * clamped at zero, and re-write the product doc so devices pull the corrected
+   * stock. Untracked stock (null) is left alone. Returns the advanced seq.
+   */
+  private applyMovementDelta(movement: SyncChange, seq: number): number {
+    const data = movement.data as {
+      productId?: string;
+      variantId?: string;
+      delta?: number;
+    };
+    if (!data?.productId || typeof data.delta !== "number" || data.delta === 0) return seq;
+
+    const [row] = this.db
+      .select({ data: schema.documents.data })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "products"),
+          eq(schema.documents.id, data.productId),
+        ),
+      )
+      .all();
+    if (!row) return seq; // can't move stock for a product the store doesn't have
+
+    const product = JSON.parse(row.data) as StoredProduct;
+    let changed = false;
+
+    if (data.variantId) {
+      const variant = product.variants?.find((v) => v.id === data.variantId);
+      if (variant && variant.stock !== null && variant.stock !== undefined) {
+        variant.stock = Math.max(0, variant.stock + data.delta);
+        changed = true;
+      }
+    } else if (product.stockQuantity !== null && product.stockQuantity !== undefined) {
+      product.stockQuantity = Math.max(0, product.stockQuantity + data.delta);
+      changed = true;
+    }
+
+    if (!changed) return seq;
+
+    const nextSeq = seq + 1;
+    this.db
+      .insert(schema.documents)
+      .values({
+        collection: "products",
+        id: product.id,
+        data: JSON.stringify(product),
+        updatedAt: Date.now(),
+        deleted: false,
+        serverSeq: nextSeq,
+      })
+      .onConflictDoUpdate({
+        target: [schema.documents.collection, schema.documents.id],
+        set: { data: JSON.stringify(product), updatedAt: Date.now(), serverSeq: nextSeq },
+      })
+      .run();
+    return nextSeq;
+  }
 
   /** Live documents of one collection, decoded. Internal helper. */
   private docs<T>(collection: string): T[] {

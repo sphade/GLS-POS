@@ -1,5 +1,15 @@
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useEffect, useRef, useState } from "react";
+import {
+  Animated,
+  Dimensions,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import type { Permission } from "@gls-pos/types";
 import { colors } from "@/constants/theme";
@@ -10,11 +20,15 @@ import { useAuth } from "@/lib/auth";
 type Entry = {
   label: string;
   icon: React.ComponentProps<typeof MaterialCommunityIcons>["name"];
-  route?: string;
+  route: string;
   /** Hidden unless the signed-in role holds this permission. */
   needs?: Permission;
 };
 
+/**
+ * Every entry routes somewhere real. Dead links (Activity History, Receipt
+ * Settings, Device Details) were removed — they did nothing when tapped.
+ */
 const GROUPS: { title: string; entries: Entry[] }[] = [
   {
     title: "MANAGEMENT",
@@ -26,38 +40,74 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
       { label: "Staff Management", icon: "account-tie-outline", route: "/staff", needs: "staff:manage" },
       { label: "Add Expense", icon: "cash-minus", route: "/expense-categories", needs: "expenses:manage" },
       { label: "Receipts", icon: "receipt", route: "/(tabs)/today", needs: "reports:view" },
-      { label: "Activity History", icon: "history", needs: "reports:view" },
+      { label: "Activity History", icon: "history", route: "/audit", needs: "audit:view" },
     ],
   },
   {
     title: "SETTINGS",
     entries: [
-      { label: "Receipt Settings", icon: "script-text-outline", needs: "settings:manage" },
-      { label: "Business Settings", icon: "store-cog-outline", needs: "settings:manage" },
+      { label: "Business Settings", icon: "store-cog-outline", route: "/business-settings", needs: "settings:manage" },
       { label: "Printer Setup", icon: "printer-outline", route: "/printer-setup" },
-      { label: "General settings", icon: "cog-outline", route: "/settings", needs: "settings:manage" },
-      { label: "Device Details", icon: "cellphone-cog" },
+      { label: "General Settings", icon: "cog-outline", route: "/settings", needs: "settings:manage" },
     ],
   },
 ];
 
-/** Side drawer opened from the hamburger in PosHeader. */
+const DRAWER_WIDTH = Math.min(340, Dimensions.get("window").width * 0.82);
+const DURATION = 220;
+
+/**
+ * Side drawer opened from the hamburger in PosHeader.
+ *
+ * Slides in from the left with its own animation. The previous version used
+ * `Modal animationType="slide"`, which on Android animates from the *bottom* —
+ * the wrong direction for a side drawer, and the source of the odd motion. We
+ * animate translateX and the backdrop opacity by hand, and only unmount once
+ * the close animation has finished so it never snaps shut.
+ */
 export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const router = useRouter();
   const { store } = useStore();
   const { can, canManageBusiness, signOut } = useAuth();
 
-  const go = (route?: string) => {
+  // Keep the modal mounted through the close animation.
+  const [mounted, setMounted] = useState(visible);
+  const translateX = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
+  const backdrop = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (visible) {
+      setMounted(true);
+      Animated.parallel([
+        Animated.timing(translateX, { toValue: 0, duration: DURATION, useNativeDriver: true }),
+        Animated.timing(backdrop, { toValue: 1, duration: DURATION, useNativeDriver: true }),
+      ]).start();
+    } else if (mounted) {
+      Animated.parallel([
+        Animated.timing(translateX, { toValue: -DRAWER_WIDTH, duration: DURATION, useNativeDriver: true }),
+        Animated.timing(backdrop, { toValue: 0, duration: DURATION, useNativeDriver: true }),
+      ]).start(({ finished }) => {
+        if (finished) setMounted(false);
+      });
+    }
+  }, [visible, mounted, translateX, backdrop]);
+
+  const go = (route: string) => {
     feedbackTap();
     onClose();
-    if (route) router.push(route as never);
+    router.push(route as never);
   };
 
+  if (!mounted) return null;
+
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
-        <Pressable style={styles.drawer} onPress={(e) => e.stopPropagation()}>
-          {/* Header */}
+    <Modal visible transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
+      <View style={styles.fill}>
+        <Animated.View style={[styles.backdrop, { opacity: backdrop }]}>
+          <Pressable style={styles.fill} onPress={onClose} />
+        </Animated.View>
+
+        <Animated.View style={[styles.drawer, { transform: [{ translateX }] }]}>
           <View style={styles.header}>
             <Text style={styles.appName}>GLS-POS</Text>
             <View style={styles.storeRow}>
@@ -81,7 +131,6 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
 
           <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
             {GROUPS.map((g) => {
-              // Only show what this role is allowed to reach.
               const allowed = g.entries.filter((e) => !e.needs || can(e.needs));
               if (allowed.length === 0) return null;
               return (
@@ -116,15 +165,28 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
               <Text style={[styles.rowLabel, { color: colors.red500 }]}>Logout</Text>
             </Pressable>
           </ScrollView>
-        </Pressable>
-      </Pressable>
+        </Animated.View>
+      </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: "#00000066", flexDirection: "row" },
-  drawer: { width: "82%", maxWidth: 340, backgroundColor: colors.white },
+  fill: { flex: 1 },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "#00000066" },
+  drawer: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: DRAWER_WIDTH,
+    backgroundColor: colors.white,
+    elevation: 16,
+    shadowColor: "#000",
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 2, height: 0 },
+  },
   header: { backgroundColor: colors.primary, paddingHorizontal: 16, paddingTop: 44, paddingBottom: 16 },
   appName: { color: colors.white, fontSize: 20, fontWeight: "800" },
   storeRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16 },

@@ -4,14 +4,17 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
-import { EditorToolbar, FieldCard, formStyles } from "@/components/form";
+import { EditorToolbar, FieldCard, confirmDelete, formStyles } from "@/components/form";
 import { swatches, useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 export default function CategoryEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { categories, upsertCategory, deleteCategory } = useCatalog();
+  const { can } = useAuth();
+  const canEdit = can("catalog:write");
   const existing = categories.find((c) => c.id === id);
 
   const [name, setName] = useState(existing?.name ?? "");
@@ -31,12 +34,13 @@ export default function CategoryEditorScreen() {
           router.back();
         }}
         onDelete={
-          existing
-            ? () => {
-                deleteCategory(existing.id);
-                feedbackTap();
-                router.back();
-              }
+          existing && canEdit
+            ? () =>
+                confirmDelete(`category "${existing.name}"`, () => {
+                  deleteCategory(existing.id);
+                  feedbackTap();
+                  router.back();
+                })
             : undefined
         }
       />

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -27,6 +27,7 @@ export default function TodayScreen() {
   const { store } = useStore();
   const [tab, setTab] = useState<"pos" | "online">("pos");
   const [syncing, setSyncing] = useState(false);
+  const [query, setQuery] = useState("");
 
   /**
    * Receipt upload state comes from SQLite's dirty column — the same source the
@@ -42,6 +43,22 @@ export default function TodayScreen() {
     start.setHours(0, 0, 0, 0);
     return receipts.filter((receipt) => receipt.createdAt >= start.getTime());
   }, [receipts]);
+
+  const q = query.trim().toLowerCase();
+  /** Filter receipts by number, customer, or payment mode. */
+  const filteredReceipts = useMemo(() => {
+    if (!q) return todayReceipts;
+    return todayReceipts.filter((r) =>
+      [r.number, r.customerName ?? "", r.mode].some((f) => f.toLowerCase().includes(q)),
+    );
+  }, [todayReceipts, q]);
+  /** Filter VIP orders by code, table, or guest. */
+  const filteredOrders = useMemo(() => {
+    if (!q) return orders;
+    return orders.filter((o) =>
+      [o.code, o.tableName, o.guestName ?? ""].some((f) => f.toLowerCase().includes(q)),
+    );
+  }, [orders, q]);
   const refreshPending = () => {
     const ids = loadDirtyIds("receipts");
     setPendingIds(ids);
@@ -80,6 +97,25 @@ export default function TodayScreen() {
         <Text style={styles.headerTitle}>Receipts</Text>
       </View>
 
+      <View style={styles.searchRow}>
+        <View style={styles.searchBox}>
+          <Ionicons name="search" size={19} color={colors.grey600} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder={tab === "pos" ? "Search receipt, customer, payment" : "Search order, table, guest"}
+            placeholderTextColor={colors.grey500}
+            value={query}
+            onChangeText={setQuery}
+            returnKeyType="search"
+          />
+          {query.length > 0 && (
+            <Pressable onPress={() => setQuery("")} hitSlop={8}>
+              <Ionicons name="close-circle" size={18} color={colors.grey500} />
+            </Pressable>
+          )}
+        </View>
+      </View>
+
       {pending > 0 && (
         <Pressable style={styles.syncBar} onPress={pushNow} disabled={syncing}>
           <Text style={styles.syncText}>
@@ -114,12 +150,13 @@ export default function TodayScreen() {
 
       {tab === "pos" ? (
         <FlatList
-          data={todayReceipts}
+          data={filteredReceipts}
           keyExtractor={(r) => r.id}
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 24 }}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
-              <EmptyState text={strings.noTransactionsToday} size={120} />
+              <EmptyState text={q ? "No matching receipts" : strings.noTransactionsToday} size={120} />
             </View>
           }
           renderItem={({ item }) => (
@@ -133,12 +170,13 @@ export default function TodayScreen() {
       ) : (
         /* VIP orders placed from the guest QR site. */
         <FlatList
-          data={orders}
+          data={filteredOrders}
           keyExtractor={(o) => o.id}
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 24 }}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
-              <EmptyState text="No VIP orders yet" size={120} />
+              <EmptyState text={q ? "No matching orders" : "No VIP orders yet"} size={120} />
             </View>
           }
           renderItem={({ item }) => (
@@ -216,6 +254,17 @@ const styles = StyleSheet.create({
   statusPillText: { color: colors.white, fontSize: 9, fontWeight: "800", letterSpacing: 0.4 },
   header: { backgroundColor: colors.primary, paddingHorizontal: 16, paddingVertical: 14 },
   headerTitle: { color: colors.white, fontSize: 18, fontWeight: "700" },
+  searchRow: { backgroundColor: colors.primary, paddingHorizontal: 10, paddingBottom: 12 },
+  searchBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.white,
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    height: 44,
+    gap: 8,
+  },
+  searchInput: { flex: 1, color: colors.grey800, fontSize: 16, padding: 0 },
   syncBar: {
     backgroundColor: colors.red500,
     flexDirection: "row",

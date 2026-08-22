@@ -1,10 +1,9 @@
-import { useState } from "react";
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
-import { PosHeader, PosSearchBar } from "@/components/PosHeader";
+import { PosHeader } from "@/components/PosHeader";
 import { displayItemName, useCart } from "@/lib/cart";
 import { feedbackAddItem, feedbackTap } from "@/lib/feedback";
 
@@ -16,14 +15,12 @@ import { feedbackAddItem, feedbackTap } from "@/lib/feedback";
 export default function CounterScreen() {
   const router = useRouter();
   const { entries, subtotal, taxTotal, total, add, remove, count, clear } = useCart();
-  const [query, setQuery] = useState("");
   const list = Object.values(entries);
 
   return (
     <View style={styles.root}>
       <SafeAreaView edges={["top"]} style={styles.headerRegion}>
-        <PosHeader showAddCustomer />
-        <PosSearchBar value={query} onChangeText={setQuery} onScan={() => router.push("/scanner")} />
+        <PosHeader />
       </SafeAreaView>
 
       {list.length === 0 ? (
@@ -32,7 +29,7 @@ export default function CounterScreen() {
             style={styles.actionCard}
             onPress={() => {
               feedbackTap();
-              router.push("/select-table");
+              router.navigate("/(tabs)");
             }}
             android_ripple={{ color: "#00000010" }}
           >

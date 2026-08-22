@@ -2,6 +2,8 @@
 import { ActivityIndicator, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useFonts } from "expo-font";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { CartProvider } from "@/lib/cart";
@@ -12,6 +14,7 @@ import { setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { GlobalRefreshButton } from "@/components/GlobalRefreshButton";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { initAudio } from "@/lib/feedback";
 import { colors } from "@/constants/theme";
 
 const MODAL = { presentation: "modal" } as const;
@@ -25,6 +28,35 @@ const MODAL = { presentation: "modal" } as const;
  * Access control is therefore a redirect (see AuthGate), not a different tree.
  */
 export default function RootLayout() {
+  /**
+   * Icon fonts are loaded before anything renders.
+   *
+   * @expo/vector-icons draws glyphs from a TTF that expo-font fetches at
+   * runtime, per family, when the first icon of that family mounts. Painting the
+   * UI before that finished meant the tab bar and header appeared with empty
+   * gaps and the icons popped in a moment later — worst on a cold start. Both
+   * families the app uses are preloaded here, so the first frame of real UI
+   * already has its icons.
+   */
+  const [fontsLoaded] = useFonts({
+    ...Ionicons.font,
+    ...MaterialCommunityIcons.font,
+  });
+
+  // Configure the audio session and warm every sound once, at launch, so the
+  // first alert (a VIP order) isn't the thing that has to load the audio stack.
+  useEffect(() => {
+    void initAudio();
+  }, []);
+
+  if (!fontsLoaded) {
+    return (
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.screenBg }}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>

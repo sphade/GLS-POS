@@ -60,10 +60,25 @@ function bucketize(receipts: Receipt[], period: Period, sortField: SortField, so
 
 export default function ReportDetailScreen() {
   const router = useRouter();
-  const { type = "revenue", title = "Revenue" } = useLocalSearchParams<{ type?: string; title?: string }>();
-  const { receipts } = useCart();
+  const {
+    type = "revenue",
+    title = "Revenue",
+    from,
+    to,
+    label,
+  } = useLocalSearchParams<{ type?: string; title?: string; from?: string; to?: string; label?: string }>();
+  const { receipts: allReceipts } = useCart();
   const { width } = useWindowDimensions();
   const pagerRef = useRef<ScrollView>(null);
+
+  // Scope to the range the overview was showing. Without this the chart used
+  // every receipt ever and mislabelled itself, so drilling into "This Week"
+  // showed the same thing as "Today".
+  const receipts = useMemo(() => {
+    const lo = from ? Number(from) : 0;
+    const hi = to ? Number(to) : Date.now() + 1;
+    return allReceipts.filter((r) => r.createdAt >= lo && r.createdAt < hi);
+  }, [allReceipts, from, to]);
 
   const [period, setPeriod] = useState<Period>("hourly");
   const [sortField, setSortField] = useState<SortField>("total");
@@ -95,9 +110,7 @@ export default function ReportDetailScreen() {
     pagerRef.current?.scrollTo({ x: PERIODS.indexOf(p) * width, animated: true });
   };
 
-  const subtitle = `YESTERDAY : ${new Date()
-    .toLocaleDateString("en-US", { day: "2-digit", month: "short" })
-    .toUpperCase()}`;
+  const subtitle = (label ?? "All time").toUpperCase();
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>

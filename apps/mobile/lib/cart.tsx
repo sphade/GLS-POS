@@ -1,6 +1,18 @@
-﻿import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+﻿import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
+import { formatMoney } from "@/constants/theme";
 import { loadAll, put as dbPut } from "./db";
+import { logAudit } from "./audit";
 
 /**
  * How an item is sold:
@@ -177,8 +189,92 @@ type CartState = {
 
 const CartContext = createContext<CartState | null>(null);
 
+/**
+ * A second, deliberately-thin cart context for hot paths like the item grid.
+ *
+ * The full CartContext value changes on every add/remove, so any screen that
+ * consumes it re-renders on every tap. The catalog grid only needs stable
+ * actions plus a way to read one product's quantity, so it uses this instead:
+ * `add`/`remove`/`clear` never change identity, and `subscribe`/`getQtyOf`/
+ * `getCount` drive fine-grained `useSyncExternalStore` reads so a tap
+ * re-renders only the one tile whose quantity changed — not the whole screen.
+ */
+type CartFast = {
+  add: (item: Item, variant?: Variant) => void;
+  remove: (lineId: string) => void;
+  clear: () => void;
+  subscribe: (cb: () => void) => () => void;
+  getQtyOf: (productId: string) => number;
+  getCount: () => number;
+};
+
+const CartFastContext = createContext<CartFast | null>(null);
+
 export function CartProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
+
+  // --- Stable actions (identity never changes) ----------------------------
+  const add = useCallback((item: Item, variant?: Variant) => {
+    if (hasVariants(item) && !variant) return;
+    const selectedVariant = variant
+      ? item.variants?.find((candidate) => candidate.id === variant.id)
+      : undefined;
+    if (variant && !selectedVariant) return;
+    const lineId = cartLineKey(item.id, selectedVariant?.id);
+    setEntries((prev) => {
+      const quantity = prev[lineId]?.qty ?? 0;
+      const stock = selectedVariant ? selectedVariant.stock : item.stockQuantity;
+      if (stock != null && quantity + 1 > stock) return prev;
+      return { ...prev, [lineId]: { lineId, item, variant: selectedVariant, qty: quantity + 1 } };
+    });
+  }, []);
+
+  const remove = useCallback((lineId: string) => {
+    setEntries((prev) => {
+      const existing = prev[lineId];
+      if (!existing) return prev;
+      if (existing.qty <= 1) {
+        const next = { ...prev };
+        delete next[lineId];
+        return next;
+      }
+      return { ...prev, [lineId]: { ...existing, qty: existing.qty - 1 } };
+    });
+  }, []);
+
+  const clear = useCallback(() => setEntries({}), []);
+
+  // --- Fine-grained quantity store ----------------------------------------
+  // A ref mirror + listener set lets tiles subscribe to just their own qty via
+  // useSyncExternalStore, so cart changes don't re-render the whole grid.
+  const entriesRef = useRef(entries);
+  const qtyListeners = useRef(new Set<() => void>());
+  useEffect(() => {
+    entriesRef.current = entries;
+    qtyListeners.current.forEach((l) => l());
+  }, [entries]);
+
+  const subscribe = useCallback((cb: () => void) => {
+    qtyListeners.current.add(cb);
+    return () => qtyListeners.current.delete(cb);
+  }, []);
+  const getQtyOf = useCallback(
+    (productId: string) =>
+      Object.values(entriesRef.current).reduce(
+        (sum, e) => (e.item.id === productId ? sum + e.qty : sum),
+        0,
+      ),
+    [],
+  );
+  const getCount = useCallback(
+    () => Object.values(entriesRef.current).reduce((sum, e) => sum + e.qty, 0),
+    [],
+  );
+
+  const fast = useMemo<CartFast>(
+    () => ({ add, remove, clear, subscribe, getQtyOf, getCount }),
+    [add, remove, clear, subscribe, getQtyOf, getCount],
+  );
   // Receipts persist in SQLite (offline-first). Seeded once for the demo.
   // Receipts are real sales only — no demo seeding. An earlier version seeded 17
   // fake receipts (some flagged unsynced on purpose), which made the Receipts
@@ -209,35 +305,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
       total: subtotal + taxTotal,
       qtyOf: (productId) =>
         list.reduce((sum, entry) => sum + (entry.item.id === productId ? entry.qty : 0), 0),
-      add: (item, variant) => {
-        if (hasVariants(item) && !variant) return;
-        const selectedVariant = variant
-          ? item.variants?.find((candidate) => candidate.id === variant.id)
-          : undefined;
-        if (variant && !selectedVariant) return;
-        const lineId = cartLineKey(item.id, selectedVariant?.id);
-        setEntries((prev) => {
-          const quantity = prev[lineId]?.qty ?? 0;
-          const stock = selectedVariant ? selectedVariant.stock : item.stockQuantity;
-          if (stock != null && quantity + 1 > stock) return prev;
-          return {
-            ...prev,
-            [lineId]: { lineId, item, variant: selectedVariant, qty: quantity + 1 },
-          };
-        });
-      },
-      remove: (lineId) =>
-        setEntries((prev) => {
-          const existing = prev[lineId];
-          if (!existing) return prev;
-          if (existing.qty <= 1) {
-            const next = { ...prev };
-            delete next[lineId];
-            return next;
-          }
-          return { ...prev, [lineId]: { ...existing, qty: existing.qty - 1 } };
-        }),
-      clear: () => setEntries({}),
+      add,
+      remove,
+      clear,
       receipts,
       completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
         const now = Date.now();
@@ -270,6 +340,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
         dbPut("receipts", receipt);
         setReceipts((prev) => [receipt, ...prev]);
         setEntries({});
+        logAudit({
+          action: "sale.complete",
+          entity: "receipt",
+          entityId: receipt.id,
+          summary: `Sale ${receipt.number} · ${receipt.itemCount} item${receipt.itemCount === 1 ? "" : "s"} · ${mode} · ${formatMoney(receipt.total, receipt.currency)}`,
+        });
         return receipt;
       },
 
@@ -300,18 +376,47 @@ export function CartProvider({ children }: { children: ReactNode }) {
         };
         dbPut("receipts", receipt);
         setReceipts((prev) => [receipt, ...prev]);
+        logAudit({
+          action: "order.bill",
+          entity: "receipt",
+          entityId: receipt.id,
+          summary: `Billed VIP order ${order.code} · ${formatMoney(order.total, order.currency)}`,
+        });
         return receipt;
       },
 
     };
-  }, [entries, receipts]);
+  }, [entries, receipts, add, remove, clear]);
 
-  return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
+  return (
+    <CartContext.Provider value={value}>
+      <CartFastContext.Provider value={fast}>{children}</CartFastContext.Provider>
+    </CartContext.Provider>
+  );
 }
 
 export function useCart(): CartState {
   const ctx = useContext(CartContext);
   if (!ctx) throw new Error("useCart must be used within a CartProvider");
   return ctx;
+}
+
+/** Stable cart actions + non-reactive readers, for hot paths like the grid. */
+export function useCartActions(): CartFast {
+  const ctx = useContext(CartFastContext);
+  if (!ctx) throw new Error("useCartActions must be used within a CartProvider");
+  return ctx;
+}
+
+/** Subscribe to just one product's total quantity (sums its variants). */
+export function useItemQty(productId: string): number {
+  const ctx = useCartActions();
+  return useSyncExternalStore(ctx.subscribe, () => ctx.getQtyOf(productId));
+}
+
+/** Subscribe to the cart's total item count. */
+export function useCartCount(): number {
+  const ctx = useCartActions();
+  return useSyncExternalStore(ctx.subscribe, ctx.getCount);
 }
 

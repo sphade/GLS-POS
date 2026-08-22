@@ -2,14 +2,17 @@ import { useState } from "react";
 import { ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { EditorToolbar, FieldCard, formStyles } from "@/components/form";
+import { EditorToolbar, FieldCard, confirmDelete, formStyles } from "@/components/form";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 export default function CustomerEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { customers, upsertCustomer, deleteCustomer } = useCatalog();
+  const { can } = useAuth();
+  const canEdit = can("customers:manage");
   const existing = customers.find((c) => c.id === id);
 
   const [name, setName] = useState(existing?.name ?? "");
@@ -42,12 +45,13 @@ export default function CustomerEditorScreen() {
           router.back();
         }}
         onDelete={
-          existing
-            ? () => {
-                deleteCustomer(existing.id);
-                feedbackTap();
-                router.back();
-              }
+          existing && canEdit
+            ? () =>
+                confirmDelete(`customer "${existing.name}"`, () => {
+                  deleteCustomer(existing.id);
+                  feedbackTap();
+                  router.back();
+                })
             : undefined
         }
       />

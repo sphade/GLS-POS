@@ -69,8 +69,6 @@ export const strings = {
   someReceiptsNotSync: "Some Receipts are not sync with cloud!",
   guest: "Guest",
   by: "by",
-  posReports: "POS Reports",
-  storefrontReports: "StoreFront Reports",
   charge: "Charge",
   billTotal: "Bill Total",
   amountReceived: "Amount Received",

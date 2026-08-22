@@ -5,9 +5,10 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
-import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, formStyles } from "@/components/form";
+import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, confirmDelete, formStyles } from "@/components/form";
 import { VariantEditor, VARIANT_ICONS } from "@/components/VariantEditor";
 import { swatches, useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { getImageUri, removeImage, saveImage } from "@/lib/image-store";
 import { MEASURES, newVariant, type Measure, type SellBy, type Variant } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
@@ -23,6 +24,8 @@ export default function ItemEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { products, categories, upsertProduct, deleteProduct, logStockChange } = useCatalog();
+  const { can } = useAuth();
+  const canEdit = can("catalog:write");
   const existing = products.find((p) => p.id === id);
 
   const [mode, setMode] = useState<"left" | "right">(
@@ -190,8 +193,26 @@ export default function ItemEditorScreen() {
     if (pickedImage) saveImage(saved.id, pickedImage.base64, pickedImage.mime);
     else if (pickedImage === null) removeImage(saved.id);
 
-    // Audit trail: log the stock delta from a manual create/edit.
-    if (nextStock !== null) {
+    // Audit trail: log the stock delta from a manual create/edit. The server
+    // rebuilds stock from these movements, so every stock change must emit one —
+    // both the simple product field and each variant.
+    if (mode === "right" && savedVariants) {
+      const priorById = new Map((existing?.variants ?? []).map((v) => [v.id, v.stock ?? 0]));
+      for (const variant of savedVariants) {
+        if (variant.stock == null) continue; // untracked variant
+        const before = priorById.get(variant.id) ?? 0;
+        const delta = variant.stock - before;
+        if (delta !== 0) {
+          logStockChange(
+            saved,
+            delta,
+            priorById.has(variant.id) ? "adjustment" : "initial",
+            variant.stock,
+            { id: variant.id, name: variant.name },
+          );
+        }
+      }
+    } else if (nextStock !== null) {
       const before = existing?.stockQuantity ?? 0;
       const delta = nextStock - before;
       if (delta !== 0) {
@@ -261,12 +282,13 @@ export default function ItemEditorScreen() {
         onSave={onSave}
         onFavourite={feedbackTap}
         onDelete={
-          existing
-            ? () => {
-                deleteProduct(existing.id);
-                feedbackTap();
-                router.back();
-              }
+          existing && canEdit
+            ? () =>
+                confirmDelete(`"${existing.name}"`, () => {
+                  deleteProduct(existing.id);
+                  feedbackTap();
+                  router.back();
+                })
             : undefined
         }
       />

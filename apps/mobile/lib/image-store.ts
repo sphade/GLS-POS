@@ -1,3 +1,4 @@
+import { InteractionManager } from "react-native";
 import * as FileSystem from "expo-file-system";
 import { getActiveStore, loadIds, loadOne, put as dbPut, softDelete } from "./db";
 
@@ -120,8 +121,18 @@ export function getImageUri(productId: string): Promise<string | null> {
  * doesn't stall waiting on file writes. Fire-and-forget.
  */
 export async function warmImageCache(productIds: string[]): Promise<void> {
+  // Hold off until touches and animations have settled, so warming never
+  // competes with the user's first taps.
+  await new Promise<void>((resolve) => {
+    InteractionManager.runAfterInteractions(() => resolve());
+  });
+
   for (const id of productIds) {
     if (fileCache.has(keyFor(id))) continue;
     await getImageUri(id);
+    // Yield a frame between images. Each one is a 30–80KB base64 decode plus a
+    // disk write, and running dozens back-to-back made the catalog feel
+    // unresponsive on first launch — taps landed late or were dropped entirely.
+    await new Promise<void>((resolve) => setTimeout(resolve, 16));
   }
 }

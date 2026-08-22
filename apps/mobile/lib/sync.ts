@@ -7,6 +7,7 @@ import {
   loadDirty,
   metaGet,
   metaSet,
+  onLocalWrite,
   type ChangeRow,
 } from "./db";
 import { API_URL, authCookie } from "./auth-client";
@@ -36,6 +37,54 @@ export type SyncAttemptResult =
       status?: number;
       code?: string;
     };
+
+/**
+ * Upload budget per request.
+ *
+ * A push used to send every dirty row in one POST. That is fine for orders and
+ * catalog edits, but `product_images` rows are 30–80KB of base64 each, so a
+ * freshly seeded store produced a multi-megabyte body that could not finish
+ * inside SYNC_TIMEOUT_MS on a phone connection. The request aborted, nothing was
+ * marked clean, and the next attempt resent the same oversized payload — an
+ * endless "could not reach the server" on a perfectly good network.
+ *
+ * Batches are therefore capped by encoded size and by row count, and each batch
+ * clears its own dirty rows so progress is never lost.
+ */
+const MAX_PUSH_BYTES = 512 * 1024;
+const MAX_PUSH_ROWS = 200;
+
+type PushBatch = { changes: SyncChange[]; idsByCollection: Record<string, string[]> };
+
+/**
+ * Split changes into batches that respect the upload budget. A single row over
+ * the budget still gets its own batch — dropping it would mean it never syncs.
+ */
+function batchChanges(changes: SyncChange[]): PushBatch[] {
+  const batches: PushBatch[] = [];
+  let current: PushBatch = { changes: [], idsByCollection: {} };
+  let bytes = 0;
+
+  const flush = () => {
+    if (current.changes.length === 0) return;
+    batches.push(current);
+    current = { changes: [], idsByCollection: {} };
+    bytes = 0;
+  };
+
+  for (const change of changes) {
+    const size = JSON.stringify(change).length;
+    if (current.changes.length > 0 && (bytes + size > MAX_PUSH_BYTES || current.changes.length >= MAX_PUSH_ROWS)) {
+      flush();
+    }
+    current.changes.push(change);
+    (current.idsByCollection[change.collection] ??= []).push(change.id);
+    bytes += size;
+  }
+  flush();
+
+  return batches;
+}
 
 /** Gather dirty changes, optionally limiting the push to selected collections. */
 function collectDirty(
@@ -167,8 +216,40 @@ async function performSync(
       return { ok: false, kind: "offline", message: "This device is offline. Connect to the internet and retry." };
     }
 
+    const { changes } = collectDirty(onlyCollections);
+    // One request per batch. The last one always runs even with nothing dirty,
+    // so a sync with no local edits still pulls server changes.
+    const batches = batchChanges(changes);
+    const queue: PushBatch[] = batches.length > 0 ? batches : [{ changes: [], idsByCollection: {} }];
+
+    let applied = 0;
+    for (const batch of queue) {
+      const result = await pushBatch(storeId, cookie, batch);
+      if (!result.ok) return result;
+      applied += result.appliedCount;
+    }
+    return { ok: true, appliedCount: applied };
+  } catch (e) {
+    const error = e as Error;
+    const timedOut = error.name === "AbortError";
+    const message = timedOut
+      ? "The server took too long to respond. Check your connection and retry."
+      : `Could not reach the server: ${error.message}`;
+    console.warn("[sync] failed:", message);
+    return { ok: false, kind: timedOut ? "timeout" : "network", message };
+  }
+}
+
+/** Push one batch, clear its dirty rows on success, and apply what came back. */
+async function pushBatch(
+  storeId: string,
+  cookie: string,
+  batch: PushBatch,
+): Promise<SyncAttemptResult> {
+  const { changes, idsByCollection } = batch;
+  try {
+    // Re-read per batch: an earlier batch advances the cursor.
     const cursor = Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
-    const { changes, idsByCollection } = collectDirty(onlyCollections);
     const res = await fetchWithTimeout(`${API_URL}/api/sync`, {
       method: "POST",
       headers: {
@@ -275,5 +356,19 @@ export function startAutoSync(storeId: string, intervalMs = 20_000): () => void 
   if (!SYNC_ENABLED) return () => {};
   void syncNow(storeId);
   const handle = setInterval(() => void syncNow(storeId), intervalMs);
-  return () => clearInterval(handle);
+
+  // Push-on-write: a local edit schedules a sync ~1s later instead of waiting
+  // for the next poll, so changes leave the device promptly. Debounced so a
+  // burst of edits (e.g. building a cart) collapses into one push.
+  let debounce: ReturnType<typeof setTimeout> | null = null;
+  onLocalWrite(() => {
+    if (debounce) clearTimeout(debounce);
+    debounce = setTimeout(() => void syncNow(storeId), 1200);
+  });
+
+  return () => {
+    clearInterval(handle);
+    if (debounce) clearTimeout(debounce);
+    onLocalWrite(null);
+  };
 }

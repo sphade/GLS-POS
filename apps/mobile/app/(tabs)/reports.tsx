@@ -2,8 +2,8 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
-import { colors, formatMoney, strings } from "@/constants/theme";
+import { useRouter, type Href } from "expo-router";
+import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart } from "@/lib/cart";
@@ -69,19 +69,25 @@ function dateLabelFor(range: string) {
   return `${range} : ${day} ${month}`;
 }
 
+/**
+ * Reports overview. Deliberately shows only figures we can compute honestly
+ * from real receipts and stock — no fabricated profit/tax/category placeholders.
+ * Each card either opens the sales chart for the same range, or jumps to a real
+ * screen (Inventory), so nothing leads to a dead or misleading page.
+ */
 export default function ReportsScreen() {
   const router = useRouter();
   const { receipts } = useCart();
   const { products } = useCatalog();
-  const [tab, setTab] = useState<"pos" | "storefront">("pos");
   const [rangeIndex, setRangeIndex] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const range = RANGES[rangeIndex]!;
+  const { from, to } = rangeBounds(range);
 
-  const scoped = useMemo(() => {
-    const { from, to } = rangeBounds(range);
-    return receipts.filter((r) => r.createdAt >= from && r.createdAt < to);
-  }, [receipts, range]);
+  const scoped = useMemo(
+    () => receipts.filter((r) => r.createdAt >= from && r.createdAt < to),
+    [receipts, from, to],
+  );
 
   const stats = useMemo(() => {
     const totalSales = scoped.reduce((s, r) => s + r.total, 0);
@@ -92,16 +98,13 @@ export default function ReportsScreen() {
       r.lines.forEach((l) => (byItem[l.name] = (byItem[l.name] ?? 0) + l.qty));
     });
     const topItem = Object.entries(byItem).sort((a, b) => b[1] - a[1])[0];
-    const highest = scoped.reduce((m, r) => Math.max(m, r.total), 0);
+    const topMode = Object.entries(byMode).sort((a, b) => b[1] - a[1])[0];
     return {
       totalSales,
       count: scoped.length,
       avg: scoped.length ? Math.round(totalSales / scoped.length) : 0,
-      profit: Math.round(totalSales * 0.4),
-      tax: Math.round(totalSales * 0.075),
-      highest,
-      topMode: Object.entries(byMode).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "â€”",
       topItem,
+      topMode,
       lowStock: products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length,
       remaining: products.reduce((s, i) => s + (i.stockQuantity ?? 0), 0),
     };
@@ -114,11 +117,25 @@ export default function ReportsScreen() {
     setRangeIndex((i) => Math.min(RANGES.length - 1, Math.max(0, i + dir)));
   };
 
+  /** Open the sales chart for the current range. */
+  const openChart = (type: string, title: string) => {
+    feedbackTap();
+    router.push({
+      pathname: "/report/[type]",
+      params: { type, title, from: String(from), to: String(to), label: dateLabelFor(range) },
+    });
+  };
+
+  const openInventory = () => {
+    feedbackTap();
+    router.push("/inventory" as Href);
+  };
+
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
-      <PosHeader showShare />
+      <PosHeader title="Reports" />
 
-      {/* Date range bar: â† calendar + label â†’ */}
+      {/* Date range bar: ← calendar + label → */}
       <View style={styles.dateBar}>
         <Pressable style={styles.dateArrow} hitSlop={8} onPress={() => step(-1)}>
           <Ionicons name="arrow-back" size={22} color={colors.primary} />
@@ -158,92 +175,47 @@ export default function ReportsScreen() {
 
       {!hasData ? (
         <View style={styles.emptyWrap}>
-          <EmptyState text="No Reports for Select Date" />
+          <EmptyState text="No sales in this period" />
         </View>
       ) : (
         <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
-          <View style={styles.tabCard}>
-            <Pressable style={[styles.tabHalf, tab === "pos" && styles.tabActive]} onPress={() => setTab("pos")}>
-              <Text style={[styles.tabText, tab === "pos" && styles.tabTextActive]}>{strings.posReports}</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.tabHalf, tab === "storefront" && styles.tabActive]}
-              onPress={() => setTab("storefront")}
-            >
-              <Text style={[styles.tabText, tab === "storefront" && styles.tabTextActive]}>
-                {strings.storefrontReports}
-              </Text>
-            </Pressable>
-          </View>
-
           <MetricCard
             label="TOTAL SALES"
             value={formatMoney(stats.totalSales, CURRENCY)}
-            message={`${formatMoney(stats.highest, CURRENCY)} is Highest`}
-            type="revenue"
-            title="Revenue"
+            onPress={() => openChart("revenue", "Total Sales")}
           />
           <MetricCard
-            label="GROSS PROFIT (SELLING PRICE - COST PRICE )"
-            value={formatMoney(stats.profit, CURRENCY)}
-            type="profit"
-            title="Gross Profit"
-          />
-          <MetricCard
-            label="PROFITS ( SALES - EXPENSE )"
-            value="No Expenses"
-            type="profit"
-            title="Profits"
-          />
-          <MetricCard
-            label="TOP STOCKS"
-            value={stats.topItem ? `${stats.topItem[0]} : ${stats.topItem[1]}` : "â€”"}
-            message={stats.topItem ? `Only ${stats.topItem[1]}` : undefined}
-            type="topStocks"
-            title="Top Stocks"
-          />
-          <MetricCard label="TOP CATEGORY" value="Fruits : 1" type="topCategory" title="Top Category" />
-          <MetricCard
-            label="TOTAL RECEIPT COUNT"
+            label="RECEIPTS"
             value={String(stats.count)}
-            type="salesCount"
-            title="Receipt Count"
+            onPress={() => openChart("salesCount", "Receipts")}
           />
-          <MetricCard label="TAX" value={formatMoney(stats.tax, CURRENCY)} type="tax" title="Tax" />
-          <MetricCard label="DISCOUNT" value={formatMoney(0, CURRENCY)} type="discount" title="Discount" />
           <MetricCard
-            label="AVG SALES VALUE"
+            label="AVERAGE SALE"
             value={formatMoney(stats.avg, CURRENCY)}
-            type="avgSales"
-            title="Avg Sales Value"
+            onPress={() => openChart("revenue", "Total Sales")}
           />
           <MetricCard
-            label="TOP CUSTOMER"
-            value="â€”"
-            message="No Sales Link to any Customer!"
-            type="customer"
-            title="Top Customers"
+            label="TOP ITEM"
+            value={stats.topItem ? stats.topItem[0] : "—"}
+            message={stats.topItem ? `${stats.topItem[1]} sold` : undefined}
+            onPress={openInventory}
           />
           <MetricCard
-            label="PAYMENT MODES"
-            value={stats.topMode}
-            type="payment"
-            title="Payment Modes"
+            label="TOP PAYMENT METHOD"
+            value={stats.topMode ? stats.topMode[0] : "—"}
+            message={stats.topMode ? formatMoney(stats.topMode[1], CURRENCY) : undefined}
           />
-          <MetricCard label="SOLD BY" value="â€”" message="No Cashier Found" type="cashier" title="Sold By" />
           <MetricCard
-            label="LOW STOCK INVENTORY"
+            label="LOW STOCK ITEMS"
             value={String(stats.lowStock)}
-            valueColor={colors.red500}
-            type="lowStock"
-            title="Low Stock"
+            valueColor={stats.lowStock > 0 ? colors.red500 : undefined}
+            onPress={openInventory}
           />
           <MetricCard
-            label="REMAINING STOCKS"
+            label="REMAINING STOCK"
             value={String(stats.remaining)}
             valueColor={colors.dkGreen}
-            type="remainingStocks"
-            title="Remaining Stocks"
+            onPress={openInventory}
           />
         </ScrollView>
       )}
@@ -256,32 +228,27 @@ function MetricCard({
   value,
   valueColor,
   message,
-  type,
-  title,
+  onPress,
 }: {
   label: string;
   value: string;
   valueColor?: string;
   message?: string;
-  type?: string;
-  title?: string;
+  onPress?: () => void;
 }) {
-  const router = useRouter();
   return (
     <Pressable
       style={styles.metricCard}
-      android_ripple={{ color: "#00000010" }}
-      onPress={() => {
-        feedbackTap();
-        if (type) router.push({ pathname: "/report/[type]", params: { type, title: title ?? label } });
-      }}
+      android_ripple={onPress ? { color: "#00000010" } : undefined}
+      onPress={onPress}
+      disabled={!onPress}
     >
       <View style={{ flex: 1 }}>
         <Text style={styles.metricLabel}>{label}</Text>
         <Text style={[styles.metricValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
         {message ? <Text style={styles.metricMessage}>{message}</Text> : null}
       </View>
-      <Ionicons name="chevron-forward" size={24} color={colors.primary} />
+      {onPress ? <Ionicons name="chevron-forward" size={24} color={colors.primary} /> : null}
     </Pressable>
   );
 }
@@ -322,19 +289,6 @@ const styles = StyleSheet.create({
 
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 80 },
 
-  tabCard: {
-    flexDirection: "row",
-    backgroundColor: colors.card,
-    margin: 10,
-    borderRadius: 4,
-    overflow: "hidden",
-    elevation: 2,
-  },
-  tabHalf: { flex: 1, paddingVertical: 10, alignItems: "center" },
-  tabActive: { backgroundColor: colors.primary },
-  tabText: { fontSize: 15, fontWeight: "700", color: colors.primary },
-  tabTextActive: { color: colors.white },
-
   metricCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -350,5 +304,3 @@ const styles = StyleSheet.create({
   metricValue: { fontSize: 24, color: colors.primary, fontWeight: "700", marginTop: 6 },
   metricMessage: { fontSize: 13, color: colors.grey500, marginTop: 4 },
 });
-
-
