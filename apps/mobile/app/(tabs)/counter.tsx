@@ -22,6 +22,11 @@ export default function CounterScreen() {
   /** Name prompt for parking the current cart as an open bill. */
   const [holdOpen, setHoldOpen] = useState(false);
   const [holdName, setHoldName] = useState("");
+  /** The open bill currently loaded for editing (so KEEP re-saves it as-is). */
+  const [editing, setEditing] = useState<{ id: string; label: string } | null>(null);
+
+  // A cleared/emptied cart is no longer editing a specific bill.
+  if (list.length === 0 && editing) setEditing(null);
 
   const confirmHold = () => {
     holdOrder(holdName);
@@ -30,14 +35,24 @@ export default function CounterScreen() {
     feedbackTap();
   };
 
+  /** Re-park the bill being edited under its original name, no prompt. */
+  const keepEditing = () => {
+    if (!editing) return;
+    feedbackTap();
+    holdOrder(editing.label, undefined, editing.id);
+    setEditing(null);
+  };
+
   const onResume = (id: string) => {
     if (list.length > 0) {
       feedbackError();
       Alert.alert("Finish the current order first", "Charge or clear the open cart before resuming another bill.");
       return;
     }
+    const bill = heldOrders.find((h) => h.id === id);
     feedbackTap();
     resumeHeldOrder(id);
+    if (bill) setEditing({ id: bill.id, label: bill.label });
   };
 
   const onDiscard = (id: string, label: string) => {
@@ -114,11 +129,14 @@ export default function CounterScreen() {
       ) : (
         <>
           <View style={styles.billHeader}>
-            <Text style={styles.billHeaderText}>{count} item(s)</Text>
+            <Text style={styles.billHeaderText}>
+              {editing ? `Editing: ${editing.label}` : `${count} item(s)`}
+            </Text>
             <Pressable
               onPress={() => {
                 feedbackTap();
                 clear();
+                setEditing(null);
               }}
             >
               <Text style={styles.clear}>CLEAR</Text>
@@ -179,12 +197,20 @@ export default function CounterScreen() {
             <Pressable
               style={styles.hold}
               onPress={() => {
-                feedbackTap();
-                setHoldOpen(true);
+                if (editing) {
+                  keepEditing();
+                } else {
+                  feedbackTap();
+                  setHoldOpen(true);
+                }
               }}
             >
-              <MaterialCommunityIcons name="clock-outline" size={20} color={colors.primary} />
-              <Text style={styles.holdText}>HOLD</Text>
+              <MaterialCommunityIcons
+                name={editing ? "content-save-outline" : "clock-outline"}
+                size={20}
+                color={colors.primary}
+              />
+              <Text style={styles.holdText}>{editing ? "KEEP BILL" : "HOLD"}</Text>
             </Pressable>
             <Pressable
               style={styles.charge}

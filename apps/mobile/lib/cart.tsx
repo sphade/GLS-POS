@@ -184,8 +184,12 @@ type CartState = {
 
   /** Open/held bills, newest first. */
   heldOrders: HeldOrder[];
-  /** Park the current cart as an open bill under `label`, then clear the cart. */
-  holdOrder: (label: string, note?: string) => void;
+  /**
+   * Park the current cart as an open bill under `label`, then clear the cart.
+   * Pass `existingId` to update a bill in place (editing) instead of making a
+   * new one.
+   */
+  holdOrder: (label: string, note?: string, existingId?: string) => void;
   /** Load a held bill back into the cart and remove it from the open list. */
   resumeHeldOrder: (id: string) => void;
   /** Discard a held bill without paying. */
@@ -349,11 +353,11 @@ export function CartProvider({ children }: { children: ReactNode }) {
       clear,
 
       heldOrders,
-      holdOrder: (label, note) => {
+      holdOrder: (label, note, existingId) => {
         if (list.length === 0) return;
         const now = Date.now();
         const held: HeldOrder = {
-          id: `held_${now}_${Math.round(Math.random() * 1e4)}`,
+          id: existingId ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
           label: label.trim() || "Open bill",
           note,
           entries: list,
@@ -363,13 +367,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
           createdAt: now,
         };
         dbPut("held_orders", held);
-        setHeldOrders((prev) => [held, ...prev]);
+        // Replace in place when updating, otherwise prepend.
+        setHeldOrders((prev) => [held, ...prev.filter((h) => h.id !== held.id)]);
         setEntries({});
         logAudit({
-          action: "bill.hold",
+          action: existingId ? "bill.update" : "bill.hold",
           entity: "held_order",
           entityId: held.id,
-          summary: `Held bill "${held.label}" · ${formatMoney(held.total, held.currency)}`,
+          summary: `${existingId ? "Updated" : "Held"} bill "${held.label}" · ${formatMoney(held.total, held.currency)}`,
         });
       },
       resumeHeldOrder: (id) => {
