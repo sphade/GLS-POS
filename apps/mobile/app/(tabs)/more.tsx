@@ -31,12 +31,12 @@ type Card = {
  */
 export default function MoreScreen() {
   const router = useRouter();
-  const { products } = useCatalog();
+  const { products, customers, staff } = useCatalog();
   const { can } = useAuth();
   const { pendingCount } = useWebOrders();
 
   const lowStock = products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length;
-  const stockCost = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * Math.round(i.price * 0.6), 0);
+  // Real stock valuation at selling price. (No fabricated "cost price" estimate.)
   const stockSell = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * i.price, 0);
 
   const allCards: Card[] = [
@@ -48,17 +48,26 @@ export default function MoreScreen() {
       route: "/online-orders",
       needs: "sale:create",
     },
-    { key: "attendance", value: "Attendance", title: "Attendance Management", isNew: true, needs: "staff:manage" },
-    { key: "payroll", value: "Manage Payroll", title: "Payments", isNew: true, needs: "staff:manage" },
-    { key: "storefront", value: "0", title: "Shopfront", needs: "settings:manage" },
-    { key: "customers", value: "0", title: "All Customers", route: "/customers", needs: "customers:manage" },
-    { key: "due", value: "0", title: "Due Customers", valueColor: colors.green, needs: "customers:manage" },
-    { key: "expense", value: formatMoney(0, CURRENCY), title: "Expense - Income\n(This Week)", route: "/expense-categories", needs: "expenses:manage" },
-    { key: "lowStocks", value: String(lowStock), title: "Low Stocks", valueColor: colors.red500, needs: "inventory:adjust" },
-    { key: "staff", value: "0", title: "Staff and Partners", route: "/staff", needs: "staff:manage" },
-    { key: "items", value: String(products.length), title: "Items and SubItems", route: "/inventory", needs: "catalog:write" },
-    { key: "costPrice", value: formatMoney(stockCost, CURRENCY), title: "Stock Value Cost Price", needs: "reports:view" },
-    { key: "sellingPrice", value: formatMoney(stockSell, CURRENCY), title: "Stock Value Selling Price", needs: "reports:view" },
+    { key: "items", value: String(products.length), title: "Items", route: "/inventory", needs: "catalog:write" },
+    {
+      key: "lowStocks",
+      value: String(lowStock),
+      title: "Low Stocks",
+      valueColor: lowStock > 0 ? colors.red500 : undefined,
+      route: "/inventory",
+      needs: "inventory:adjust",
+    },
+    {
+      key: "stockValue",
+      value: formatMoney(stockSell, CURRENCY),
+      title: "Stock Value\n(selling price)",
+      route: "/inventory",
+      needs: "reports:view",
+    },
+    { key: "customers", value: String(customers.length), title: "Customers", route: "/customers", needs: "customers:manage" },
+    { key: "staff", value: String(staff.length), title: "Staff", route: "/staff", needs: "staff:manage" },
+    { key: "expense", value: "Expenses", title: "Record & View", route: "/expense-categories", needs: "expenses:manage" },
+    { key: "audit", value: "Activity", title: "Who did what", route: "/audit", needs: "audit:view" },
     { key: "settings", value: "Settings", title: "Business & Preferences", route: "/settings", needs: "settings:manage" },
   ];
 
