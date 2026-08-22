@@ -93,6 +93,8 @@ const WRITE_PERMISSION: Record<string, Permission> = {
   // Every signed-in role appends audit entries for its own actions; the base
   // read permission (held by all roles) gates it. Viewing is gated separately.
   audit_log: "catalog:read",
+  // Open/held bills are created and settled by anyone who can sell.
+  held_orders: "sale:create",
 };
 
 const stockDidNotIncrease = (before: unknown, after: unknown): boolean => {

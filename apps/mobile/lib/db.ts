@@ -34,6 +34,7 @@ export const COLLECTIONS = [
   "product_images",
   "web_orders",
   "audit_log",
+  "held_orders",
 ] as const;
 
 export type Collection = (typeof COLLECTIONS)[number];

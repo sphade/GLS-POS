@@ -194,6 +194,7 @@ export const SYNC_COLLECTIONS = [
   "product_images",
   "web_orders",
   "audit_log",
+  "held_orders",
 ] as const;
 
 export type SyncCollection = (typeof SYNC_COLLECTIONS)[number];

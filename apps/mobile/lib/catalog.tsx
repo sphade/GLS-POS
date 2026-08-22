@@ -9,8 +9,6 @@ import {
   loadAll,
   markAllDirty,
   put as dbPut,
-  metaGet,
-  metaSet,
   resetCollection,
   seedOnce,
   softDelete,
@@ -85,38 +83,12 @@ function auditEntity(collection: string, verb: "create" | "update" | "delete", i
 /** Categories mirror the real GLS menu (see mock-items.ts). */
 const DEFAULT_CATEGORIES: Category[] = MENU_CATEGORIES;
 
-const DEFAULT_MODIFIERS: ModifierGroup[] = [
-  {
-    id: "m1",
-    name: "Add-ons",
-    required: false,
-    multiSelect: true,
-    options: [
-      { id: "o1", name: "Extra cheese", price: 50000 },
-      { id: "o2", name: "Extra chicken", price: 120000 },
-      { id: "o3", name: "Plantain", price: 70000 },
-    ],
-  },
-  {
-    id: "m2",
-    name: "Spice level",
-    required: true,
-    multiSelect: false,
-    options: [
-      { id: "o4", name: "Mild", price: 0 },
-      { id: "o5", name: "Medium", price: 0 },
-      { id: "o6", name: "Hot", price: 0 },
-    ],
-  },
-];
+// No demo modifiers or ingredients — a real store defines its own. Earlier
+// builds seeded examples (Add-ons, Spice level; Rice, Chicken …); those are
+// cleaned up on existing devices by cleanupDemoData below.
+const DEFAULT_MODIFIERS: ModifierGroup[] = [];
 
-const DEFAULT_INGREDIENTS: Ingredient[] = [
-  { id: "i1", name: "Rice", unit: "kg", stock: 40, lowAt: 10 },
-  { id: "i2", name: "Chicken", unit: "kg", stock: 18, lowAt: 5 },
-  { id: "i3", name: "Tomato", unit: "kg", stock: 8, lowAt: 10 },
-  { id: "i4", name: "Cooking oil", unit: "ltr", stock: 12, lowAt: 4 },
-  { id: "i5", name: "Cheese", unit: "kg", stock: 3, lowAt: 5 },
-];
+const DEFAULT_INGREDIENTS: Ingredient[] = [];
 
 const DEFAULT_TABLES: Table[] = [
   { id: "t1", name: "TABLE - GLS 2", section: "DEFAULT ALL", seats: 4, reference: "234" },
@@ -124,17 +96,12 @@ const DEFAULT_TABLES: Table[] = [
   { id: "t3", name: "VIP 1", section: "VIP", seats: 6, reference: "301" },
 ];
 
-const DEFAULT_CUSTOMERS: Customer[] = [
-  { id: "cu1", name: "Ada Obi", phone: "+234 801 111 2222", due: 0 },
-  { id: "cu2", name: "Musa Bello", phone: "+234 802 333 4444", due: 250000 },
-  { id: "cu3", name: "Ngozi Eze", phone: "+234 803 555 6666", email: "ngozi@example.com", due: 0 },
-];
+// No demo customers or staff — a real store starts empty and adds its own.
+// (Earlier builds seeded fake people like "Ada Obi" / "Tunde A."; those are
+//  cleaned up on existing devices by cleanupDemoData below.)
+const DEFAULT_CUSTOMERS: Customer[] = [];
 
-const DEFAULT_STAFF: StaffMember[] = [
-  { id: "s1", name: "You (Owner)", role: "Owner", active: true },
-  { id: "s2", name: "Tunde A.", role: "Cashier", phone: "+234 805 777 8888", active: true },
-  { id: "s3", name: "Grace O.", role: "Waiter", phone: "+234 806 999 0000", active: true },
-];
+const DEFAULT_STAFF: StaffMember[] = [];
 
 /**
  * Write the starter data into the ACTIVE store's database once.
@@ -276,6 +243,22 @@ function repairUnsyncedSeed() {
   });
 }
 
+/**
+ * Remove the fake demo people ("Ada Obi", "Tunde A." …) that earlier builds
+ * seeded and synced to the server. Targets only their fixed seed ids, so
+ * anything the store has since added is untouched. The soft-deletes tombstone
+ * and sync, clearing the rows from every device and the store's server copy.
+ */
+function cleanupDemoData() {
+  if (!isRealStore()) return;
+  seedOnce("cleanup_demo_people_v1", () => {
+    ["cu1", "cu2", "cu3"].forEach((id) => softDelete("customers", id));
+    ["s1", "s2", "s3"].forEach((id) => softDelete("staff", id));
+    ["m1", "m2"].forEach((id) => softDelete("modifiers", id));
+    ["i1", "i2", "i3", "i4", "i5"].forEach((id) => softDelete("ingredients", id));
+  });
+}
+
 const CatalogContext = createContext<CatalogState | null>(null);
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
@@ -284,6 +267,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [products, setProducts] = useState<Item[]>(() => {
     seedStore();
     repairUnsyncedSeed();
+    cleanupDemoData();
     return loadAll<Item>("products");
   });
   const [categories, setCategories] = useState<Category[]>(() => loadAll<Category>("categories"));

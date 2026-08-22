@@ -11,8 +11,9 @@
 } from "react";
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
-import { loadAll, put as dbPut } from "./db";
+import { loadAll, put as dbPut, softDelete } from "./db";
 import { logAudit } from "./audit";
+import { onSynced } from "./sync";
 
 /**
  * How an item is sold:
@@ -151,6 +152,23 @@ export type Receipt = {
 
 export type CartEntry = { lineId: string; item: Item; variant?: Variant; qty: number };
 
+/**
+ * A parked bill: the cart snapshotted so a table can keep ordering (or a
+ * customer can pay later) without finalising a receipt. Shown on the Counter
+ * under NEW ORDER; resuming loads it back into the cart to charge and print.
+ */
+export type HeldOrder = {
+  id: string;
+  /** Customer/table name shown in the open-bills list. */
+  label: string;
+  note?: string;
+  entries: CartEntry[];
+  itemCount: number;
+  total: number;
+  currency: string;
+  createdAt: number;
+};
+
 type CartState = {
   entries: Record<string, CartEntry>;
   count: number;
@@ -163,6 +181,16 @@ type CartState = {
   /** Total quantity across all variants of a product. */
   qtyOf: (productId: string) => number;
   clear: () => void;
+
+  /** Open/held bills, newest first. */
+  heldOrders: HeldOrder[];
+  /** Park the current cart as an open bill under `label`, then clear the cart. */
+  holdOrder: (label: string, note?: string) => void;
+  /** Load a held bill back into the cart and remove it from the open list. */
+  resumeHeldOrder: (id: string) => void;
+  /** Discard a held bill without paying. */
+  discardHeldOrder: (id: string) => void;
+
   receipts: Receipt[];
   completeSale: (input: {
     mode: string;
@@ -282,6 +310,17 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const [receipts, setReceipts] = useState<Receipt[]>(() =>
     loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt),
   );
+  const [heldOrders, setHeldOrders] = useState<HeldOrder[]>(() =>
+    loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt),
+  );
+
+  // Open bills can be created on another till, so refresh after each sync.
+  useEffect(() => {
+    return onSynced(() => {
+      setHeldOrders(loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt));
+      setReceipts(loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt));
+    });
+  }, []);
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
@@ -308,6 +347,47 @@ export function CartProvider({ children }: { children: ReactNode }) {
       add,
       remove,
       clear,
+
+      heldOrders,
+      holdOrder: (label, note) => {
+        if (list.length === 0) return;
+        const now = Date.now();
+        const held: HeldOrder = {
+          id: `held_${now}_${Math.round(Math.random() * 1e4)}`,
+          label: label.trim() || "Open bill",
+          note,
+          entries: list,
+          itemCount: list.reduce((s, e) => s + e.qty, 0),
+          total: subtotal + taxTotal,
+          currency: list[0]?.item.currency ?? "NGN",
+          createdAt: now,
+        };
+        dbPut("held_orders", held);
+        setHeldOrders((prev) => [held, ...prev]);
+        setEntries({});
+        logAudit({
+          action: "bill.hold",
+          entity: "held_order",
+          entityId: held.id,
+          summary: `Held bill "${held.label}" · ${formatMoney(held.total, held.currency)}`,
+        });
+      },
+      resumeHeldOrder: (id) => {
+        const held = heldOrders.find((h) => h.id === id);
+        if (!held) return;
+        const next: Record<string, CartEntry> = {};
+        held.entries.forEach((e) => {
+          next[e.lineId] = e;
+        });
+        setEntries(next);
+        softDelete("held_orders", id);
+        setHeldOrders((prev) => prev.filter((h) => h.id !== id));
+      },
+      discardHeldOrder: (id) => {
+        softDelete("held_orders", id);
+        setHeldOrders((prev) => prev.filter((h) => h.id !== id));
+      },
+
       receipts,
       completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
         const now = Date.now();
@@ -386,7 +466,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
     };
-  }, [entries, receipts, add, remove, clear]);
+  }, [entries, receipts, heldOrders, add, remove, clear]);
 
   return (
     <CartContext.Provider value={value}>

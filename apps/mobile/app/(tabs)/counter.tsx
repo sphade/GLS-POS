@@ -1,11 +1,12 @@
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useState } from "react";
+import { Alert, FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { displayItemName, useCart } from "@/lib/cart";
-import { feedbackAddItem, feedbackTap } from "@/lib/feedback";
+import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 /**
  * Counter (billing) tab. With an empty cart it shows the NEW ORDER /
@@ -14,8 +15,37 @@ import { feedbackAddItem, feedbackTap } from "@/lib/feedback";
  */
 export default function CounterScreen() {
   const router = useRouter();
-  const { entries, subtotal, taxTotal, total, add, remove, count, clear } = useCart();
+  const { entries, subtotal, taxTotal, total, add, remove, count, clear, heldOrders, holdOrder, resumeHeldOrder, discardHeldOrder } =
+    useCart();
   const list = Object.values(entries);
+
+  /** Name prompt for parking the current cart as an open bill. */
+  const [holdOpen, setHoldOpen] = useState(false);
+  const [holdName, setHoldName] = useState("");
+
+  const confirmHold = () => {
+    holdOrder(holdName);
+    setHoldName("");
+    setHoldOpen(false);
+    feedbackTap();
+  };
+
+  const onResume = (id: string) => {
+    if (list.length > 0) {
+      feedbackError();
+      Alert.alert("Finish the current order first", "Charge or clear the open cart before resuming another bill.");
+      return;
+    }
+    feedbackTap();
+    resumeHeldOrder(id);
+  };
+
+  const onDiscard = (id: string, label: string) => {
+    Alert.alert(`Discard "${label}"?`, "This open bill will be removed without charging.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Discard", style: "destructive", onPress: () => discardHeldOrder(id) },
+    ]);
+  };
 
   return (
     <View style={styles.root}>
@@ -51,7 +81,35 @@ export default function CounterScreen() {
             <Text style={styles.expenseTitle}>ADD NEW EXPENSE</Text>
           </Pressable>
 
-          <Text style={styles.tableOrders}>Total Table Orders: 0</Text>
+          {heldOrders.length > 0 && (
+            <>
+              <Text style={styles.openBillsTitle}>OPEN BILLS ({heldOrders.length})</Text>
+              {heldOrders.map((bill) => (
+                <Pressable
+                  key={bill.id}
+                  style={styles.billCard}
+                  onPress={() => onResume(bill.id)}
+                  onLongPress={() => onDiscard(bill.id, bill.label)}
+                  android_ripple={{ color: "#00000010" }}
+                >
+                  <View style={styles.billIcon}>
+                    <MaterialCommunityIcons name="clipboard-text-clock-outline" size={24} color={colors.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.billName} numberOfLines={1}>
+                      {bill.label}
+                    </Text>
+                    <Text style={styles.billMeta}>
+                      {bill.itemCount} item{bill.itemCount === 1 ? "" : "s"} ·{" "}
+                      {new Date(bill.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                    </Text>
+                  </View>
+                  <Text style={styles.billTotal}>{formatMoney(bill.total, bill.currency)}</Text>
+                </Pressable>
+              ))}
+              <Text style={styles.openBillsHint}>Tap to resume &amp; charge · long-press to discard</Text>
+            </>
+          )}
         </ScrollView>
       ) : (
         <>
@@ -117,19 +175,59 @@ export default function CounterScreen() {
             <TotalRow label={strings.grandTotal} value={formatMoney(total)} bold />
           </View>
 
-          <Pressable
-            style={styles.charge}
-            onPress={() => {
-              feedbackTap();
-              router.push("/charge");
-            }}
-          >
-            <Text style={styles.chargeText}>
-              {strings.charge} {formatMoney(total)}
-            </Text>
-          </Pressable>
+          <View style={styles.actionRow}>
+            <Pressable
+              style={styles.hold}
+              onPress={() => {
+                feedbackTap();
+                setHoldOpen(true);
+              }}
+            >
+              <MaterialCommunityIcons name="clock-outline" size={20} color={colors.primary} />
+              <Text style={styles.holdText}>HOLD</Text>
+            </Pressable>
+            <Pressable
+              style={styles.charge}
+              onPress={() => {
+                feedbackTap();
+                router.push("/charge");
+              }}
+            >
+              <Text style={styles.chargeText}>
+                {strings.charge} {formatMoney(total)}
+              </Text>
+            </Pressable>
+          </View>
         </>
       )}
+
+      {/* Name prompt for parking the cart as an open bill. */}
+      <Modal visible={holdOpen} transparent animationType="fade" onRequestClose={() => setHoldOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setHoldOpen(false)}>
+          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.modalTitle}>Hold this bill</Text>
+            <Text style={styles.modalHint}>Give it a name so you can find it to charge later.</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={holdName}
+              onChangeText={setHoldName}
+              placeholder="e.g. Table 4, John, Blue cap"
+              placeholderTextColor={colors.grey500}
+              autoFocus
+              returnKeyType="done"
+              onSubmitEditing={confirmHold}
+            />
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancel} onPress={() => setHoldOpen(false)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={styles.modalSave} onPress={confirmHold}>
+                <Text style={styles.modalSaveText}>Hold bill</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -178,7 +276,29 @@ const styles = StyleSheet.create({
   },
   expenseTitle: { fontSize: 17, fontWeight: "600", color: colors.grey900 },
 
-  tableOrders: { fontSize: 17, fontWeight: "700", color: colors.grey900, marginLeft: 4 },
+  openBillsTitle: { fontSize: 12, fontWeight: "800", color: colors.grey600, letterSpacing: 0.6, marginLeft: 4, marginBottom: 8 },
+  openBillsHint: { fontSize: 12, color: colors.grey500, textAlign: "center", marginTop: 6 },
+  billCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: colors.card,
+    borderRadius: 4,
+    padding: 12,
+    marginBottom: 8,
+    elevation: 1,
+  },
+  billIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.blue50,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  billName: { fontSize: 16, fontWeight: "700", color: colors.grey900 },
+  billMeta: { fontSize: 12, color: colors.grey600, marginTop: 2 },
+  billTotal: { fontSize: 16, fontWeight: "800", color: colors.primary },
 
   billHeader: {
     flexDirection: "row",
@@ -223,9 +343,23 @@ const styles = StyleSheet.create({
   totalBold: { fontSize: 17, fontWeight: "800", color: colors.primary },
   divider: { height: 1, backgroundColor: colors.grey300, marginVertical: 6 },
 
+  actionRow: { flexDirection: "row", gap: 8, margin: 8, marginTop: 0 },
+  hold: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    height: 52,
+    paddingHorizontal: 18,
+    borderRadius: 4,
+    backgroundColor: colors.white,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    elevation: 1,
+  },
+  holdText: { color: colors.primary, fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
   charge: {
-    margin: 8,
-    marginTop: 0,
+    flex: 1,
     height: 52,
     borderRadius: 4,
     backgroundColor: colors.green,
@@ -234,4 +368,23 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   chargeText: { color: colors.white, fontSize: 18, fontWeight: "700" },
+
+  modalBackdrop: { flex: 1, backgroundColor: "#00000066", alignItems: "center", justifyContent: "center", padding: 24 },
+  modalCard: { width: "100%", maxWidth: 380, backgroundColor: colors.white, borderRadius: 10, padding: 18 },
+  modalTitle: { fontSize: 18, fontWeight: "800", color: colors.grey900 },
+  modalHint: { fontSize: 13, color: colors.grey600, marginTop: 4, marginBottom: 14 },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: colors.grey300,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: colors.grey900,
+  },
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 16 },
+  modalCancel: { paddingHorizontal: 16, paddingVertical: 11, borderRadius: 8 },
+  modalCancelText: { color: colors.grey700, fontSize: 15, fontWeight: "700" },
+  modalSave: { paddingHorizontal: 18, paddingVertical: 11, borderRadius: 8, backgroundColor: colors.primary },
+  modalSaveText: { color: colors.white, fontSize: 15, fontWeight: "800" },
 });
