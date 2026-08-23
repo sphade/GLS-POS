@@ -37,10 +37,13 @@ export const documents = sqliteTable(
 );
 
 /**
- * Tiny key/value table for the DO's own bookkeeping. Currently holds the
- * monotonic `seq` counter that assigns `server_seq` to each document write.
+ * Tiny key/value table for the DO's own bookkeeping. The monotonic sequence is
+ * no longer stored here — it derives from MAX(documents.server_seq), which is
+ * self-healing if a write ever fails part-way. The table remains so existing
+ * databases migrate cleanly.
  */
 export const syncMeta = sqliteTable("sync_meta", {
   key: text("key").primaryKey(),
   value: integer("value").notNull(),
 });
+  

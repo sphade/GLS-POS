@@ -1,4 +1,5 @@
 import * as Network from "expo-network";
+import { AppState } from "react-native";
 import type { SyncChange, SyncCollection, SyncPullResponse } from "@gls-pos/types";
 import { SYNC_COLLECTIONS } from "@gls-pos/types";
 import {
@@ -141,20 +142,41 @@ function emitSynced(count: number) {
   });
 }
 
-/** Apply a server pull and notify every local data provider immediately. */
-function applyPulled(storeId: string, data: SyncPullResponse, notify = true): number {
-  for (const change of data.changes) {
-    const row: ChangeRow<{ id: string }> = {
-      id: change.id,
-      data: change.data as { id: string },
-      updatedAt: change.updatedAt,
-      deleted: change.deleted,
-    };
-    applyRemote(change.collection as SyncCollection, row);
+/**
+ * Rows applied per JS-task when pulling. expo-sqlite writes are synchronous,
+ * so a big catch-up (first install, long absence) applied in one go would hold
+ * the JS thread and jank the UI exactly like the old sync storms did. Chunking
+ * yields between batches so touches and frames stay responsive throughout.
+ */
+const APPLY_CHUNK = 40;
+
+/** Apply a server pull in chunks, then notify every local data provider. */
+async function applyPulled(storeId: string, data: SyncPullResponse, notify = true): Promise<number> {
+  let applied = 0;
+
+  for (let start = 0; start < data.changes.length; start += APPLY_CHUNK) {
+    const batch = data.changes.slice(start, start + APPLY_CHUNK);
+    for (const change of batch) {
+      const row: ChangeRow<{ id: string }> = {
+        id: change.id,
+        data: change.data as { id: string },
+        updatedAt: change.updatedAt,
+        deleted: change.deleted,
+      };
+      applyRemote(change.collection as SyncCollection, row);
+    }
+    applied += batch.length;
+    if (start + APPLY_CHUNK < data.changes.length) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
   }
+
+  // The cursor advances only once every row is in, so an app killed mid-pull
+  // simply refetches the tail instead of losing it. Re-applying rows is safe —
+  // every write is an idempotent upsert guarded by last-write-wins.
   metaSet(cursorKey(storeId), String(data.cursor));
-  if (notify && data.changes.length > 0) emitSynced(data.changes.length);
-  return data.changes.length;
+  if (notify && applied > 0) emitSynced(applied);
+  return applied;
 }
 
 /** Fetch with a hard deadline so a sync request cannot hang indefinitely. */
@@ -169,19 +191,11 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
 }
 
 /**
- * Pull server changes without uploading local dirty rows first. This guarantees
+ * Fetch server changes without uploading local dirty rows first. This guarantees
  * incoming VIP orders still arrive when an unrelated local edit is denied.
  * `fromBeginning` repairs older devices whose cursor advanced before
  * `web_orders` existed locally.
- *
- * Only one pull per store may run at a time. Equivalent callers share the
- * active or queued result, while requests with different backfill/notification
- * semantics run serially so a normal pull cannot incorrectly satisfy a
- * from-the-beginning repair.
  */
-const pullBarriers = new Map<string, Promise<void>>();
-const pendingPulls = new Map<string, Promise<number>>();
-
 async function performPull(
   storeId: string,
   fromBeginning: boolean,
@@ -201,11 +215,56 @@ async function performPull(
       | { ok: true; data: SyncPullResponse }
       | { ok: false; error: { message: string } };
     if (!res.ok || !body.ok) return -1;
-    return applyPulled(storeId, body.data, notify);
+    return await applyPulled(storeId, body.data, notify);
   } catch (e) {
     console.warn("[sync] pull failed:", (e as Error).message);
     return -1;
   }
+}
+
+/**
+ * One serialized pipeline for every network cycle — full syncs and pull-onlys
+ * alike. Jobs run strictly one at a time in arrival order; equivalent queued
+ * requests share the running-or-queued result instead of duplicating work.
+ *
+ * Previously pulls and syncs each ran their own concurrent pipelines, so a
+ * WebSocket nudge could open a second round-trip mid-poll. One lane means at
+ * most a single request in flight per device, which is what keeps the UI calm.
+ */
+const jobQueue: { key: string; run: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (reason?: unknown) => void }[] = [];
+const queuedJobs = new Map<string, Promise<unknown>>();
+let jobRunning = false;
+
+function enqueueJob<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const existing = queuedJobs.get(key);
+  if (existing) return existing as Promise<T>;
+
+  let resolve!: (value: unknown) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<unknown>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  queuedJobs.set(key, promise);
+  jobQueue.push({ key, run: run as () => Promise<unknown>, resolve, reject });
+
+  if (!jobRunning) {
+    jobRunning = true;
+    void (async () => {
+      for (;;) {
+        const job = jobQueue.shift();
+        if (!job) break;
+        queuedJobs.delete(job.key);
+        try {
+          job.resolve(await job.run());
+        } catch (error) {
+          job.reject(error);
+        }
+      }
+      jobRunning = false;
+    })();
+  }
+  return promise as Promise<T>;
 }
 
 export function pullNow(
@@ -218,27 +277,8 @@ export function pullNow(
     return Promise.resolve(-1);
   }
 
-  const key = `${storeId}:${fromBeginning ? "backfill" : "incremental"}:${notify ? "notify" : "silent"}`;
-  const pending = pendingPulls.get(key);
-  if (pending) return pending;
-
-  const previous = pullBarriers.get(storeId) ?? Promise.resolve();
-  const run = previous.then(() => performPull(storeId, fromBeginning, notify));
-  const barrier = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  pullBarriers.set(storeId, barrier);
-  void barrier.then(() => {
-    if (pullBarriers.get(storeId) === barrier) pullBarriers.delete(storeId);
-  });
-
-  let tracked: Promise<number>;
-  tracked = run.finally(() => {
-    if (pendingPulls.get(key) === tracked) pendingPulls.delete(key);
-  });
-  pendingPulls.set(key, tracked);
-  return tracked;
+  const key = `${storeId}|pull|${fromBeginning ? "backfill" : "incremental"}|${notify ? "notify" : "silent"}`;
+  return enqueueJob(key, () => performPull(storeId, fromBeginning, notify));
 }
 
 async function performSync(
@@ -353,7 +393,7 @@ async function pushBatch(
       clearDirty(collection as SyncCollection, ids);
     }
 
-    return { ok: true, appliedCount: applyPulled(storeId, body.data) };
+    return { ok: true, appliedCount: await applyPulled(storeId, body.data) };
   } catch (e) {
     const error = e as Error;
     const timedOut = error.name === "AbortError";
@@ -366,24 +406,11 @@ async function pushBatch(
 }
 
 /**
- * Serialize sync cycles while coalescing equivalent queued requests. A trigger
- * that arrives during an active cycle still gets one follow-up cycle, so writes
- * created after the active cycle collected its rows are never mistaken for
- * already-published data. Further equivalent triggers share that queued cycle.
+ * Coalescing key for a full sync. A trigger that arrives while an equivalent
+ * cycle is active or queued shares its result; writes created after the active
+ * cycle collected its rows are covered by the follow-up cycle the debounced
+ * push-on-write schedules.
  */
-type SyncJob = {
-  key: string;
-  storeId: string;
-  onlyCollections?: readonly SyncCollection[];
-  promise: Promise<SyncAttemptResult>;
-  resolve: (result: SyncAttemptResult) => void;
-  reject: (reason?: unknown) => void;
-};
-
-let syncRunning = false;
-const syncQueue: SyncJob[] = [];
-const queuedSyncs = new Map<string, Promise<SyncAttemptResult>>();
-
 function syncRequestKey(
   storeId: string,
   onlyCollections?: readonly SyncCollection[],
@@ -391,27 +418,7 @@ function syncRequestKey(
   const scope = onlyCollections
     ? [...new Set(onlyCollections)].sort().join(",")
     : "*";
-  return `${storeId}:${scope}`;
-}
-
-function drainSyncQueue(): void {
-  if (syncRunning) return;
-  const job = syncQueue.shift();
-  if (!job) return;
-
-  syncRunning = true;
-  if (queuedSyncs.get(job.key) === job.promise) queuedSyncs.delete(job.key);
-
-  void (async () => {
-    try {
-      job.resolve(await performSync(job.storeId, job.onlyCollections));
-    } catch (error) {
-      job.reject(error);
-    } finally {
-      syncRunning = false;
-      drainSyncQueue();
-    }
-  })();
+  return `${storeId}|sync|${scope}`;
 }
 
 export function syncNowDetailed(
@@ -419,27 +426,7 @@ export function syncNowDetailed(
   onlyCollections?: readonly SyncCollection[],
 ): Promise<SyncAttemptResult> {
   const key = syncRequestKey(storeId, onlyCollections);
-  const queued = queuedSyncs.get(key);
-  if (queued) return queued;
-
-  let resolve!: (result: SyncAttemptResult) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<SyncAttemptResult>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  const job: SyncJob = {
-    key,
-    storeId,
-    onlyCollections: onlyCollections ? [...onlyCollections] : undefined,
-    promise,
-    resolve,
-    reject,
-  };
-  queuedSyncs.set(key, promise);
-  syncQueue.push(job);
-  drainSyncQueue();
-  return promise;
+  return enqueueJob(key, () => performSync(storeId, onlyCollections));
 }
 
 /** Backward-compatible count result used by existing refresh UI. */
@@ -459,6 +446,11 @@ export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC === "1";
  * Start periodic background sync for a store. Returns a stop function.
  * Fires immediately, then every `intervalMs` (default 20s).
  *
+ * Polling runs only while the app is foregrounded — a backgrounded till
+ * shouldn't burn battery or data on requests nobody is looking at. Background
+ * devices stay fresh via WebSocket nudges and push notifications instead,
+ * which each trigger one immediate catch-up when something actually changed.
+ *
  * When sync is disabled (the default), this is a complete no-op — it never
  * touches the network, the auth cookie, or secure storage — so the demo works
  * entirely from local data.
@@ -466,7 +458,10 @@ export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC === "1";
 export function startAutoSync(storeId: string, intervalMs = 20_000): () => void {
   if (!SYNC_ENABLED) return () => {};
   void syncNow(storeId);
-  const handle = setInterval(() => void syncNow(storeId), intervalMs);
+  const handle = setInterval(() => {
+    if (AppState.currentState !== "active") return;
+    void syncNow(storeId);
+  }, intervalMs);
 
   // Push-on-write: a local edit schedules a sync ~1s later instead of waiting
   // for the next poll, so changes leave the device promptly. Debounced so a

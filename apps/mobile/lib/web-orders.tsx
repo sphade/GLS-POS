@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { AppState } from "react-native";
 import * as Notifications from "expo-notifications";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { loadAll, metaGet, metaSet, put as dbPut } from "./db";
@@ -111,7 +112,13 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       }
     })();
 
-    const timer = setInterval(() => void pullNow(store.id), 4000);
+    // Foreground-only polling, like the main auto-sync: a backgrounded device
+    // stays fresh via nudges and push notifications instead of burning data on
+    // requests nobody can see.
+    const timer = setInterval(() => {
+      if (AppState.currentState !== "active") return;
+      void pullNow(store.id);
+    }, 4000);
     return () => {
       cancelled = true;
       clearInterval(timer);

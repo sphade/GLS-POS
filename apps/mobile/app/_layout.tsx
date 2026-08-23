@@ -6,8 +6,8 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFonts } from "expo-font";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { CartProvider } from "@/lib/cart";
-import { CatalogProvider } from "@/lib/catalog";
+import { CartProvider, useCartActions } from "@/lib/cart";
+import { CatalogProvider, useCatalog } from "@/lib/catalog";
 import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { setActiveStore } from "@/lib/db";
@@ -71,6 +71,24 @@ export default function RootLayout() {
 }
 
 /**
+ * Feeds the live catalog into the cart's stock/price resolution.
+ *
+ * Cart lines embed an item snapshot when created, so without this a line added
+ * before a stock edit (or price change) kept enforcing the old numbers forever.
+ * With the catalog registered, every add() resolves against current data.
+ */
+function CartCatalogBridge() {
+  const { products } = useCatalog();
+  const { registerCatalog } = useCartActions();
+
+  useEffect(() => {
+    registerCatalog(products);
+  }, [products, registerCatalog]);
+
+  return null;
+}
+
+/**
  * Binds the data layer to the selected store.
  *
  * Each store (branch) has its own local SQLite file, so the active database
@@ -89,6 +107,7 @@ function StoreScopedData() {
     <CatalogProvider key={`catalog-${store.id}`}>
       <CartProvider key={`cart-${store.id}`}>
         <WebOrdersProvider key={`orders-${store.id}`}>
+          <CartCatalogBridge />
           <StatusBar style="light" backgroundColor={colors.primaryDark} />
           <AuthGate>
             <RootStack />

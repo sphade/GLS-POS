@@ -266,6 +266,11 @@ type CartFast = {
   add: (item: Item, variant?: Variant) => void;
   remove: (lineId: string) => void;
   clear: () => void;
+  /**
+   * Give the cart the live catalog so taps resolve stock/price against current
+   * data, not the snapshot frozen into a line when it was first added.
+   */
+  registerCatalog: (products: Item[]) => void;
   subscribeToProduct: (productId: string, cb: () => void) => () => void;
   subscribeToCount: (cb: () => void) => () => void;
   subscribeToLine: (lineId: string, cb: () => void) => () => void;
@@ -296,6 +301,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const countListeners = useRef(new Set<() => void>());
   const lineIdsListeners = useRef(new Set<() => void>());
   const summaryListeners = useRef(new Set<() => void>());
+  /** Live catalog lookup, refreshed by `registerCatalog` from CatalogProvider. */
+  const catalogRef = useRef(new Map<string, Item>());
 
   const getQtyOf = useCallback(
     (productId: string) =>
@@ -406,23 +413,30 @@ export function CartProvider({ children }: { children: ReactNode }) {
   );
 
   // --- Stable actions (identity never changes) ----------------------------
+  const registerCatalog = useCallback((products: Item[]) => {
+    catalogRef.current = new Map(products.map((p) => [p.id, p]));
+  }, []);
+
   const add = useCallback(
     (item: Item, variant?: Variant) => {
       if (hasVariants(item) && !variant) return;
+      // Prefer the live catalog copy so limits use current stock.
+      const live = catalogRef.current.get(item.id);
+      const effective = live ?? item;
       const selectedVariant = variant
-        ? item.variants?.find((candidate) => candidate.id === variant.id)
+        ? effective.variants?.find((candidate) => candidate.id === variant.id)
         : undefined;
       if (variant && !selectedVariant) return;
 
-      const lineId = cartLineKey(item.id, selectedVariant?.id);
+      const lineId = cartLineKey(effective.id, selectedVariant?.id);
       const previous = entriesRef.current;
       const quantity = previous[lineId]?.qty ?? 0;
-      const stock = selectedVariant ? selectedVariant.stock : item.stockQuantity;
+      const stock = selectedVariant ? selectedVariant.stock : effective.stockQuantity;
       if (stock != null && quantity + 1 > stock) return;
 
       replaceEntries({
         ...previous,
-        [lineId]: { lineId, item, variant: selectedVariant, qty: quantity + 1 },
+        [lineId]: { lineId, item: effective, variant: selectedVariant, qty: quantity + 1 },
       });
     },
     [replaceEntries],
@@ -452,6 +466,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       add,
       remove,
       clear,
+      registerCatalog,
       subscribeToProduct,
       subscribeToCount,
       subscribeToLine,
@@ -467,6 +482,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       add,
       remove,
       clear,
+      registerCatalog,
       subscribeToProduct,
       subscribeToCount,
       subscribeToLine,

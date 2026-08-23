@@ -23,11 +23,17 @@ import type { Env } from "../env.js";
 import * as schema from "./schema.js";
 import migrations from "./migrations/migrations.js";
 
-const SEQ_KEY = "seq";
-
 /** Public VIP endpoint throttle: at most N orders per table per window. */
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ORDERS = 5;
+
+/**
+ * Device wall clocks are the LWW tiebreaker, so a clock running minutes fast
+ * could otherwise pin a stale document ahead of every correct device until
+ * real time caught up. Anything dated further than this in the future is
+ * clamped to now + skew.
+ */
+const CLOCK_SKEW_MS = 2 * 60_000;
 
 /** The product fields the server cares about; the doc may carry more. */
 type StoredProduct = {
@@ -192,21 +198,21 @@ export class StoreDurableObject extends DurableObject<Env> {
 
   // --- Sync -----------------------------------------------------------------
 
-  private getSeq(): number {
+  /**
+   * The store's high-water mark, derived from the rows themselves.
+   *
+   * This deliberately replaces the old `sync_meta` counter: a counter written
+   * *after* the rows could fall behind if a push ever died mid-way, leaving
+   * stranded seqs that the next push would reuse — devices pulling in order
+   * would then silently miss rows. Reading MAX(server_seq) (indexed) makes the
+   * number self-healing by construction.
+   */
+  private currentSeq(): number {
     const [row] = this.db
-      .select({ value: schema.syncMeta.value })
-      .from(schema.syncMeta)
-      .where(eq(schema.syncMeta.key, SEQ_KEY))
+      .select({ max: sql<number>`coalesce(max(${schema.documents.serverSeq}), 0)` })
+      .from(schema.documents)
       .all();
-    return row?.value ?? 0;
-  }
-
-  private setSeq(value: number): void {
-    this.db
-      .insert(schema.syncMeta)
-      .values({ key: SEQ_KEY, value })
-      .onConflictDoUpdate({ target: schema.syncMeta.key, set: { value } })
-      .run();
+    return row?.max ?? 0;
   }
 
   /** All changes recorded with a sequence greater than `cursor`, oldest first. */
@@ -226,8 +232,7 @@ export class StoreDurableObject extends DurableObject<Env> {
    */
   async pull(cursor: number): Promise<SyncPullResponse> {
     const changes = this.changesSince(cursor);
-    // The seq counter is the store's high-water mark (max server_seq).
-    return { changes, cursor: changes.length ? this.getSeq() : cursor };
+    return { changes, cursor: changes.length ? this.currentSeq() : cursor };
   }
 
   /**
@@ -239,8 +244,6 @@ export class StoreDurableObject extends DurableObject<Env> {
    * gets the next monotonic `server_seq` so other devices pull it in order.
    */
   async push(request: SyncPushRequest, role: StoreRole): Promise<PushResult> {
-    let seq = this.getSeq();
-
     // Authorise everything up front so a rejected push applies nothing. The DO
     // is single-threaded, so no other write can interleave between the checks
     // and the writes below.
@@ -272,59 +275,70 @@ export class StoreDurableObject extends DurableObject<Env> {
     // ones we've never seen before (idempotent on retry). Captured against the
     // pre-push state, and applied after all product docs are written below.
     const newMovements: SyncChange[] = [];
+    const now = Date.now();
+    let seq = 0;
 
-    for (const change of request.changes) {
-      const existing = stored.get(`${change.collection}/${change.id}`);
+    // One atomic transaction: either the whole push lands or none of it does.
+    // Combined with MAX(server_seq)-derived sequencing above, a crash can never
+    // strand half a push or cause a sequence number to be handed out twice.
+    await this.ctx.storage.transaction(async () => {
+      seq = this.currentSeq();
 
-      // Stored version is strictly newer — keep it, drop the incoming change.
-      if (existing && existing.updatedAt > change.updatedAt) continue;
+      for (const change of request.changes) {
+        const existing = stored.get(`${change.collection}/${change.id}`);
+        // Clamp future-dated client clocks so one fast device cannot pin a
+        // document ahead of every other device's edits.
+        const updatedAt = Math.min(change.updatedAt, now + CLOCK_SKEW_MS);
 
-      // Never trust a product's absolute stock off the wire. Two tills or a
-      // long-offline device would otherwise overwrite each other's counts with
-      // last-write-wins. Stock is preserved from the server's current value
-      // (0 for a brand-new tracked product) and only moved by the movement log.
-      let data = change.data;
-      if (change.collection === "products" && !change.deleted) {
-        data = this.sanitizeProductStock(change.data, existing?.data);
+        // Stored version is newer or equal — keep it, drop the incoming change.
+        // Ties favour the server copy, which every device sees identically.
+        if (existing && existing.updatedAt >= updatedAt) continue;
+
+        // Never trust a product's absolute stock off the wire. Two tills or a
+        // long-offline device would otherwise overwrite each other's counts with
+        // last-write-wins. Stock is preserved from the server's current value
+        // (0 for a brand-new tracked product) and only moved by the movement log.
+        let data = change.data;
+        if (change.collection === "products" && !change.deleted) {
+          data = this.sanitizeProductStock(change.data, existing?.data);
+        }
+        if (
+          change.collection === "stock_movements" &&
+          !existing &&
+          !change.deleted
+        ) {
+          newMovements.push(change);
+        }
+
+        seq += 1;
+        const row = {
+          collection: change.collection,
+          id: change.id,
+          data: JSON.stringify(data),
+          updatedAt,
+          deleted: change.deleted,
+          serverSeq: seq,
+        };
+        this.db
+          .insert(schema.documents)
+          .values(row)
+          .onConflictDoUpdate({
+            target: [schema.documents.collection, schema.documents.id],
+            set: {
+              data: row.data,
+              updatedAt: row.updatedAt,
+              deleted: row.deleted,
+              serverSeq: row.serverSeq,
+            },
+          })
+          .run();
       }
-      if (
-        change.collection === "stock_movements" &&
-        !existing &&
-        !change.deleted
-      ) {
-        newMovements.push(change);
+
+      // Apply the new movements' deltas to the (now-written) product docs.
+      for (const movement of newMovements) {
+        seq = this.applyMovementDelta(movement, seq);
       }
-
-      seq += 1;
-      const row = {
-        collection: change.collection,
-        id: change.id,
-        data: JSON.stringify(data),
-        updatedAt: change.updatedAt,
-        deleted: change.deleted,
-        serverSeq: seq,
-      };
-      this.db
-        .insert(schema.documents)
-        .values(row)
-        .onConflictDoUpdate({
-          target: [schema.documents.collection, schema.documents.id],
-          set: {
-            data: row.data,
-            updatedAt: row.updatedAt,
-            deleted: row.deleted,
-            serverSeq: row.serverSeq,
-          },
-        })
-        .run();
-    }
-
-    // Apply the new movements' deltas to the (now-written) product docs.
-    for (const movement of newMovements) {
-      seq = this.applyMovementDelta(movement, seq);
-    }
-
-    this.setSeq(seq);
+    });
 
     // Let other devices know there's something to pull (e.g. one till marks an
     // order READY and every other screen updates straight away).
@@ -653,7 +667,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     };
 
     // Written through the same document store, so it reaches the POS on sync.
-    const seq = this.getSeq() + 1;
+    const seq = this.currentSeq() + 1;
     this.db
       .insert(schema.documents)
       .values({
@@ -665,7 +679,6 @@ export class StoreDurableObject extends DurableObject<Env> {
         serverSeq: seq,
       })
       .run();
-    this.setSeq(seq);
 
     // Nudge every connected till immediately — this is what makes a VIP order
     // appear (and chime) in about a second instead of on the next poll.
@@ -737,97 +750,100 @@ export class StoreDurableObject extends DurableObject<Env> {
   ): Promise<{ applied: StockTransition[]; unknown: string[] }> {
     const applied: StockTransition[] = [];
     const unknown: string[] = [];
-    let seq = this.getSeq();
+    let seq = this.currentSeq();
     const now = Date.now();
 
-    for (const adj of adjustments) {
-      const [row] = this.db
-        .select({ data: schema.documents.data })
-        .from(schema.documents)
-        .where(
-          and(
-            eq(schema.documents.collection, "products"),
-            eq(schema.documents.id, adj.productId),
-          ),
-        )
-        .all();
+    // All adjustments land or none do, so an integrator's batch can never be
+    // half-applied on a mid-loop failure.
+    await this.ctx.storage.transaction(async () => {
+      for (const adj of adjustments) {
+        const [row] = this.db
+          .select({ data: schema.documents.data })
+          .from(schema.documents)
+          .where(
+            and(
+              eq(schema.documents.collection, "products"),
+              eq(schema.documents.id, adj.productId),
+            ),
+          )
+          .all();
 
-      if (!row) {
-        unknown.push(adj.productId);
-        continue;
-      }
+        if (!row) {
+          unknown.push(adj.productId);
+          continue;
+        }
 
-      const product = JSON.parse(row.data) as StoredProduct;
-      const previous = product.stockQuantity;
+        const product = JSON.parse(row.data) as StoredProduct;
+        const previous = product.stockQuantity;
 
-      // An untracked item can't be adjusted without first being tracked.
-      if (previous === null || previous === undefined) {
-        unknown.push(adj.productId);
-        continue;
-      }
+        // An untracked item can't be adjusted without first being tracked.
+        if (previous === null || previous === undefined) {
+          unknown.push(adj.productId);
+          continue;
+        }
 
-      const next =
-        adj.stock !== undefined
-          ? Math.max(0, Math.round(adj.stock))
-          : Math.max(0, previous + Math.round(adj.delta ?? 0));
-      if (next === previous) continue;
+        const next =
+          adj.stock !== undefined
+            ? Math.max(0, Math.round(adj.stock))
+            : Math.max(0, previous + Math.round(adj.delta ?? 0));
+        if (next === previous) continue;
 
-      const updated: StoredProduct = { ...product, stockQuantity: next };
+        const updated: StoredProduct = { ...product, stockQuantity: next };
 
-      seq += 1;
-      this.db
-        .insert(schema.documents)
-        .values({
-          collection: "products",
-          id: product.id,
-          data: JSON.stringify(updated),
-          updatedAt: now,
-          deleted: false,
-          serverSeq: seq,
-        })
-        .onConflictDoUpdate({
-          target: [schema.documents.collection, schema.documents.id],
-          set: { data: JSON.stringify(updated), updatedAt: now, serverSeq: seq },
-        })
-        .run();
+        seq += 1;
+        this.db
+          .insert(schema.documents)
+          .values({
+            collection: "products",
+            id: product.id,
+            data: JSON.stringify(updated),
+            updatedAt: now,
+            deleted: false,
+            serverSeq: seq,
+          })
+          .onConflictDoUpdate({
+            target: [schema.documents.collection, schema.documents.id],
+            set: { data: JSON.stringify(updated), updatedAt: now, serverSeq: seq },
+          })
+          .run();
 
-      // Audit trail, same shape the POS writes.
-      seq += 1;
-      const movementId = `mov_api_${now}_${Math.floor(Math.random() * 1e4)}`;
-      this.db
-        .insert(schema.documents)
-        .values({
-          collection: "stock_movements",
-          id: movementId,
-          data: JSON.stringify({
+        // Audit trail, same shape the POS writes.
+        seq += 1;
+        const movementId = `mov_api_${now}_${Math.floor(Math.random() * 1e4)}`;
+        this.db
+          .insert(schema.documents)
+          .values({
+            collection: "stock_movements",
             id: movementId,
-            productId: product.id,
-            productName: product.name,
-            reason: adj.reason ?? "adjustment",
-            delta: next - previous,
-            resulting: next,
-            at: now,
-            ref: `api:${source}`,
-            note: adj.note,
-          }),
-          updatedAt: now,
-          deleted: false,
-          serverSeq: seq,
-        })
-        .run();
+            data: JSON.stringify({
+              id: movementId,
+              productId: product.id,
+              productName: product.name,
+              reason: adj.reason ?? "adjustment",
+              delta: next - previous,
+              resulting: next,
+              at: now,
+              ref: `api:${source}`,
+              note: adj.note,
+            }),
+            updatedAt: now,
+            deleted: false,
+            serverSeq: seq,
+          })
+          .run();
 
-      applied.push({
-        productId: product.id,
-        name: product.name,
-        previousStock: previous,
-        stock: next,
-        lowStockAt: product.lowStockAt,
-        stockState: stockStateOf(updated),
-      });
-    }
+        applied.push({
+          productId: product.id,
+          name: product.name,
+          previousStock: previous,
+          stock: next,
+          lowStockAt: product.lowStockAt,
+          stockState: stockStateOf(updated),
+        });
+      }
+    });
 
     if (applied.length > 0) {
-      this.setSeq(seq);
       // Tills see the new stock straight away.
       this.broadcast("changes");
     }
