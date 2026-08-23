@@ -249,6 +249,14 @@ export interface SyncPullResponse {
   changes: SyncChange[];
   /** New high-water mark for the device to persist and send next time. */
   cursor: number;
+  /**
+   * The store's current head sequence, sent on every response so a device can
+   * detect that its own cursor points PAST the store's history — which happens
+   * when the server's oplog was rebuilt (e.g. after a Durable Object storage
+   * reset). Without this, such a device is permanently deaf: it asks for
+   * "everything after N" on a server whose head never reaches N again.
+   */
+  head: number;
 }
 
 // ---------------------------------------------------------------------------

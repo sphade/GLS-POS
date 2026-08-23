@@ -152,6 +152,17 @@ const APPLY_CHUNK = 40;
 
 /** Apply a server pull in chunks, then notify every local data provider. */
 async function applyPulled(storeId: string, data: SyncPullResponse, notify = true): Promise<number> {
+  // Era guard: if the store's head sequence is BEHIND our bookmark, its oplog
+  // was rebuilt at some point (e.g. a Durable Object storage reset). Our cursor
+  // would point past its history forever, making every future pull silently
+  // empty. Rewind once and catch up from scratch — rows re-apply idempotently.
+  const prior = Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
+  const head = data.head ?? 0;
+  if (head > 0 && prior > head) {
+    console.warn("[sync] store oplog rebuilt (head", head, "< cursor", prior, ") — pulling from zero");
+    metaSet(cursorKey(storeId), "0");
+  }
+
   let applied = 0;
 
   for (let start = 0; start < data.changes.length; start += APPLY_CHUNK) {
@@ -191,10 +202,21 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
 }
 
 /**
+ * Page budget for one pull request. The server pages its responses (rows and
+ * bytes), so a full catch-up — including product photos — arrives across
+ * several bounded requests instead of one multi-megabyte reply that always
+ * overran the request timeout.
+ */
+const PULL_MAX_PAGES = 60;
+
+/**
  * Fetch server changes without uploading local dirty rows first. This guarantees
  * incoming VIP orders still arrive when an unrelated local edit is denied.
  * `fromBeginning` repairs older devices whose cursor advanced before
  * `web_orders` existed locally.
+ *
+ * Pages are fetched back-to-back while the server keeps reporting progress, so
+ * a first sync completes in seconds rather than waiting on repeated polls.
  */
 async function performPull(
   storeId: string,
@@ -207,15 +229,33 @@ async function performPull(
   try {
     const netState = await Network.getNetworkStateAsync();
     if (netState.isInternetReachable === false) return -1;
-    const cursor = fromBeginning ? 0 : Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
-    const res = await fetchWithTimeout(`${API_URL}/api/sync?cursor=${cursor}`, {
-      headers: { Cookie: cookie, "x-store-id": storeId },
-    });
-    const body = (await res.json()) as
-      | { ok: true; data: SyncPullResponse }
-      | { ok: false; error: { message: string } };
-    if (!res.ok || !body.ok) return -1;
-    return await applyPulled(storeId, body.data, notify);
+
+    let appliedTotal = 0;
+
+    for (let page = 0; page < PULL_MAX_PAGES; page += 1) {
+      // Re-read the stored cursor every page: applyPulled may have rewound it
+      // to zero after detecting a rebuilt server oplog.
+      const cursor = page === 0 && fromBeginning
+        ? 0
+        : Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
+
+      const res = await fetchWithTimeout(`${API_URL}/api/sync?cursor=${cursor}`, {
+        headers: { Cookie: cookie, "x-store-id": storeId },
+      });
+      const body = (await res.json()) as
+        | { ok: true; data: SyncPullResponse }
+        | { ok: false; error: { message: string } };
+      if (!res.ok || !body.ok) return appliedTotal > 0 ? appliedTotal : -1;
+
+      const applied = await applyPulled(storeId, body.data, notify);
+      if (applied > 0) appliedTotal += applied;
+
+      // Empty page, or the server returned our own cursor back: we're caught up.
+      // Otherwise loop — the next page re-reads the cursor applyPulled stored.
+      if (body.data.changes.length === 0 || body.data.cursor <= cursor) break;
+    }
+
+    return appliedTotal;
   } catch (e) {
     console.warn("[sync] pull failed:", (e as Error).message);
     return -1;

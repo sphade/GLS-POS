@@ -10,7 +10,7 @@ import { useCart, type Receipt } from "@/lib/cart";
 import { useWebOrders } from "@/lib/web-orders";
 import { useStore } from "@/lib/store";
 import { loadDirtyIds } from "@/lib/db";
-import { onSynced, syncNow } from "@/lib/sync";
+import { onSynced, syncNowDetailed } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 
 const modeIcon = (mode: string) => {
@@ -77,11 +77,18 @@ export default function TodayScreen() {
     setSyncing(true);
     setSyncError(null);
     try {
-      const result = await syncNow(store.id);
+      // Detailed result so the banner shows the REAL reason a retry failed
+      // (expired session, offline, server rejected, timeout) instead of a
+      // blanket "check your connection" that hides the actual problem.
+      const result = await syncNowDetailed(store.id);
       const remaining = loadDirtyIds("receipts");
       setPendingIds(remaining);
-      if (result < 0 && remaining.length > 0) {
+      if (!result.ok) {
+        setSyncError(result.message);
+      } else if (remaining.length > 0) {
         setSyncError("Upload failed — check your connection, then tap to retry");
+      } else {
+        setSyncError(null);
       }
     } catch {
       refreshPending();

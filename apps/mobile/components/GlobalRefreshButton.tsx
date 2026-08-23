@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
-import { pullNow, syncNow } from "@/lib/sync";
+import { pullNow, syncNowDetailed } from "@/lib/sync";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
 
 /**
@@ -30,15 +30,17 @@ export function GlobalRefreshButton() {
       // Pull first so incoming orders are never blocked by an unrelated dirty
       // local record; then run the normal bidirectional sync.
       const pulled = await pullNow(store.id);
-      const pushed = await syncNow(store.id);
+      const result = await syncNowDetailed(store.id);
       await refreshAccount();
-      if (pulled < 0 && pushed < 0) {
+      if (pulled < 0 && !result.ok) {
         feedbackError();
-        Alert.alert("Could not refresh", "Check your internet connection and sign-in, then try again.");
+        // Show the actual failure reason — a blanket "no internet" message
+        // once hid an expired session and a server timeout behind one alert.
+        Alert.alert("Could not refresh", result.message);
       }
-    } catch {
+    } catch (e) {
       feedbackError();
-      Alert.alert("Could not refresh", "Check your internet connection and try again.");
+      Alert.alert("Could not refresh", (e as Error).message || "Check your internet connection and try again.");
     } finally {
       setBusy(false);
     }
