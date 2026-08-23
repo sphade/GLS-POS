@@ -1,58 +1,104 @@
-import { useState } from "react";
-import { Alert, FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import {
+  Alert,
+  FlatList,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
-import { displayItemName, useCart } from "@/lib/cart";
+import {
+  displayItemName,
+  useCart,
+  useCartActions,
+  type CartEntry,
+  type CartSummary,
+} from "@/lib/cart";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
+type EditingBill = { id: string; label: string };
+
+/** Subscribe only when cart lines are added, removed, cleared, or resumed. */
+function useCartLineIdsSnapshot(): readonly string[] {
+  const cart = useCartActions();
+  return useSyncExternalStore(cart.subscribeToLineIds, cart.getLineIds);
+}
+
+/** Subscribe to one variant-safe cart line, not the entire cart. */
+function useCartLineSnapshot(lineId: string): CartEntry | undefined {
+  const cart = useCartActions();
+  const subscribe = useCallback(
+    (listener: () => void) => cart.subscribeToLine(lineId, listener),
+    [cart, lineId],
+  );
+  const getSnapshot = useCallback(() => cart.getLine(lineId), [cart, lineId]);
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+/** Subscribe to cached integer-money totals without rebuilding the cart list. */
+function useCartSummarySnapshot(): CartSummary {
+  const cart = useCartActions();
+  return useSyncExternalStore(cart.subscribeToSummary, cart.getSummary);
+}
+
 /**
- * Counter (billing) tab. With an empty cart it shows the NEW ORDER /
- * ADD NEW EXPENSE actions and the table-order count; once items are added it
- * becomes the running bill with a Charge button.
+ * Counter (billing) tab.
+ *
+ * Its root subscribes only to the stable set of line IDs. Quantity presses do
+ * not rerender the screen, header, FlatList, or unrelated rows: the changed row
+ * and the two tiny summary consumers update themselves directly.
  */
 export default function CounterScreen() {
+  const lineIds = useCartLineIdsSnapshot();
+  const [editing, setEditing] = useState<EditingBill | null>(null);
+
+  useEffect(() => {
+    if (lineIds.length === 0) setEditing(null);
+  }, [lineIds]);
+
+  return (
+    <View style={styles.root}>
+      <SafeAreaView edges={["top"]} style={styles.headerRegion}>
+        <PosHeader />
+      </SafeAreaView>
+
+      {lineIds.length === 0 ? (
+        <EmptyCounter onResumeEditing={setEditing} />
+      ) : (
+        <ActiveCounter lineIds={lineIds} editing={editing} onEditingChange={setEditing} />
+      )}
+    </View>
+  );
+}
+
+/** Empty-cart actions and held bills update rarely, so the full context is safe here. */
+function EmptyCounter({
+  onResumeEditing,
+}: {
+  onResumeEditing: (bill: EditingBill | null) => void;
+}) {
   const router = useRouter();
-  const { entries, subtotal, taxTotal, total, add, remove, count, clear, heldOrders, holdOrder, resumeHeldOrder, discardHeldOrder } =
-    useCart();
-  const list = Object.values(entries);
-
-  /** Name prompt for parking the current cart as an open bill. */
-  const [holdOpen, setHoldOpen] = useState(false);
-  const [holdName, setHoldName] = useState("");
-  /** The open bill currently loaded for editing (so KEEP re-saves it as-is). */
-  const [editing, setEditing] = useState<{ id: string; label: string } | null>(null);
-
-  // A cleared/emptied cart is no longer editing a specific bill.
-  if (list.length === 0 && editing) setEditing(null);
-
-  const confirmHold = () => {
-    holdOrder(holdName);
-    setHoldName("");
-    setHoldOpen(false);
-    feedbackTap();
-  };
-
-  /** Re-park the bill being edited under its original name, no prompt. */
-  const keepEditing = () => {
-    if (!editing) return;
-    feedbackTap();
-    holdOrder(editing.label, undefined, editing.id);
-    setEditing(null);
-  };
+  const { heldOrders, resumeHeldOrder, discardHeldOrder } = useCart();
 
   const onResume = (id: string) => {
-    if (list.length > 0) {
-      feedbackError();
-      Alert.alert("Finish the current order first", "Charge or clear the open cart before resuming another bill.");
-      return;
-    }
-    const bill = heldOrders.find((h) => h.id === id);
+    const bill = heldOrders.find((candidate) => candidate.id === id);
+    if (bill) onResumeEditing({ id: bill.id, label: bill.label });
     feedbackTap();
     resumeHeldOrder(id);
-    if (bill) setEditing({ id: bill.id, label: bill.label });
   };
 
   const onDiscard = (id: string, label: string) => {
@@ -63,174 +109,243 @@ export default function CounterScreen() {
   };
 
   return (
-    <View style={styles.root}>
-      <SafeAreaView edges={["top"]} style={styles.headerRegion}>
-        <PosHeader />
-      </SafeAreaView>
+    <ScrollView contentContainerStyle={{ padding: 8 }}>
+      <Pressable
+        style={styles.actionCard}
+        onPress={() => {
+          router.navigate("/(tabs)");
+          feedbackTap();
+        }}
+        android_ripple={{ color: "#00000010" }}
+      >
+        <View style={styles.plusCircle}>
+          <Ionicons name="add" size={26} color={colors.white} />
+        </View>
+        <Text style={styles.actionTitle}>NEW ORDER</Text>
+      </Pressable>
 
-      {list.length === 0 ? (
-        <ScrollView contentContainerStyle={{ padding: 8 }}>
-          <Pressable
-            style={styles.actionCard}
-            onPress={() => {
-              feedbackTap();
-              router.navigate("/(tabs)");
-            }}
-            android_ripple={{ color: "#00000010" }}
-          >
-            <View style={styles.plusCircle}>
-              <Ionicons name="add" size={26} color={colors.white} />
-            </View>
-            <Text style={styles.actionTitle}>NEW ORDER</Text>
-          </Pressable>
+      <Pressable
+        style={styles.expenseCard}
+        onPress={() => {
+          router.push("/expense-categories");
+          feedbackTap();
+        }}
+        android_ripple={{ color: "#00000010" }}
+      >
+        <MaterialCommunityIcons name="hand-coin" size={26} color={colors.green} />
+        <Text style={styles.expenseTitle}>ADD NEW EXPENSE</Text>
+      </Pressable>
 
-          <Pressable
-            style={styles.expenseCard}
-            onPress={() => {
-              feedbackTap();
-              router.push("/expense-categories");
-            }}
-            android_ripple={{ color: "#00000010" }}
-          >
-            <MaterialCommunityIcons name="hand-coin" size={26} color={colors.green} />
-            <Text style={styles.expenseTitle}>ADD NEW EXPENSE</Text>
-          </Pressable>
-
-          {heldOrders.length > 0 && (
-            <>
-              <Text style={styles.openBillsTitle}>OPEN BILLS ({heldOrders.length})</Text>
-              {heldOrders.map((bill) => (
-                <Pressable
-                  key={bill.id}
-                  style={styles.billCard}
-                  onPress={() => onResume(bill.id)}
-                  onLongPress={() => onDiscard(bill.id, bill.label)}
-                  android_ripple={{ color: "#00000010" }}
-                >
-                  <View style={styles.billIcon}>
-                    <MaterialCommunityIcons name="clipboard-text-clock-outline" size={24} color={colors.primary} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.billName} numberOfLines={1}>
-                      {bill.label}
-                    </Text>
-                    <Text style={styles.billMeta}>
-                      {bill.itemCount} item{bill.itemCount === 1 ? "" : "s"} ·{" "}
-                      {new Date(bill.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                    </Text>
-                  </View>
-                  <Text style={styles.billTotal}>{formatMoney(bill.total, bill.currency)}</Text>
-                </Pressable>
-              ))}
-              <Text style={styles.openBillsHint}>Tap to resume &amp; charge · long-press to discard</Text>
-            </>
-          )}
-        </ScrollView>
-      ) : (
+      {heldOrders.length > 0 && (
         <>
-          <View style={styles.billHeader}>
-            <Text style={styles.billHeaderText}>
-              {editing ? `Editing: ${editing.label}` : `${count} item(s)`}
-            </Text>
+          <Text style={styles.openBillsTitle}>OPEN BILLS ({heldOrders.length})</Text>
+          {heldOrders.map((bill) => (
             <Pressable
-              onPress={() => {
-                feedbackTap();
-                clear();
-                setEditing(null);
-              }}
+              key={bill.id}
+              style={styles.billCard}
+              onPress={() => onResume(bill.id)}
+              onLongPress={() => onDiscard(bill.id, bill.label)}
+              android_ripple={{ color: "#00000010" }}
             >
-              <Text style={styles.clear}>CLEAR</Text>
+              <View style={styles.billIcon}>
+                <MaterialCommunityIcons
+                  name="clipboard-text-clock-outline"
+                  size={24}
+                  color={colors.primary}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.billName} numberOfLines={1}>
+                  {bill.label}
+                </Text>
+                <Text style={styles.billMeta}>
+                  {bill.itemCount} item{bill.itemCount === 1 ? "" : "s"} ·{" "}
+                  {new Date(bill.createdAt).toLocaleTimeString([], {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
+                </Text>
+              </View>
+              <Text style={styles.billTotal}>{formatMoney(bill.total, bill.currency)}</Text>
             </Pressable>
-          </View>
-
-          <FlatList
-            data={list}
-            keyExtractor={(entry) => entry.lineId}
-            contentContainerStyle={{ padding: 8, paddingBottom: 8 }}
-            renderItem={({ item: entry }) => {
-              const unitPrice = entry.variant?.price ?? entry.item.price;
-              return (
-                <View style={styles.row}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.name}>
-                      {displayItemName(entry.item.name, entry.variant?.name)}
-                    </Text>
-                    <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)}</Text>
-                  </View>
-                  <View style={styles.stepper}>
-                    <Pressable
-                      style={[styles.stepBtn, styles.stepMinus]}
-                      onPress={() => {
-                        feedbackTap();
-                        remove(entry.lineId);
-                      }}
-                    >
-                      <Ionicons name="remove" size={22} color={colors.white} />
-                    </Pressable>
-                    <Text style={styles.qty}>{entry.qty}</Text>
-                    <Pressable
-                      style={[styles.stepBtn, styles.stepPlus]}
-                      onPress={() => {
-                        feedbackAddItem();
-                        add(entry.item, entry.variant);
-                      }}
-                    >
-                      <Ionicons name="add" size={22} color={colors.white} />
-                    </Pressable>
-                  </View>
-                  <Text style={styles.lineTotal}>
-                    {formatMoney(unitPrice * entry.qty, entry.item.currency)}
-                  </Text>
-                </View>
-              );
-            }}
-          />
-
-          <View style={styles.totalsCard}>
-            <TotalRow label={strings.subtotal} value={formatMoney(subtotal)} />
-            {taxTotal > 0 && <TotalRow label="Tax" value={formatMoney(taxTotal)} />}
-            <View style={styles.divider} />
-            <TotalRow label={strings.grandTotal} value={formatMoney(total)} bold />
-          </View>
-
-          <View style={styles.actionRow}>
-            <Pressable
-              style={styles.hold}
-              onPress={() => {
-                if (editing) {
-                  keepEditing();
-                } else {
-                  feedbackTap();
-                  setHoldOpen(true);
-                }
-              }}
-            >
-              <MaterialCommunityIcons
-                name={editing ? "content-save-outline" : "clock-outline"}
-                size={20}
-                color={colors.primary}
-              />
-              <Text style={styles.holdText}>{editing ? "KEEP BILL" : "HOLD"}</Text>
-            </Pressable>
-            <Pressable
-              style={styles.charge}
-              onPress={() => {
-                feedbackTap();
-                router.push("/charge");
-              }}
-            >
-              <Text style={styles.chargeText}>
-                {strings.charge} {formatMoney(total)}
-              </Text>
-            </Pressable>
-          </View>
+          ))}
+          <Text style={styles.openBillsHint}>Tap to resume &amp; charge · long-press to discard</Text>
         </>
       )}
+    </ScrollView>
+  );
+}
 
-      {/* Name prompt for parking the cart as an open bill. */}
+function ActiveCounter({
+  lineIds,
+  editing,
+  onEditingChange,
+}: {
+  lineIds: readonly string[];
+  editing: EditingBill | null;
+  onEditingChange: (bill: EditingBill | null) => void;
+}) {
+  return (
+    <>
+      <BillHeader editing={editing} onEditingChange={onEditingChange} />
+
+      <FlatList
+        data={lineIds}
+        keyExtractor={(lineId) => lineId}
+        contentContainerStyle={{ padding: 8, paddingBottom: 8 }}
+        renderItem={({ item: lineId }) => <CartLineRow lineId={lineId} />}
+      />
+
+      <CounterTotals />
+      <CounterActions editing={editing} onEditingChange={onEditingChange} />
+    </>
+  );
+}
+
+function BillHeader({
+  editing,
+  onEditingChange,
+}: {
+  editing: EditingBill | null;
+  onEditingChange: (bill: EditingBill | null) => void;
+}) {
+  const { count } = useCartSummarySnapshot();
+  const { clear } = useCartActions();
+
+  return (
+    <View style={styles.billHeader}>
+      <Text style={styles.billHeaderText}>
+        {editing ? `Editing: ${editing.label}` : `${count} item(s)`}
+      </Text>
+      <Pressable
+        onPress={() => {
+          clear();
+          onEditingChange(null);
+          feedbackTap();
+        }}
+      >
+        <Text style={styles.clear}>CLEAR</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const CartLineRow = memo(function CartLineRow({ lineId }: { lineId: string }) {
+  const entry = useCartLineSnapshot(lineId);
+  const { add, remove } = useCartActions();
+  if (!entry) return null;
+
+  const unitPrice = entry.variant?.price ?? entry.item.price;
+  return (
+    <View style={styles.row}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.name}>{displayItemName(entry.item.name, entry.variant?.name)}</Text>
+        <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)}</Text>
+      </View>
+      <View style={styles.stepper}>
+        <Pressable
+          style={[styles.stepBtn, styles.stepMinus]}
+          onPress={() => {
+            remove(lineId);
+            feedbackTap();
+          }}
+        >
+          <Ionicons name="remove" size={22} color={colors.white} />
+        </Pressable>
+        <Text style={styles.qty}>{entry.qty}</Text>
+        <Pressable
+          style={[styles.stepBtn, styles.stepPlus]}
+          onPress={() => {
+            add(entry.item, entry.variant);
+            feedbackAddItem();
+          }}
+        >
+          <Ionicons name="add" size={22} color={colors.white} />
+        </Pressable>
+      </View>
+      <Text style={styles.lineTotal}>
+        {formatMoney(unitPrice * entry.qty, entry.item.currency)}
+      </Text>
+    </View>
+  );
+});
+
+function CounterTotals() {
+  const { subtotal, taxTotal, total } = useCartSummarySnapshot();
+  return (
+    <View style={styles.totalsCard}>
+      <TotalRow label={strings.subtotal} value={formatMoney(subtotal)} />
+      {taxTotal > 0 && <TotalRow label="Tax" value={formatMoney(taxTotal)} />}
+      <View style={styles.divider} />
+      <TotalRow label={strings.grandTotal} value={formatMoney(total)} bold />
+    </View>
+  );
+}
+
+/** Hold/resume metadata changes rarely; only these controls consume full CartContext. */
+function CounterActions({
+  editing,
+  onEditingChange,
+}: {
+  editing: EditingBill | null;
+  onEditingChange: (bill: EditingBill | null) => void;
+}) {
+  const router = useRouter();
+  const { total, holdOrder } = useCart();
+  const [holdOpen, setHoldOpen] = useState(false);
+  const [holdName, setHoldName] = useState("");
+
+  const confirmHold = () => {
+    setHoldName("");
+    setHoldOpen(false);
+    holdOrder(holdName);
+    feedbackTap();
+  };
+
+  const keepEditing = () => {
+    if (!editing) return;
+    onEditingChange(null);
+    holdOrder(editing.label, undefined, editing.id);
+    feedbackTap();
+  };
+
+  return (
+    <>
+      <View style={styles.actionRow}>
+        <Pressable
+          style={styles.hold}
+          onPress={() => {
+            if (editing) {
+              keepEditing();
+            } else {
+              setHoldOpen(true);
+              feedbackTap();
+            }
+          }}
+        >
+          <MaterialCommunityIcons
+            name={editing ? "content-save-outline" : "clock-outline"}
+            size={20}
+            color={colors.primary}
+          />
+          <Text style={styles.holdText}>{editing ? "KEEP BILL" : "HOLD"}</Text>
+        </Pressable>
+        <Pressable
+          style={styles.charge}
+          onPress={() => {
+            router.push("/charge");
+            feedbackTap();
+          }}
+        >
+          <Text style={styles.chargeText}>
+            {strings.charge} {formatMoney(total)}
+          </Text>
+        </Pressable>
+      </View>
+
       <Modal visible={holdOpen} transparent animationType="fade" onRequestClose={() => setHoldOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setHoldOpen(false)}>
-          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+          <Pressable style={styles.modalCard} onPress={(event) => event.stopPropagation()}>
             <Text style={styles.modalTitle}>Hold this bill</Text>
             <Text style={styles.modalHint}>Give it a name so you can find it to charge later.</Text>
             <TextInput
@@ -254,7 +369,7 @@ export default function CounterScreen() {
           </Pressable>
         </Pressable>
       </Modal>
-    </View>
+    </>
   );
 }
 

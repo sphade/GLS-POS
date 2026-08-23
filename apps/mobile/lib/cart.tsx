@@ -231,14 +231,51 @@ const CartContext = createContext<CartState | null>(null);
  * `getCount` drive fine-grained `useSyncExternalStore` reads so a tap
  * re-renders only the one tile whose quantity changed — not the whole screen.
  */
+export type CartSummary = {
+  count: number;
+  subtotal: number;
+  taxTotal: number;
+  total: number;
+};
+
+function calculateCartSummary(entries: Record<string, CartEntry>): CartSummary {
+  let count = 0;
+  let subtotal = 0;
+  let taxTotal = 0;
+
+  for (const entry of Object.values(entries)) {
+    const unitPrice = entry.variant?.price ?? entry.item.price;
+    const taxRateBps = entry.variant
+      ? entry.variant.taxOn
+        ? Math.round((entry.variant.taxPercent ?? 0) * 100)
+        : 0
+      : (entry.item.taxRateBps ?? 0);
+    count += entry.qty;
+    subtotal += entry.qty * unitPrice;
+    taxTotal += Math.round((entry.qty * unitPrice * taxRateBps) / 10000);
+  }
+
+  return { count, subtotal, taxTotal, total: subtotal + taxTotal };
+}
+
+function sameLineIds(previous: readonly string[], next: readonly string[]): boolean {
+  return previous.length === next.length && previous.every((id, index) => id === next[index]);
+}
+
 type CartFast = {
   add: (item: Item, variant?: Variant) => void;
   remove: (lineId: string) => void;
   clear: () => void;
   subscribeToProduct: (productId: string, cb: () => void) => () => void;
   subscribeToCount: (cb: () => void) => () => void;
+  subscribeToLine: (lineId: string, cb: () => void) => () => void;
+  subscribeToLineIds: (cb: () => void) => () => void;
+  subscribeToSummary: (cb: () => void) => () => void;
   getQtyOf: (productId: string) => number;
   getCount: () => number;
+  getLine: (lineId: string) => CartEntry | undefined;
+  getLineIds: () => readonly string[];
+  getSummary: () => CartSummary;
 };
 
 const CartFastContext = createContext<CartFast | null>(null);
@@ -248,12 +285,17 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   // --- Synchronous fine-grained quantity store ----------------------------
   // React state remains the source rendered by checkout/report screens, while
-  // this ref is advanced synchronously for hot-path item taps. That means ten
-  // rapid presses read ten successive quantities instead of waiting for a
-  // React commit before the tile can observe the new count.
+  // these snapshots advance synchronously for hot-path taps. Consumers can
+  // subscribe to one product, one variant-safe line, the line structure, or
+  // totals without waking the rest of the cart UI.
   const entriesRef = useRef(entries);
+  const lineIdsRef = useRef<readonly string[]>(Object.keys(entries));
+  const summaryRef = useRef<CartSummary>(calculateCartSummary(entries));
   const productListeners = useRef(new Map<string, Set<() => void>>());
+  const lineListeners = useRef(new Map<string, Set<() => void>>());
   const countListeners = useRef(new Set<() => void>());
+  const lineIdsListeners = useRef(new Set<() => void>());
+  const summaryListeners = useRef(new Set<() => void>());
 
   const getQtyOf = useCallback(
     (productId: string) =>
@@ -263,10 +305,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
       ),
     [],
   );
-  const getCount = useCallback(
-    () => Object.values(entriesRef.current).reduce((sum, entry) => sum + entry.qty, 0),
-    [],
-  );
+  const getCount = useCallback(() => summaryRef.current.count, []);
+  const getLine = useCallback((lineId: string) => entriesRef.current[lineId], []);
+  const getLineIds = useCallback(() => lineIdsRef.current, []);
+  const getSummary = useCallback(() => summaryRef.current, []);
 
   const subscribeToProduct = useCallback((productId: string, cb: () => void) => {
     let listeners = productListeners.current.get(productId);
@@ -280,25 +322,41 @@ export function CartProvider({ children }: { children: ReactNode }) {
       if (listeners.size === 0) productListeners.current.delete(productId);
     };
   }, []);
+  const subscribeToLine = useCallback((lineId: string, cb: () => void) => {
+    let listeners = lineListeners.current.get(lineId);
+    if (!listeners) {
+      listeners = new Set();
+      lineListeners.current.set(lineId, listeners);
+    }
+    listeners.add(cb);
+    return () => {
+      listeners.delete(cb);
+      if (listeners.size === 0) lineListeners.current.delete(lineId);
+    };
+  }, []);
   const subscribeToCount = useCallback((cb: () => void) => {
     countListeners.current.add(cb);
     return () => countListeners.current.delete(cb);
   }, []);
+  const subscribeToLineIds = useCallback((cb: () => void) => {
+    lineIdsListeners.current.add(cb);
+    return () => lineIdsListeners.current.delete(cb);
+  }, []);
+  const subscribeToSummary = useCallback((cb: () => void) => {
+    summaryListeners.current.add(cb);
+    return () => summaryListeners.current.delete(cb);
+  }, []);
 
-  const notifyDifference = useCallback(
+  const notifyChangedEntries = useCallback(
     (previous: Record<string, CartEntry>, next: Record<string, CartEntry>) => {
       const previousQty = new Map<string, number>();
       const nextQty = new Map<string, number>();
-      let previousCount = 0;
-      let nextCount = 0;
 
       for (const entry of Object.values(previous)) {
         previousQty.set(entry.item.id, (previousQty.get(entry.item.id) ?? 0) + entry.qty);
-        previousCount += entry.qty;
       }
       for (const entry of Object.values(next)) {
         nextQty.set(entry.item.id, (nextQty.get(entry.item.id) ?? 0) + entry.qty);
-        nextCount += entry.qty;
       }
 
       const productIds = new Set([...previousQty.keys(), ...nextQty.keys()]);
@@ -306,8 +364,11 @@ export function CartProvider({ children }: { children: ReactNode }) {
         if ((previousQty.get(productId) ?? 0) === (nextQty.get(productId) ?? 0)) continue;
         productListeners.current.get(productId)?.forEach((listener) => listener());
       }
-      if (previousCount !== nextCount) {
-        countListeners.current.forEach((listener) => listener());
+
+      const lineIds = new Set([...Object.keys(previous), ...Object.keys(next)]);
+      for (const lineId of lineIds) {
+        if (previous[lineId] === next[lineId]) continue;
+        lineListeners.current.get(lineId)?.forEach((listener) => listener());
       }
     },
     [],
@@ -317,11 +378,31 @@ export function CartProvider({ children }: { children: ReactNode }) {
     (next: Record<string, CartEntry>) => {
       const previous = entriesRef.current;
       if (next === previous) return;
+
+      const previousLineIds = lineIdsRef.current;
+      const nextLineIds = Object.keys(next);
+      const lineIdsChanged = !sameLineIds(previousLineIds, nextLineIds);
+      const previousSummary = summaryRef.current;
+      const nextSummary = calculateCartSummary(next);
+      const summaryChanged =
+        previousSummary.count !== nextSummary.count ||
+        previousSummary.subtotal !== nextSummary.subtotal ||
+        previousSummary.taxTotal !== nextSummary.taxTotal ||
+        previousSummary.total !== nextSummary.total;
+
       entriesRef.current = next;
+      if (lineIdsChanged) lineIdsRef.current = nextLineIds;
+      if (summaryChanged) summaryRef.current = nextSummary;
       setEntries(next);
-      notifyDifference(previous, next);
+
+      notifyChangedEntries(previous, next);
+      if (lineIdsChanged) lineIdsListeners.current.forEach((listener) => listener());
+      if (previousSummary.count !== nextSummary.count) {
+        countListeners.current.forEach((listener) => listener());
+      }
+      if (summaryChanged) summaryListeners.current.forEach((listener) => listener());
     },
-    [notifyDifference],
+    [notifyChangedEntries],
   );
 
   // --- Stable actions (identity never changes) ----------------------------
@@ -367,8 +448,36 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const clear = useCallback(() => replaceEntries({}), [replaceEntries]);
 
   const fast = useMemo<CartFast>(
-    () => ({ add, remove, clear, subscribeToProduct, subscribeToCount, getQtyOf, getCount }),
-    [add, remove, clear, subscribeToProduct, subscribeToCount, getQtyOf, getCount],
+    () => ({
+      add,
+      remove,
+      clear,
+      subscribeToProduct,
+      subscribeToCount,
+      subscribeToLine,
+      subscribeToLineIds,
+      subscribeToSummary,
+      getQtyOf,
+      getCount,
+      getLine,
+      getLineIds,
+      getSummary,
+    }),
+    [
+      add,
+      remove,
+      clear,
+      subscribeToProduct,
+      subscribeToCount,
+      subscribeToLine,
+      subscribeToLineIds,
+      subscribeToSummary,
+      getQtyOf,
+      getCount,
+      getLine,
+      getLineIds,
+      getSummary,
+    ],
   );
   // Receipts persist in SQLite (offline-first). Seeded once for the demo.
   // Receipts are real sales only — no demo seeding. An earlier version seeded 17
@@ -392,23 +501,13 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
     const priceOf = (entry: CartEntry) => entry.variant?.price ?? entry.item.price;
-    const taxRateOf = (entry: CartEntry) =>
-      entry.variant
-        ? entry.variant.taxOn
-          ? Math.round((entry.variant.taxPercent ?? 0) * 100)
-          : 0
-        : (entry.item.taxRateBps ?? 0);
-    const subtotal = list.reduce((sum, entry) => sum + entry.qty * priceOf(entry), 0);
-    const taxTotal = list.reduce(
-      (sum, entry) => sum + Math.round((entry.qty * priceOf(entry) * taxRateOf(entry)) / 10000),
-      0,
-    );
+    const { count, subtotal, taxTotal, total } = summaryRef.current;
     return {
       entries,
-      count: list.reduce((sum, entry) => sum + entry.qty, 0),
+      count,
       subtotal,
       taxTotal,
-      total: subtotal + taxTotal,
+      total,
       qtyOf: (productId) =>
         list.reduce((sum, entry) => sum + (entry.item.id === productId ? entry.qty : 0), 0),
       add,
