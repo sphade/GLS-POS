@@ -1,4 +1,4 @@
-﻿import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+﻿import { memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   Alert,
   LayoutAnimation,
@@ -213,8 +213,8 @@ export default function ItemsScreen() {
       setChooser(item);
       return;
     }
-    feedbackAddItem();
     add(item);
+    feedbackAddItem();
   };
 
   /** Long-press removes one simple item, or reopens the variant sheet. */
@@ -423,11 +423,22 @@ function Avatar({ item, size }: { item: Item; size: number }) {
  * re-rendering on every cart change.
  */
 function SectionSelectAll({ items, onToggle }: { items: Item[]; onToggle: () => void }) {
-  const { subscribe, getQtyOf } = useCartActions();
-  const allAdded = useSyncExternalStore(
-    subscribe,
-    () => items.length > 0 && items.every((i) => getQtyOf(i.id) > 0),
+  const { subscribeToProduct, getQtyOf } = useCartActions();
+  const productIds = useMemo(() => items.map((item) => item.id), [items]);
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const unsubscribers = productIds.map((productId) =>
+        subscribeToProduct(productId, listener),
+      );
+      return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+    },
+    [productIds, subscribeToProduct],
   );
+  const getSnapshot = useCallback(
+    () => productIds.length > 0 && productIds.every((productId) => getQtyOf(productId) > 0),
+    [productIds, getQtyOf],
+  );
+  const allAdded = useSyncExternalStore(subscribe, getSnapshot);
   return (
     <Pressable
       style={styles.sectionCheck}
@@ -505,14 +516,14 @@ const ProductCard = memo(function ProductCard({
 
       {/* Full-width band over the image area only — leaves name/price clear */}
       {out && (
-        <View style={[styles.oosBand, { height: bandHeight }]}>
+        <View pointerEvents="none" style={[styles.oosBand, { height: bandHeight }]}>
           <View style={styles.oosLabel}>
             <Text style={styles.oosLabelText}>OUT OF STOCK</Text>
           </View>
         </View>
       )}
       {qty > 0 && !out && (
-        <View style={[styles.countBand, { height: bandHeight }]}>
+        <View pointerEvents="none" style={[styles.countBand, { height: bandHeight }]}>
           <Text style={styles.countText}>x{qty}</Text>
         </View>
       )}
@@ -543,12 +554,12 @@ const ProductRow = memo(function ProductRow({
       <View style={styles.rowThumb}>
         <Avatar item={item} size={46} />
         {out && (
-          <View style={[styles.oosZone, { borderRadius: 6 }]}>
+          <View pointerEvents="none" style={[styles.oosZone, { borderRadius: 6 }]}>
             <Text style={styles.oosThumbText}>OOS</Text>
           </View>
         )}
         {qty > 0 && !out && (
-          <View style={[styles.countZone, { borderRadius: 6 }]}>
+          <View pointerEvents="none" style={[styles.countZone, { borderRadius: 6 }]}>
             <Text style={styles.countThumbText}>x{qty}</Text>
           </View>
         )}

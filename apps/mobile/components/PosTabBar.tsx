@@ -3,6 +3,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import { colors } from "@/constants/theme";
+import { useCartCount } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -33,14 +34,19 @@ const TABS: Record<string, TabMeta> = {
     label: "Items",
     render: (c) => <MaterialCommunityIcons name="format-list-bulleted-square" size={24} color={c} />,
   },
+  performance: {
+    label: "Test",
+    render: (c) => <Ionicons name="speedometer-outline" size={23} color={c} />,
+  },
   more: {
     label: "More",
     render: (c) => <Ionicons name="grid" size={22} color={c} />,
   },
 };
 
-export function PosTabBar({ state, navigation, descriptors }: BottomTabBarProps) {
+export function PosTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
+  const count = useCartCount();
 
   return (
     <View style={[styles.bar, { height: 58 + insets.bottom }]}>
@@ -50,7 +56,7 @@ export function PosTabBar({ state, navigation, descriptors }: BottomTabBarProps)
 
         const focused = state.index === index;
         const tint = focused ? colors.white : colors.primary;
-        const badge = descriptors[route.key]?.options.tabBarBadge;
+        const badge = route.name === "counter" && count > 0 ? count : undefined;
 
         return (
           <Pressable

@@ -98,7 +98,9 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
     router.push(route as never);
   };
 
-  if (!mounted) return null;
+  // Render immediately on the opening commit; `mounted` only keeps the modal
+  // alive while its close animation finishes.
+  if (!visible && !mounted) return null;
 
   return (
     <Modal visible transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>

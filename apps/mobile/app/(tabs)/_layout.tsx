@@ -1,10 +1,9 @@
 import { Tabs } from "expo-router";
 import { PosTabBar } from "@/components/PosTabBar";
-import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth";
 
 /**
- * 5-tab bottom navigation: Reports | Today | Counter | Items | More.
+ * 6-tab bottom navigation: Reports | Today | Counter | Items | Test | More.
  * "Items" is the default home. Rendering is delegated to PosTabBar so the
  * active tab can be filled edge-to-edge with primary green.
  *
@@ -13,7 +12,6 @@ import { useAuth } from "@/lib/auth";
  * enforces the same rules, so hiding here is purely for a clean UI.
  */
 export default function TabsLayout() {
-  const { count } = useCart();
   const { can } = useAuth();
   const seesReports = can("reports:view");
 
@@ -21,18 +19,16 @@ export default function TabsLayout() {
     <Tabs
       initialRouteName="index"
       tabBar={(props) => <PosTabBar {...props} />}
-      screenOptions={{ headerShown: false }}
+      screenOptions={{ headerShown: false, freezeOnBlur: true }}
     >
       <Tabs.Screen
         name="reports"
         options={{ title: "Reports", href: seesReports ? undefined : null }}
       />
       <Tabs.Screen name="today" options={{ title: "Today", href: seesReports ? undefined : null }} />
-      <Tabs.Screen
-        name="counter"
-        options={{ title: "Counter", tabBarBadge: count > 0 ? count : undefined }}
-      />
+      <Tabs.Screen name="counter" options={{ title: "Counter" }} />
       <Tabs.Screen name="index" options={{ title: "Items" }} />
+      <Tabs.Screen name="performance" options={{ title: "Test" }} />
       <Tabs.Screen name="more" options={{ title: "More" }} />
     </Tabs>
   );

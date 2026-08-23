@@ -235,7 +235,8 @@ type CartFast = {
   add: (item: Item, variant?: Variant) => void;
   remove: (lineId: string) => void;
   clear: () => void;
-  subscribe: (cb: () => void) => () => void;
+  subscribeToProduct: (productId: string, cb: () => void) => () => void;
+  subscribeToCount: (cb: () => void) => () => void;
   getQtyOf: (productId: string) => number;
   getCount: () => number;
 };
@@ -245,67 +246,129 @@ const CartFastContext = createContext<CartFast | null>(null);
 export function CartProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
 
-  // --- Stable actions (identity never changes) ----------------------------
-  const add = useCallback((item: Item, variant?: Variant) => {
-    if (hasVariants(item) && !variant) return;
-    const selectedVariant = variant
-      ? item.variants?.find((candidate) => candidate.id === variant.id)
-      : undefined;
-    if (variant && !selectedVariant) return;
-    const lineId = cartLineKey(item.id, selectedVariant?.id);
-    setEntries((prev) => {
-      const quantity = prev[lineId]?.qty ?? 0;
-      const stock = selectedVariant ? selectedVariant.stock : item.stockQuantity;
-      if (stock != null && quantity + 1 > stock) return prev;
-      return { ...prev, [lineId]: { lineId, item, variant: selectedVariant, qty: quantity + 1 } };
-    });
-  }, []);
-
-  const remove = useCallback((lineId: string) => {
-    setEntries((prev) => {
-      const existing = prev[lineId];
-      if (!existing) return prev;
-      if (existing.qty <= 1) {
-        const next = { ...prev };
-        delete next[lineId];
-        return next;
-      }
-      return { ...prev, [lineId]: { ...existing, qty: existing.qty - 1 } };
-    });
-  }, []);
-
-  const clear = useCallback(() => setEntries({}), []);
-
-  // --- Fine-grained quantity store ----------------------------------------
-  // A ref mirror + listener set lets tiles subscribe to just their own qty via
-  // useSyncExternalStore, so cart changes don't re-render the whole grid.
+  // --- Synchronous fine-grained quantity store ----------------------------
+  // React state remains the source rendered by checkout/report screens, while
+  // this ref is advanced synchronously for hot-path item taps. That means ten
+  // rapid presses read ten successive quantities instead of waiting for a
+  // React commit before the tile can observe the new count.
   const entriesRef = useRef(entries);
-  const qtyListeners = useRef(new Set<() => void>());
-  useEffect(() => {
-    entriesRef.current = entries;
-    qtyListeners.current.forEach((l) => l());
-  }, [entries]);
+  const productListeners = useRef(new Map<string, Set<() => void>>());
+  const countListeners = useRef(new Set<() => void>());
 
-  const subscribe = useCallback((cb: () => void) => {
-    qtyListeners.current.add(cb);
-    return () => qtyListeners.current.delete(cb);
-  }, []);
   const getQtyOf = useCallback(
     (productId: string) =>
       Object.values(entriesRef.current).reduce(
-        (sum, e) => (e.item.id === productId ? sum + e.qty : sum),
+        (sum, entry) => (entry.item.id === productId ? sum + entry.qty : sum),
         0,
       ),
     [],
   );
   const getCount = useCallback(
-    () => Object.values(entriesRef.current).reduce((sum, e) => sum + e.qty, 0),
+    () => Object.values(entriesRef.current).reduce((sum, entry) => sum + entry.qty, 0),
     [],
   );
 
+  const subscribeToProduct = useCallback((productId: string, cb: () => void) => {
+    let listeners = productListeners.current.get(productId);
+    if (!listeners) {
+      listeners = new Set();
+      productListeners.current.set(productId, listeners);
+    }
+    listeners.add(cb);
+    return () => {
+      listeners.delete(cb);
+      if (listeners.size === 0) productListeners.current.delete(productId);
+    };
+  }, []);
+  const subscribeToCount = useCallback((cb: () => void) => {
+    countListeners.current.add(cb);
+    return () => countListeners.current.delete(cb);
+  }, []);
+
+  const notifyDifference = useCallback(
+    (previous: Record<string, CartEntry>, next: Record<string, CartEntry>) => {
+      const previousQty = new Map<string, number>();
+      const nextQty = new Map<string, number>();
+      let previousCount = 0;
+      let nextCount = 0;
+
+      for (const entry of Object.values(previous)) {
+        previousQty.set(entry.item.id, (previousQty.get(entry.item.id) ?? 0) + entry.qty);
+        previousCount += entry.qty;
+      }
+      for (const entry of Object.values(next)) {
+        nextQty.set(entry.item.id, (nextQty.get(entry.item.id) ?? 0) + entry.qty);
+        nextCount += entry.qty;
+      }
+
+      const productIds = new Set([...previousQty.keys(), ...nextQty.keys()]);
+      for (const productId of productIds) {
+        if ((previousQty.get(productId) ?? 0) === (nextQty.get(productId) ?? 0)) continue;
+        productListeners.current.get(productId)?.forEach((listener) => listener());
+      }
+      if (previousCount !== nextCount) {
+        countListeners.current.forEach((listener) => listener());
+      }
+    },
+    [],
+  );
+
+  const replaceEntries = useCallback(
+    (next: Record<string, CartEntry>) => {
+      const previous = entriesRef.current;
+      if (next === previous) return;
+      entriesRef.current = next;
+      setEntries(next);
+      notifyDifference(previous, next);
+    },
+    [notifyDifference],
+  );
+
+  // --- Stable actions (identity never changes) ----------------------------
+  const add = useCallback(
+    (item: Item, variant?: Variant) => {
+      if (hasVariants(item) && !variant) return;
+      const selectedVariant = variant
+        ? item.variants?.find((candidate) => candidate.id === variant.id)
+        : undefined;
+      if (variant && !selectedVariant) return;
+
+      const lineId = cartLineKey(item.id, selectedVariant?.id);
+      const previous = entriesRef.current;
+      const quantity = previous[lineId]?.qty ?? 0;
+      const stock = selectedVariant ? selectedVariant.stock : item.stockQuantity;
+      if (stock != null && quantity + 1 > stock) return;
+
+      replaceEntries({
+        ...previous,
+        [lineId]: { lineId, item, variant: selectedVariant, qty: quantity + 1 },
+      });
+    },
+    [replaceEntries],
+  );
+
+  const remove = useCallback(
+    (lineId: string) => {
+      const previous = entriesRef.current;
+      const existing = previous[lineId];
+      if (!existing) return;
+
+      if (existing.qty <= 1) {
+        const next = { ...previous };
+        delete next[lineId];
+        replaceEntries(next);
+        return;
+      }
+      replaceEntries({ ...previous, [lineId]: { ...existing, qty: existing.qty - 1 } });
+    },
+    [replaceEntries],
+  );
+
+  const clear = useCallback(() => replaceEntries({}), [replaceEntries]);
+
   const fast = useMemo<CartFast>(
-    () => ({ add, remove, clear, subscribe, getQtyOf, getCount }),
-    [add, remove, clear, subscribe, getQtyOf, getCount],
+    () => ({ add, remove, clear, subscribeToProduct, subscribeToCount, getQtyOf, getCount }),
+    [add, remove, clear, subscribeToProduct, subscribeToCount, getQtyOf, getCount],
   );
   // Receipts persist in SQLite (offline-first). Seeded once for the demo.
   // Receipts are real sales only — no demo seeding. An earlier version seeded 17
@@ -369,7 +432,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         dbPut("held_orders", held);
         // Replace in place when updating, otherwise prepend.
         setHeldOrders((prev) => [held, ...prev.filter((h) => h.id !== held.id)]);
-        setEntries({});
+        clear();
         logAudit({
           action: existingId ? "bill.update" : "bill.hold",
           entity: "held_order",
@@ -384,7 +447,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         held.entries.forEach((e) => {
           next[e.lineId] = e;
         });
-        setEntries(next);
+        replaceEntries(next);
         softDelete("held_orders", id);
         setHeldOrders((prev) => prev.filter((h) => h.id !== id));
       },
@@ -424,7 +487,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         };
         dbPut("receipts", receipt);
         setReceipts((prev) => [receipt, ...prev]);
-        setEntries({});
+        clear();
         logAudit({
           action: "sale.complete",
           entity: "receipt",
@@ -471,7 +534,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
     };
-  }, [entries, receipts, heldOrders, add, remove, clear]);
+  }, [entries, receipts, heldOrders, add, remove, clear, replaceEntries]);
 
   return (
     <CartContext.Provider value={value}>
@@ -496,12 +559,17 @@ export function useCartActions(): CartFast {
 /** Subscribe to just one product's total quantity (sums its variants). */
 export function useItemQty(productId: string): number {
   const ctx = useCartActions();
-  return useSyncExternalStore(ctx.subscribe, () => ctx.getQtyOf(productId));
+  const subscribe = useCallback(
+    (cb: () => void) => ctx.subscribeToProduct(productId, cb),
+    [ctx, productId],
+  );
+  const getSnapshot = useCallback(() => ctx.getQtyOf(productId), [ctx, productId]);
+  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 /** Subscribe to the cart's total item count. */
 export function useCartCount(): number {
   const ctx = useCartActions();
-  return useSyncExternalStore(ctx.subscribe, ctx.getCount);
+  return useSyncExternalStore(ctx.subscribeToCount, ctx.getCount);
 }
 

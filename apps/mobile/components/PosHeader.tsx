@@ -40,11 +40,13 @@ export function PosHeader({
       <AppDrawer visible={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <View style={styles.header}>
         <Pressable
+          accessibilityLabel="Open navigation menu"
+          accessibilityRole="button"
           style={styles.hamburger}
-          hitSlop={8}
+          hitSlop={14}
           onPress={() => {
-            feedbackTap();
             setDrawerOpen(true);
+            feedbackTap();
           }}
         >
           <Ionicons name="menu" size={26} color={colors.white} />

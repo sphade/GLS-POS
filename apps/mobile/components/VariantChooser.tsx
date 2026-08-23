@@ -112,8 +112,8 @@ export function VariantChooser({
                             feedbackError();
                             return;
                           }
-                          feedbackAddItem();
                           add(item, variant);
+                          feedbackAddItem();
                         }}
                       >
                         <Ionicons name="add" size={21} color={colors.white} />

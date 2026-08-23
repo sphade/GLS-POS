@@ -1,5 +1,5 @@
 import { API_URL, authCookie } from "./auth-client";
-import { syncNow } from "./sync";
+import { SYNC_ENABLED, syncNow } from "./sync";
 
 /**
  * Realtime nudges from the store's Durable Object.
@@ -104,6 +104,11 @@ function connect(storeId: string) {
 
 /** Open the realtime channel for a store. Returns a stop function. */
 export function startRealtime(storeId: string): () => void {
+  if (!SYNC_ENABLED) {
+    stopRealtime();
+    return () => {};
+  }
+
   // Restarting for the same store is a no-op so screen re-renders don't churn.
   if (currentStore === storeId && socket) return () => stopRealtime();
 

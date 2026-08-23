@@ -32,7 +32,14 @@ export type SyncAttemptResult =
   | { ok: true; appliedCount: number }
   | {
       ok: false;
-      kind: "invalid_store" | "auth" | "offline" | "server" | "network" | "timeout";
+      kind:
+        | "disabled"
+        | "invalid_store"
+        | "auth"
+        | "offline"
+        | "server"
+        | "network"
+        | "timeout";
       message: string;
       status?: number;
       code?: string;
@@ -146,11 +153,11 @@ function applyPulled(storeId: string, data: SyncPullResponse, notify = true): nu
     applyRemote(change.collection as SyncCollection, row);
   }
   metaSet(cursorKey(storeId), String(data.cursor));
-  if (notify) emitSynced(data.changes.length);
+  if (notify && data.changes.length > 0) emitSynced(data.changes.length);
   return data.changes.length;
 }
 
-/** Fetch with a hard deadline so a publish screen cannot spin forever. */
+/** Fetch with a hard deadline so a sync request cannot hang indefinitely. */
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
@@ -166,26 +173,34 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
  * incoming VIP orders still arrive when an unrelated local edit is denied.
  * `fromBeginning` repairs older devices whose cursor advanced before
  * `web_orders` existed locally.
+ *
+ * Only one pull per store may run at a time. Equivalent callers share the
+ * active or queued result, while requests with different backfill/notification
+ * semantics run serially so a normal pull cannot incorrectly satisfy a
+ * from-the-beginning repair.
  */
-export async function pullNow(
+const pullBarriers = new Map<string, Promise<void>>();
+const pendingPulls = new Map<string, Promise<number>>();
+
+async function performPull(
   storeId: string,
-  fromBeginning = false,
-  notify = true,
+  fromBeginning: boolean,
+  notify: boolean,
 ): Promise<number> {
-  if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") return -1;
   const cookie = authCookie();
   if (!cookie) return -1;
+
   try {
     const netState = await Network.getNetworkStateAsync();
     if (netState.isInternetReachable === false) return -1;
     const cursor = fromBeginning ? 0 : Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
-    const res = await fetch(`${API_URL}/api/sync?cursor=${cursor}`, {
+    const res = await fetchWithTimeout(`${API_URL}/api/sync?cursor=${cursor}`, {
       headers: { Cookie: cookie, "x-store-id": storeId },
     });
     const body = (await res.json()) as
       | { ok: true; data: SyncPullResponse }
       | { ok: false; error: { message: string } };
-    if (!body.ok) return -1;
+    if (!res.ok || !body.ok) return -1;
     return applyPulled(storeId, body.data, notify);
   } catch (e) {
     console.warn("[sync] pull failed:", (e as Error).message);
@@ -193,10 +208,51 @@ export async function pullNow(
   }
 }
 
+export function pullNow(
+  storeId: string,
+  fromBeginning = false,
+  notify = true,
+): Promise<number> {
+  if (!SYNC_ENABLED) return Promise.resolve(-1);
+  if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") {
+    return Promise.resolve(-1);
+  }
+
+  const key = `${storeId}:${fromBeginning ? "backfill" : "incremental"}:${notify ? "notify" : "silent"}`;
+  const pending = pendingPulls.get(key);
+  if (pending) return pending;
+
+  const previous = pullBarriers.get(storeId) ?? Promise.resolve();
+  const run = previous.then(() => performPull(storeId, fromBeginning, notify));
+  const barrier = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  pullBarriers.set(storeId, barrier);
+  void barrier.then(() => {
+    if (pullBarriers.get(storeId) === barrier) pullBarriers.delete(storeId);
+  });
+
+  let tracked: Promise<number>;
+  tracked = run.finally(() => {
+    if (pendingPulls.get(key) === tracked) pendingPulls.delete(key);
+  });
+  pendingPulls.set(key, tracked);
+  return tracked;
+}
+
 async function performSync(
   storeId: string,
   onlyCollections?: readonly SyncCollection[],
 ): Promise<SyncAttemptResult> {
+  if (!SYNC_ENABLED) {
+    return {
+      ok: false,
+      kind: "disabled",
+      message: "Server sync is disabled in this build. Enable sync and restart the app before publishing.",
+    };
+  }
+
   if (!storeId || storeId === "store_unknown" || storeId === "bootstrap") {
     return { ok: false, kind: "invalid_store", message: "No valid store is selected." };
   }
@@ -310,25 +366,80 @@ async function pushBatch(
 }
 
 /**
- * The active request is shared as a serialization barrier. A caller arriving
- * mid-sync waits and then runs its own cycle, so it never mistakes "queued" for
- * "published".
+ * Serialize sync cycles while coalescing equivalent queued requests. A trigger
+ * that arrives during an active cycle still gets one follow-up cycle, so writes
+ * created after the active cycle collected its rows are never mistaken for
+ * already-published data. Further equivalent triggers share that queued cycle.
  */
-let activeSync: Promise<SyncAttemptResult> | null = null;
+type SyncJob = {
+  key: string;
+  storeId: string;
+  onlyCollections?: readonly SyncCollection[];
+  promise: Promise<SyncAttemptResult>;
+  resolve: (result: SyncAttemptResult) => void;
+  reject: (reason?: unknown) => void;
+};
+
+let syncRunning = false;
+const syncQueue: SyncJob[] = [];
+const queuedSyncs = new Map<string, Promise<SyncAttemptResult>>();
+
+function syncRequestKey(
+  storeId: string,
+  onlyCollections?: readonly SyncCollection[],
+): string {
+  const scope = onlyCollections
+    ? [...new Set(onlyCollections)].sort().join(",")
+    : "*";
+  return `${storeId}:${scope}`;
+}
+
+function drainSyncQueue(): void {
+  if (syncRunning) return;
+  const job = syncQueue.shift();
+  if (!job) return;
+
+  syncRunning = true;
+  if (queuedSyncs.get(job.key) === job.promise) queuedSyncs.delete(job.key);
+
+  void (async () => {
+    try {
+      job.resolve(await performSync(job.storeId, job.onlyCollections));
+    } catch (error) {
+      job.reject(error);
+    } finally {
+      syncRunning = false;
+      drainSyncQueue();
+    }
+  })();
+}
 
 export function syncNowDetailed(
   storeId: string,
   onlyCollections?: readonly SyncCollection[],
 ): Promise<SyncAttemptResult> {
-  if (activeSync) {
-    return activeSync.then(() => syncNowDetailed(storeId, onlyCollections));
-  }
+  const key = syncRequestKey(storeId, onlyCollections);
+  const queued = queuedSyncs.get(key);
+  if (queued) return queued;
 
-  const run = performSync(storeId, onlyCollections);
-  activeSync = run;
-  return run.finally(() => {
-    if (activeSync === run) activeSync = null;
+  let resolve!: (result: SyncAttemptResult) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<SyncAttemptResult>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
   });
+  const job: SyncJob = {
+    key,
+    storeId,
+    onlyCollections: onlyCollections ? [...onlyCollections] : undefined,
+    promise,
+    resolve,
+    reject,
+  };
+  queuedSyncs.set(key, promise);
+  syncQueue.push(job);
+  drainSyncQueue();
+  return promise;
 }
 
 /** Backward-compatible count result used by existing refresh UI. */
@@ -342,7 +453,7 @@ export async function syncNow(storeId: string): Promise<number> {
  * offline/local demo with zero network calls. Flip it on by setting
  * EXPO_PUBLIC_ENABLE_SYNC=1 once a reachable backend is available.
  */
-export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC !== "0";
+export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC === "1";
 
 /**
  * Start periodic background sync for a store. Returns a stop function.

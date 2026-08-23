@@ -116,7 +116,6 @@ function restartAndPlay(name: SoundName, volume?: number): void {
 function playLoaded(player: AudioPlayer, name: SoundName, volume?: number): void {
   try {
     if (volume != null) player.volume = volume;
-    player.play();
     void Promise.resolve(player.seekTo(0))
       .then(() => player.play())
       .catch((error) => noteAudioError(`seekTo(${name})`, error));
@@ -138,8 +137,19 @@ export function isHapticsEnabled() {
   return hapticsEnabled;
 }
 
+// Native feedback is confirmation, not business state. Ultra-fast presses must
+// all update the cart, but they must not enqueue dozens of overlapping player
+// seeks and haptic bridge calls that delay later touch events.
+const RAPID_FEEDBACK_INTERVAL_MS = 55;
+const lastSoundAt: Partial<Record<SoundName, number>> = {};
+let lastHapticAt = 0;
+
 export function playSound(name: SoundName) {
   if (!soundEnabled) return;
+  const now = Date.now();
+  if (name === "beep" && now - (lastSoundAt[name] ?? 0) < RAPID_FEEDBACK_INTERVAL_MS) return;
+  lastSoundAt[name] = now;
+
   // Deferred by a tick so audio can never extend the tap handler that triggered
   // it. Creating a player is a *synchronous* native call, so doing this inline
   // made the first tap on an item stall before the cart or the haptic reacted.
@@ -149,7 +159,10 @@ export function playSound(name: SoundName) {
 
 function vibrate(style: Haptics.ImpactFeedbackStyle) {
   if (!hapticsEnabled) return;
-  Haptics.impactAsync(style).catch(() => {});
+  const now = Date.now();
+  if (now - lastHapticAt < RAPID_FEEDBACK_INTERVAL_MS) return;
+  lastHapticAt = now;
+  void Haptics.impactAsync(style).catch(() => {});
 }
 
 function notify(type: Haptics.NotificationFeedbackType) {

@@ -11,7 +11,7 @@ import {
 import * as Notifications from "expo-notifications";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { loadAll, metaGet, metaSet, put as dbPut } from "./db";
-import { onSynced, pullNow, syncNow } from "./sync";
+import { onSynced, pullNow, SYNC_ENABLED, syncNow } from "./sync";
 import { useStore } from "./store";
 
 /**
@@ -95,6 +95,8 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
    * can never prevent a guest order from appearing.
    */
   useEffect(() => {
+    if (!SYNC_ENABLED) return;
+
     let cancelled = false;
     const repairKey = `web_orders_backfill_v1_${store.id}`;
     void (async () => {
@@ -121,6 +123,8 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
    * sync, so pull immediately when one lands or is tapped.
    */
   useEffect(() => {
+    if (!SYNC_ENABLED) return;
+
     const pullThenRefresh = () => {
       void syncNow(store.id).then(() => refresh());
     };
