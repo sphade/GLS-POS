@@ -1,9 +1,17 @@
+import { memo } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, formatMoney } from "@/constants/theme";
 import { ItemImage } from "@/components/ItemImage";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
-import { cartLineKey, useCart, variantAvailable, type Item, type Variant } from "@/lib/cart";
+import {
+  cartLineKey,
+  useCartActions,
+  useCartLine,
+  variantAvailable,
+  type Item,
+  type Variant,
+} from "@/lib/cart";
 
 /**
  * Variant picker for an item sold in more than one size/option.
@@ -12,6 +20,9 @@ import { cartLineKey, useCart, variantAvailable, type Item, type Variant } from 
  * on the grey sheet. Every row carries the same plus/minus stepper used on the
  * Counter, so one sheet both adds and removes and the running quantity is
  * always visible — no separate "add mode" to reason about.
+ *
+ * Like the Items grid, this sheet subscribes per-variant-line instead of to
+ * the whole cart: a tap re-renders only the touched row and the footer.
  */
 export function VariantChooser({
   item,
@@ -22,17 +33,10 @@ export function VariantChooser({
   visible: boolean;
   onClose: () => void;
 }) {
-  const { entries, add, remove } = useCart();
+  const { add, remove } = useCartActions();
 
   const variants = item?.variants ?? [];
   if (!item || variants.length === 0) return null;
-
-  const qtyOfVariant = (variant: Variant) => entries[cartLineKey(item.id, variant.id)]?.qty ?? 0;
-  const selected = variants.reduce((sum, variant) => sum + qtyOfVariant(variant), 0);
-  const selectedTotal = variants.reduce(
-    (sum, variant) => sum + qtyOfVariant(variant) * variant.price,
-    0,
-  );
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -64,78 +68,19 @@ export function VariantChooser({
           </View>
 
           <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
-            {variants.map((variant) => {
-              const qty = qtyOfVariant(variant);
-              const available = variantAvailable(variant);
-              const atMax = variant.stock != null && qty >= variant.stock;
-              const lineId = cartLineKey(item.id, variant.id);
-
-              return (
-                <View key={variant.id} style={[styles.card, !available && styles.cardOut]}>
-                  <View style={[styles.swatch, { backgroundColor: variant.color || colors.primary }]} />
-
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.variantName} numberOfLines={1}>
-                      {variant.name}
-                    </Text>
-                    <Text style={styles.variantPrice}>{formatMoney(variant.price, item.currency)}</Text>
-                    <Text style={[styles.variantStock, !available && styles.variantStockOut]}>
-                      {!available
-                        ? "OUT OF STOCK"
-                        : variant.stock == null
-                          ? "Stock not tracked"
-                          : `${variant.stock} in stock`}
-                    </Text>
-                  </View>
-
-                  {/* Same stepper as the Counter: minus, live qty, plus. */}
-                  {available ? (
-                    <View style={styles.stepper}>
-                      <Pressable
-                        style={[styles.stepBtn, styles.stepMinus, qty === 0 && styles.stepDisabled]}
-                        disabled={qty === 0}
-                        onPress={() => {
-                          feedbackTap();
-                          remove(lineId);
-                        }}
-                      >
-                        <Ionicons name="remove" size={21} color={colors.white} />
-                      </Pressable>
-
-                      <Text style={[styles.qty, qty > 0 && { color: colors.primary }]}>{qty}</Text>
-
-                      <Pressable
-                        style={[styles.stepBtn, styles.stepPlus, atMax && styles.stepDisabled]}
-                        disabled={atMax}
-                        onPress={() => {
-                          if (atMax) {
-                            feedbackError();
-                            return;
-                          }
-                          add(item, variant);
-                          feedbackAddItem();
-                        }}
-                      >
-                        <Ionicons name="add" size={21} color={colors.white} />
-                      </Pressable>
-                    </View>
-                  ) : (
-                    <View style={styles.oosTag}>
-                      <Text style={styles.oosTagText}>SOLD OUT</Text>
-                    </View>
-                  )}
-                </View>
-              );
-            })}
+            {variants.map((variant) => (
+              <VariantRow
+                key={variant.id}
+                item={item}
+                variant={variant}
+                onAdd={() => add(item, variant)}
+                onRemove={() => remove(cartLineKey(item.id, variant.id))}
+              />
+            ))}
           </ScrollView>
 
           <View style={styles.footer}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.footerLabel}>
-                {selected} item{selected === 1 ? "" : "s"} selected
-              </Text>
-              <Text style={styles.footerTotal}>{formatMoney(selectedTotal, item.currency)}</Text>
-            </View>
+            <VariantFooter key={item.id} item={item} />
             <Pressable style={styles.done} onPress={onClose} android_ripple={{ color: "#FFFFFF22" }}>
               <Text style={styles.doneText}>DONE</Text>
             </Pressable>
@@ -143,6 +88,103 @@ export function VariantChooser({
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+/** One variant row; re-renders only when its own line changes. */
+const VariantRow = memo(function VariantRow({
+  item,
+  variant,
+  onAdd,
+  onRemove,
+}: {
+  item: Item;
+  variant: Variant;
+  onAdd: () => void;
+  onRemove: () => void;
+}) {
+  const entry = useCartLine(cartLineKey(item.id, variant.id));
+  const qty = entry?.qty ?? 0;
+  const available = variantAvailable(variant);
+  const atMax = variant.stock != null && qty >= variant.stock;
+
+  return (
+    <View style={[styles.card, !available && styles.cardOut]}>
+      <View style={[styles.swatch, { backgroundColor: variant.color || colors.primary }]} />
+
+      <View style={{ flex: 1 }}>
+        <Text style={styles.variantName} numberOfLines={1}>
+          {variant.name}
+        </Text>
+        <Text style={styles.variantPrice}>{formatMoney(variant.price, item.currency)}</Text>
+        <Text style={[styles.variantStock, !available && styles.variantStockOut]}>
+          {!available
+            ? "OUT OF STOCK"
+            : variant.stock == null
+              ? "Stock not tracked"
+              : `${variant.stock} in stock`}
+        </Text>
+      </View>
+
+      {/* Same stepper as the Counter: minus, live qty, plus. */}
+      {available ? (
+        <View style={styles.stepper}>
+          <Pressable
+            style={[styles.stepBtn, styles.stepMinus, qty === 0 && styles.stepDisabled]}
+            disabled={qty === 0}
+            onPress={() => {
+              feedbackTap();
+              onRemove();
+            }}
+          >
+            <Ionicons name="remove" size={21} color={colors.white} />
+          </Pressable>
+
+          <Text style={[styles.qty, qty > 0 && { color: colors.primary }]}>{qty}</Text>
+
+          <Pressable
+            style={[styles.stepBtn, styles.stepPlus, atMax && styles.stepDisabled]}
+            disabled={atMax}
+            onPress={() => {
+              if (atMax) {
+                feedbackError();
+                return;
+              }
+              onAdd();
+              feedbackAddItem();
+            }}
+          >
+            <Ionicons name="add" size={21} color={colors.white} />
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.oosTag}>
+          <Text style={styles.oosTagText}>SOLD OUT</Text>
+        </View>
+      )}
+    </View>
+  );
+});
+
+/** Running total for the sheet; subscribes to every variant's line. */
+function VariantFooter({ item }: { item: Item }) {
+  const variants = item.variants ?? [];
+  const lineIds = variants.map((v) => cartLineKey(item.id, v.id));
+  // Re-render on any of this item's lines changing.
+  const entries = lineIds.map((lineId) => useCartLine(lineId));
+  const selected = entries.reduce((sum, e) => sum + (e?.qty ?? 0), 0);
+  const selectedTotal = entries.reduce(
+    (sum, e, i) => sum + (e?.qty ?? 0) * variants[i]!.price,
+    0,
+  );
+
+  return (
+    <View style={{ flex: 1 }}>
+      <Text style={styles.footerLabel}>
+        {selected} item{selected === 1 ? "" : "s"} selected
+      </Text>
+      <Text style={styles.footerTotal}>{formatMoney(selectedTotal, item.currency)}</Text>
+    </View>
   );
 }
 

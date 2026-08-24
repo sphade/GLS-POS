@@ -1,5 +1,6 @@
 import type { ApiResult, StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
 import { API_URL, authCookie } from "./auth-client";
+import { OFFLINE_MODE } from "./offline";
 
 /**
  * Thin client for the control-plane HTTP API (store registry). Per-store
@@ -7,6 +8,12 @@ import { API_URL, authCookie } from "./auth-client";
  * the store's Durable Object. Every request carries the better-auth cookie.
  */
 async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
+  // Offline builds never touch the network; every caller already handles a
+  // failed result, so screens degrade with a truthful message instead of
+  // hanging on a fetch that can never succeed.
+  if (OFFLINE_MODE) {
+    return { ok: false, error: { code: "offline_build", message: "This build runs without a server." } };
+  }
   try {
     const res = await fetch(`${API_URL}/api${path}`, {
       ...init,

@@ -11,7 +11,7 @@
 } from "react";
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
-import { loadAll, put as dbPut, softDelete } from "./db";
+import { loadAll, metaGet, metaSet, put as dbPut, softDelete } from "./db";
 import { logAudit } from "./audit";
 import { onSynced } from "./sync";
 
@@ -167,6 +167,12 @@ export type HeldOrder = {
   total: number;
   currency: string;
   createdAt: number;
+  /**
+   * Set while the bill is loaded in the active cart. The record is kept (not
+   * deleted) until the cart is charged, held again, or cleared — so killing
+   * the app mid-edit never loses an open ticket.
+   */
+  resumedAt?: number;
 };
 
 type CartState = {
@@ -190,10 +196,22 @@ type CartState = {
    * new one.
    */
   holdOrder: (label: string, note?: string, existingId?: string) => void;
-  /** Load a held bill back into the cart and remove it from the open list. */
+  /** Load a held bill back into the cart. The bill stays parked (marked
+   *  resumed) until the cart is charged, re-held, or cleared. */
   resumeHeldOrder: (id: string) => void;
   /** Discard a held bill without paying. */
   discardHeldOrder: (id: string) => void;
+
+  /** Mark an unpaid receipt as settled (money received after the fact). */
+  settleReceipt: (id: string) => void;
+
+  // --- Dine-in table tickets ----------------------------------------------
+  /** Open (or reopen) a table's running ticket as the active cart. */
+  openTableTicket: (tableLabel: string) => void;
+  /** Park the active cart back onto its table ticket and empty the cart. */
+  saveTableTicket: () => void;
+  /** Leave the table: discard its ticket if one is open, then empty the cart. */
+  abandonTableTicket: () => void;
 
   receipts: Receipt[];
   completeSale: (input: {
@@ -271,6 +289,10 @@ type CartFast = {
    * data, not the snapshot frozen into a line when it was first added.
    */
   registerCatalog: (products: Item[]) => void;
+  /** Dine-in table ticket lifecycle (stable identities, ref-backed). */
+  openTableTicket: (tableLabel: string) => void;
+  saveTableTicket: () => void;
+  abandonTableTicket: () => void;
   subscribeToProduct: (productId: string, cb: () => void) => () => void;
   subscribeToCount: (cb: () => void) => () => void;
   subscribeToLine: (lineId: string, cb: () => void) => () => void;
@@ -459,7 +481,95 @@ export function CartProvider({ children }: { children: ReactNode }) {
     [replaceEntries],
   );
 
-  const clear = useCallback(() => replaceEntries({}), [replaceEntries]);
+  const clear = useCallback(() => {
+    // Charging, clearing, or re-holding consumes the ticket that was resumed
+    // into this cart — otherwise an open bill would linger forever after its
+    // items were sold.
+    const res = resumedHeldIdRef.current;
+    if (res) {
+      softDelete("held_orders", res);
+      setHeldOrders((prev) => prev.filter((h) => h.id !== res));
+      resumedHeldIdRef.current = null;
+      tableTagRef.current = null;
+    }
+    replaceEntries({});
+  }, [replaceEntries]);
+
+  // --- Dine-in table tickets (stable identities) ---------------------------
+  /** Load (or start) a table's running ticket as the active cart. */
+  const openTableTicket = useCallback(
+    (label: string) => {
+      const existing = heldOrdersRef.current.find((h) => h.label === label);
+      if (existing) {
+        const marked: HeldOrder = { ...existing, resumedAt: Date.now() };
+        dbPut("held_orders", marked);
+        setHeldOrders((prev) => prev.map((h) => (h.id === existing.id ? marked : h)));
+        const next: Record<string, CartEntry> = {};
+        marked.entries.forEach((e) => {
+          next[e.lineId] = e;
+        });
+        replaceEntries(next);
+        resumedHeldIdRef.current = existing.id;
+      } else {
+        replaceEntries({});
+        resumedHeldIdRef.current = null;
+      }
+      tableTagRef.current = label;
+    },
+    [replaceEntries],
+  );
+
+  /**
+   * Park the active cart back onto its table ticket and empty the cart. Called
+   * when leaving a table with items still on it. An emptied-out ticket is
+   * discarded instead — a table with nothing on it is free.
+   */
+  const saveTableTicket = useCallback(() => {
+    const label = tableTagRef.current;
+    const list = Object.values(entriesRef.current);
+    const res = resumedHeldIdRef.current;
+
+    if (!label || list.length === 0) {
+      if (res) {
+        softDelete("held_orders", res);
+        setHeldOrders((prev) => prev.filter((h) => h.id !== res));
+      }
+      resumedHeldIdRef.current = null;
+      tableTagRef.current = null;
+      replaceEntries({});
+      return;
+    }
+
+    const now = Date.now();
+    const prior = res ? heldOrdersRef.current.find((h) => h.id === res) : undefined;
+    const held: HeldOrder = {
+      id: res ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
+      label,
+      note: prior?.note,
+      entries: list,
+      itemCount: list.reduce((s, e) => s + e.qty, 0),
+      total: summaryRef.current.subtotal + summaryRef.current.taxTotal,
+      currency: list[0]?.item.currency ?? "NGN",
+      createdAt: prior?.createdAt ?? now,
+    };
+    dbPut("held_orders", held);
+    setHeldOrders((prev) => [held, ...prev.filter((h) => h.id !== held.id)]);
+    resumedHeldIdRef.current = null;
+    tableTagRef.current = null;
+    replaceEntries({});
+  }, [replaceEntries]);
+
+  /** Leave the table for good: discard any open ticket and empty the cart. */
+  const abandonTableTicket = useCallback(() => {
+    const res = resumedHeldIdRef.current;
+    if (res) {
+      softDelete("held_orders", res);
+      setHeldOrders((prev) => prev.filter((h) => h.id !== res));
+    }
+    resumedHeldIdRef.current = null;
+    tableTagRef.current = null;
+    replaceEntries({});
+  }, [replaceEntries]);
 
   const fast = useMemo<CartFast>(
     () => ({
@@ -467,6 +577,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
       remove,
       clear,
       registerCatalog,
+      openTableTicket,
+      saveTableTicket,
+      abandonTableTicket,
       subscribeToProduct,
       subscribeToCount,
       subscribeToLine,
@@ -483,6 +596,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
       remove,
       clear,
       registerCatalog,
+      openTableTicket,
+      saveTableTicket,
+      abandonTableTicket,
       subscribeToProduct,
       subscribeToCount,
       subscribeToLine,
@@ -505,6 +621,15 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>(() =>
     loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt),
   );
+
+  // Latest held orders + the ticket currently loaded in the cart, readable
+  // from stable callbacks (table tickets) without re-creating them.
+  const heldOrdersRef = useRef(heldOrders);
+  const resumedHeldIdRef = useRef<string | null>(null);
+  const tableTagRef = useRef<string | null>(null);
+  useEffect(() => {
+    heldOrdersRef.current = heldOrders;
+  }, [heldOrders]);
 
   // Open bills can be created on another till, so refresh after each sync.
   useEffect(() => {
@@ -529,11 +654,20 @@ export function CartProvider({ children }: { children: ReactNode }) {
       add,
       remove,
       clear,
+      openTableTicket,
+      saveTableTicket,
+      abandonTableTicket,
 
       heldOrders,
       holdOrder: (label, note, existingId) => {
         if (list.length === 0) return;
         const now = Date.now();
+        // Editing the resumed bill consumes it; otherwise clear() below
+        // auto-consumes whatever else was resumed (its items moved here).
+        if (existingId && existingId === resumedHeldIdRef.current) {
+          resumedHeldIdRef.current = null;
+        }
+        tableTagRef.current = null;
         const held: HeldOrder = {
           id: existingId ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
           label: label.trim() || "Open bill",
@@ -558,26 +692,65 @@ export function CartProvider({ children }: { children: ReactNode }) {
       resumeHeldOrder: (id) => {
         const held = heldOrders.find((h) => h.id === id);
         if (!held) return;
+        // Mark resumed but KEEP the record until the cart is charged, re-held
+        // or cleared — killing the app mid-edit no longer loses the ticket.
+        const marked: HeldOrder = { ...held, resumedAt: Date.now() };
+        dbPut("held_orders", marked);
+        setHeldOrders((prev) => prev.map((h) => (h.id === id ? marked : h)));
         const next: Record<string, CartEntry> = {};
-        held.entries.forEach((e) => {
+        marked.entries.forEach((e) => {
           next[e.lineId] = e;
         });
         replaceEntries(next);
+        resumedHeldIdRef.current = id;
+        tableTagRef.current = null;
+      },
+      discardHeldOrder: (id) => {
+        if (resumedHeldIdRef.current === id) {
+          resumedHeldIdRef.current = null;
+          tableTagRef.current = null;
+        }
         softDelete("held_orders", id);
         setHeldOrders((prev) => prev.filter((h) => h.id !== id));
       },
-      discardHeldOrder: (id) => {
-        softDelete("held_orders", id);
-        setHeldOrders((prev) => prev.filter((h) => h.id !== id));
+
+      settleReceipt: (id) => {
+        const receipt = receipts.find((r) => r.id === id);
+        if (!receipt || receipt.status === "paid") return;
+        const settled: Receipt = {
+          ...receipt,
+          status: "paid",
+          paidAt: Date.now(),
+        };
+        dbPut("receipts", settled);
+        setReceipts((prev) => prev.map((r) => (r.id === id ? settled : r)));
+        logAudit({
+          action: "receipt.settle",
+          entity: "receipt",
+          entityId: id,
+          summary: `Settled ${receipt.number} · ${formatMoney(receipt.total, receipt.currency)}`,
+        });
       },
 
       receipts,
       completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
         const now = Date.now();
         const settled = status ?? "paid";
+        /**
+         * Invoice number: a per-device tag (1-9, chosen once per install)
+         * prefixes a local sequence. Two tills can therefore never print the
+         * same number for different sales — the old `1000 + length` scheme
+         * collided as soon as two devices' receipt lists merged via sync.
+         */
+        const tagKey = "receipt_tag";
+        let tag = Number(metaGet(tagKey) ?? "") || 0;
+        if (tag < 1 || tag > 9) {
+          tag = 1 + Math.floor(Math.random() * 9);
+          metaSet(tagKey, String(tag));
+        }
         const receipt: Receipt = {
           id: `rcpt_${now}`,
-          number: `#${1000 + receipts.length + 1}`,
+          number: `#${tag}${1000 + receipts.length + 1}`,
           customerName,
           mode,
           status: settled,
@@ -686,5 +859,28 @@ export function useItemQty(productId: string): number {
 export function useCartCount(): number {
   const ctx = useCartActions();
   return useSyncExternalStore(ctx.subscribeToCount, ctx.getCount);
+}
+
+/** Subscribe only when cart lines are added, removed, cleared, or resumed. */
+export function useCartLineIds(): readonly string[] {
+  const ctx = useCartActions();
+  return useSyncExternalStore(ctx.subscribeToLineIds, ctx.getLineIds);
+}
+
+/** Subscribe to one variant-safe cart line, not the entire cart. */
+export function useCartLine(lineId: string): CartEntry | undefined {
+  const ctx = useCartActions();
+  const subscribe = useCallback(
+    (listener: () => void) => ctx.subscribeToLine(lineId, listener),
+    [ctx, lineId],
+  );
+  const getSnapshot = useCallback(() => ctx.getLine(lineId), [ctx, lineId]);
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+/** Subscribe to cached integer-money totals without rebuilding the cart list. */
+export function useCartSummary(): CartSummary {
+  const ctx = useCartActions();
+  return useSyncExternalStore(ctx.subscribeToSummary, ctx.getSummary);
 }
 

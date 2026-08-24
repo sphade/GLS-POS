@@ -12,6 +12,7 @@ import {
   type ChangeRow,
 } from "./db";
 import { API_URL, authCookie } from "./auth-client";
+import { OFFLINE_MODE } from "./offline";
 
 /**
  * Offline-first sync engine.
@@ -476,11 +477,14 @@ export async function syncNow(storeId: string): Promise<number> {
 }
 
 /**
- * Master switch for background sync. OFF by default so the app runs as a pure
- * offline/local demo with zero network calls. Flip it on by setting
- * EXPO_PUBLIC_ENABLE_SYNC=1 once a reachable backend is available.
+ * Master switch for every network path this module exposes (sync, pull, and
+ * the realtime gate downstream). OFF by default so the app runs as a pure
+ * offline/local demo with zero network calls. Enable both of:
+ *   EXPO_PUBLIC_ENABLE_SYNC=1  (and EXPO_PUBLIC_OFFLINE_MODE unset/0)
+ * OFFLINE_MODE always wins — when the backend is stripped, nothing here runs.
  */
-export const SYNC_ENABLED = process.env.EXPO_PUBLIC_ENABLE_SYNC === "1";
+export const SYNC_ENABLED =
+  !OFFLINE_MODE && process.env.EXPO_PUBLIC_ENABLE_SYNC === "1";
 
 /**
  * Start periodic background sync for a store. Returns a stop function.

@@ -5,6 +5,7 @@ import { colors } from "@/constants/theme";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
 import { pullNow, syncNowDetailed } from "@/lib/sync";
+import { OFFLINE_MODE } from "@/lib/offline";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
 
 /**
@@ -20,7 +21,8 @@ export function GlobalRefreshButton() {
   const { store } = useStore();
   const [busy, setBusy] = useState(false);
 
-  if (!signedIn || store.id === "store_unknown" || store.id === "bootstrap") return null;
+  // Offline builds have nothing to refresh from.
+  if (!signedIn || OFFLINE_MODE || store.id === "store_unknown" || store.id === "bootstrap") return null;
 
   const run = async () => {
     if (busy) return;

@@ -19,7 +19,7 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReceiptScreen() {
   const { id, fromSale } = useLocalSearchParams<{ id: string; fromSale?: string }>();
   const router = useRouter();
-  const { receipts } = useCart();
+  const { receipts, settleReceipt } = useCart();
   const { can } = useAuth();
   const [busy, setBusy] = useState(false);
   const receipt = receipts.find((r) => r.id === id);
@@ -116,6 +116,18 @@ export default function ReceiptScreen() {
 
       <ScrollView contentContainerStyle={{ padding: 10, paddingBottom: 24 }}>
         <View style={styles.actionRow}>
+          {/* Settle unpaid receipts (Card/Transfer/Credit print first, pay after). */}
+          {receipt.status === "unpaid" && can("sale:create") && (
+            <Pressable
+              style={[styles.outlineBtn, { borderColor: colors.green }]}
+              onPress={() => {
+                feedbackTap();
+                settleReceipt(receipt.id);
+              }}
+            >
+              <Text style={[styles.outlineBtnText, { color: colors.green }]}>MARK AS PAID</Text>
+            </Pressable>
+          )}
           {can("sale:refund") && (
             <Pressable
               style={[styles.outlineBtn, { borderColor: colors.red500 }]}
@@ -127,6 +139,15 @@ export default function ReceiptScreen() {
             </Pressable>
           )}
         </View>
+
+        {receipt.status === "unpaid" && (
+          <View style={styles.unpaidBanner}>
+            <MaterialCommunityIcons name="clock-alert-outline" size={18} color={colors.red500} />
+            <Text style={styles.unpaidBannerText}>
+              UNPAID · {receipt.mode.toUpperCase()} — customer pays against this receipt
+            </Text>
+          </View>
+        )}
 
         <View style={styles.receiptCard}>
           <Text style={styles.storeName}>{receipt.storeName}</Text>
@@ -242,6 +263,17 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginBottom: 8 },
   outlineBtn: { borderWidth: 1, borderColor: colors.primary, borderRadius: 4, paddingHorizontal: 12, paddingVertical: 6 },
   outlineBtnText: { color: colors.primary, fontWeight: "700", fontSize: 12 },
+  unpaidBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#FDECEA",
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+  },
+  unpaidBannerText: { flex: 1, color: colors.red500, fontWeight: "700", fontSize: 12, letterSpacing: 0.3 },
   receiptCard: { backgroundColor: colors.white, borderRadius: 4, padding: 14, elevation: 2 },
   storeName: { fontSize: 20, fontWeight: "800", color: colors.grey900, textAlign: "center" },
   storeMeta: { fontSize: 13, color: colors.grey600, textAlign: "center", marginTop: 2 },

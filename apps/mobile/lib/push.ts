@@ -3,6 +3,7 @@ import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
 import { API_URL, authCookie } from "./auth-client";
+import { OFFLINE_MODE } from "./offline";
 
 /**
  * Expo push notifications, so staff are alerted to a VIP order even when the
@@ -48,6 +49,8 @@ async function ensureAndroidChannel(): Promise<void> {
  */
 export async function registerForPush(storeId: string): Promise<string | null> {
   try {
+    // Offline builds have no server to register against.
+    if (OFFLINE_MODE) return null;
     // Push tokens are not issued to simulators/emulators.
     if (!Device.isDevice) return null;
 
@@ -88,6 +91,7 @@ export async function registerForPush(storeId: string): Promise<string | null> {
 /** Stop alerts for this device (called on sign-out). */
 export async function unregisterPush(): Promise<void> {
   try {
+    if (OFFLINE_MODE) return;
     const id = projectId();
     if (!id || !Device.isDevice) return;
     const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId: id });
@@ -105,6 +109,7 @@ export async function unregisterPush(): Promise<void> {
 
 /** Ask the server to send this store's devices a test alert. */
 export async function sendTestPush(storeId: string): Promise<number> {
+  if (OFFLINE_MODE) return 0;
   const cookie = authCookie();
   if (!cookie) return 0;
   const res = await fetch(`${API_URL}/api/push/test`, {

@@ -27,15 +27,27 @@ export default function ChargeScreen() {
   const { total, entries, completeSale } = useCart();
   const { recordSale } = useCatalog();
   const { store } = useStore();
-  const { user } = useAuth();
+  const { can, user } = useAuth();
+  const canSell = can("sale:create");
   const [mode, setMode] = useState<string | null>(null);
-  const [phone, setPhone] = useState("");
   const [name, setName] = useState("");
-  const [showMore, setShowMore] = useState(false);
-  const [email, setEmail] = useState("");
-  const [address, setAddress] = useState("");
 
-  const selectedMode = MODES.find((m) => m.key === mode);
+  if (!canSell) {
+    return (
+      <SafeAreaView edges={["top"]} style={styles.root}>
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} style={styles.headerBtn}>
+            <Ionicons name="arrow-back" size={24} color={colors.white} />
+          </Pressable>
+          <Text style={styles.headerTitle}>{strings.charge}</Text>
+          <View style={styles.headerBtn} />
+        </View>
+        <Text style={styles.blockedText}>
+          Your role isn't allowed to take payment. Ask an owner or manager for access.
+        </Text>
+      </SafeAreaView>
+    );
+  }
 
   const onCharge = () => {
     if (!mode) return;
@@ -74,55 +86,13 @@ export default function ChargeScreen() {
       <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
         <Text style={styles.sectionTitle}>{strings.customerDetailsOptional.toUpperCase()}</Text>
         <View style={styles.card}>
-          <View style={styles.phoneRow}>
-            <TextInput style={styles.codeInput} value="+234" editable={false} />
-            <TextInput
-              style={styles.input}
-              placeholder="Mobile Number"
-              placeholderTextColor={colors.hint}
-              keyboardType="phone-pad"
-              value={phone}
-              onChangeText={setPhone}
-            />
-            <Pressable style={styles.findBtn} onPress={feedbackTap}>
-              <Ionicons name="search" size={20} color={colors.white} />
-            </Pressable>
-          </View>
           <TextInput
             style={styles.input}
-            placeholder="Customer name"
+            placeholder="Customer name (optional)"
             placeholderTextColor={colors.hint}
             value={name}
             onChangeText={setName}
           />
-          {showMore && (
-            <>
-              <TextInput
-                style={styles.input}
-                placeholder="Email"
-                placeholderTextColor={colors.hint}
-                keyboardType="email-address"
-                value={email}
-                onChangeText={setEmail}
-              />
-              <TextInput
-                style={styles.input}
-                placeholder="Address"
-                placeholderTextColor={colors.hint}
-                value={address}
-                onChangeText={setAddress}
-              />
-            </>
-          )}
-          <Pressable
-            style={styles.moreToggle}
-            onPress={() => {
-              feedbackTap();
-              setShowMore((v) => !v);
-            }}
-          >
-            <Ionicons name={showMore ? "chevron-up" : "chevron-down"} size={22} color={colors.primary} />
-          </Pressable>
         </View>
 
         <Text style={styles.sectionTitle}>{strings.selectPaymentMode}</Text>
@@ -226,4 +196,13 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   chargeText: { color: colors.white, fontSize: 18, fontWeight: "700" },
+
+  blockedText: {
+    flex: 1,
+    textAlign: "center",
+    textAlignVertical: "center",
+    paddingHorizontal: 32,
+    color: colors.grey600,
+    fontSize: 15,
+  },
 });

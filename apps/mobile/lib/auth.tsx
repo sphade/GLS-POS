@@ -6,6 +6,7 @@ import { api } from "./api";
 import { setAuditActor } from "./audit";
 import { unregisterPush } from "./push";
 import { metaGet, metaSet } from "./db";
+import { LOCAL_STORE_ID, LOCAL_STORE_MEMBERSHIP, LOCAL_USER, OFFLINE_MODE } from "./offline";
 
 /**
  * Session + role/permission state for the whole app.
@@ -75,10 +76,14 @@ const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
-  const [user, setUser] = useState<User | null>(null);
-  const [stores, setStores] = useState<StoreMembership[]>([]);
-  const [storesStatus, setStoresStatus] = useState<StoresStatus>("pending");
-  const [activeStoreId, setActiveStoreId] = useState<string | null>(() => metaGet(ACTIVE_STORE_KEY));
+  const [user, setUser] = useState<User | null>(OFFLINE_MODE ? LOCAL_USER : null);
+  const [stores, setStores] = useState<StoreMembership[]>(
+    OFFLINE_MODE ? [LOCAL_STORE_MEMBERSHIP] : [],
+  );
+  const [storesStatus, setStoresStatus] = useState<StoresStatus>(OFFLINE_MODE ? "ok" : "pending");
+  const [activeStoreId, setActiveStoreId] = useState<string | null>(() =>
+    OFFLINE_MODE ? LOCAL_STORE_ID : metaGet(ACTIVE_STORE_KEY),
+  );
 
   /**
    * Pull the session + store list from the server. Safe to call any time.
@@ -90,6 +95,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * arrived.
    */
   const refresh = useCallback(async () => {
+    // Offline builds have no server: the synthetic owner session is final.
+    if (OFFLINE_MODE) {
+      setUser(LOCAL_USER);
+      setStores([LOCAL_STORE_MEMBERSHIP]);
+      setStoresStatus("ok");
+      return;
+    }
     try {
       // No cookie yet => definitely signed out; skip the round-trip.
       if (!authCookie()) {
@@ -165,6 +177,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       canManageBusiness: stores.length === 0 || stores.some((s) => s.role === "owner"),
 
       signIn: async (identifier, password) => {
+        // Offline builds: already signed in as the local owner; nothing to do.
+        if (OFFLINE_MODE) return { ok: true };
         const id = identifier.trim().toLowerCase();
         const client = authClient as unknown as {
           signIn: { username: (i: { username: string; password: string }) => Promise<AuthResult> };
@@ -185,6 +199,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
 
       signUp: async (name, username, password) => {
+        if (OFFLINE_MODE) return { ok: true };
         // better-auth needs an email internally; staff never see or use it.
         const handle = username.trim().toLowerCase();
         const res = await authClient.signUp.email({
@@ -200,6 +215,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
 
       signOut: async () => {
+        // Offline builds have no session to end; stay in the local POS.
+        if (OFFLINE_MODE) return;
         // Stop alerts for this device first, while the session cookie is valid.
         await unregisterPush();
         await authClient.signOut();
@@ -214,6 +231,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
 
       createStore: async (name) => {
+        if (OFFLINE_MODE) return { ok: true };
         const res = await api.createStore({ name, currency: "NGN" });
         if (!res.ok) return { ok: false, error: res.error.message };
         await refresh();

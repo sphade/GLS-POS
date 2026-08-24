@@ -65,9 +65,7 @@ export default function CashPaymentScreen() {
           <Ionicons name="arrow-back" size={24} color={colors.white} />
         </Pressable>
         <Text style={styles.headerTitle}>Cash</Text>
-        <Pressable style={styles.headerBtn} onPress={feedbackTap}>
-          <Ionicons name="document-text-outline" size={22} color={colors.white} />
-        </Pressable>
+        <View style={styles.headerBtn} />
       </View>
 
       <View style={styles.amountCard}>

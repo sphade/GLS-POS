@@ -80,6 +80,7 @@ export default function ItemsScreen() {
   const { products, categories } = useCatalog();
   const { can } = useAuth();
   const canEditCatalog = can("catalog:write");
+  const canSell = can("sale:create");
   const [query, setQuery] = useState("");
   const [isGrid, setIsGrid] = useState(true);
   /** Item whose variant sheet is open. The sheet both adds and removes. */
@@ -187,6 +188,10 @@ export default function ItemsScreen() {
 
   /** Checkbox toggle: add one of each simple item, or clear them all out. */
   const toggleSection = (section: ItemSection) => {
+    if (!canSell) {
+      feedbackError();
+      return;
+    }
     const sellable = sellableOf(section);
     if (sellable.length === 0) {
       feedbackError();
@@ -204,6 +209,10 @@ export default function ItemsScreen() {
   };
 
   const onAdd = (item: Item) => {
+    if (!canSell) {
+      feedbackError();
+      return;
+    }
     if (!itemAvailable(item)) {
       feedbackError();
       return;
@@ -219,7 +228,7 @@ export default function ItemsScreen() {
 
   /** Long-press removes one simple item, or reopens the variant sheet. */
   const onRemove = (item: Item) => {
-    if (getQtyOf(item.id) === 0) return;
+    if (!canSell || getQtyOf(item.id) === 0) return;
     feedbackTap();
     if (hasVariants(item)) {
       setChooser(item);

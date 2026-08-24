@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { AppState, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -67,7 +67,11 @@ export default function TodayScreen() {
 
   useEffect(() => onSynced(refreshPending), []);
   useEffect(() => {
-    const t = setInterval(refreshPending, 4000);
+    // Foreground-only, like every other poll in the app.
+    const t = setInterval(() => {
+      if (AppState.currentState !== "active") return;
+      refreshPending();
+    }, 4000);
     return () => clearInterval(t);
   }, []);
 

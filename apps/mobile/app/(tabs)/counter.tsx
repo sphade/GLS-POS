@@ -1,10 +1,4 @@
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { memo, useEffect, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -25,35 +19,15 @@ import {
   displayItemName,
   useCart,
   useCartActions,
-  type CartEntry,
-  type CartSummary,
+  useCartCount,
+  useCartLine,
+  useCartLineIds,
+  useCartSummary,
 } from "@/lib/cart";
+import { useAuth } from "@/lib/auth";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 type EditingBill = { id: string; label: string };
-
-/** Subscribe only when cart lines are added, removed, cleared, or resumed. */
-function useCartLineIdsSnapshot(): readonly string[] {
-  const cart = useCartActions();
-  return useSyncExternalStore(cart.subscribeToLineIds, cart.getLineIds);
-}
-
-/** Subscribe to one variant-safe cart line, not the entire cart. */
-function useCartLineSnapshot(lineId: string): CartEntry | undefined {
-  const cart = useCartActions();
-  const subscribe = useCallback(
-    (listener: () => void) => cart.subscribeToLine(lineId, listener),
-    [cart, lineId],
-  );
-  const getSnapshot = useCallback(() => cart.getLine(lineId), [cart, lineId]);
-  return useSyncExternalStore(subscribe, getSnapshot);
-}
-
-/** Subscribe to cached integer-money totals without rebuilding the cart list. */
-function useCartSummarySnapshot(): CartSummary {
-  const cart = useCartActions();
-  return useSyncExternalStore(cart.subscribeToSummary, cart.getSummary);
-}
 
 /**
  * Counter (billing) tab.
@@ -63,7 +37,7 @@ function useCartSummarySnapshot(): CartSummary {
  * and the two tiny summary consumers update themselves directly.
  */
 export default function CounterScreen() {
-  const lineIds = useCartLineIdsSnapshot();
+  const lineIds = useCartLineIds();
   const [editing, setEditing] = useState<EditingBill | null>(null);
 
   useEffect(() => {
@@ -92,12 +66,40 @@ function EmptyCounter({
   onResumeEditing: (bill: EditingBill | null) => void;
 }) {
   const router = useRouter();
+  const { can } = useAuth();
+  const canSell = can("sale:create");
+  const canExpense = can("expenses:manage");
+  const cartCount = useCartCount();
   const { heldOrders, resumeHeldOrder, discardHeldOrder } = useCart();
 
   const onResume = (id: string) => {
+    feedbackTap();
+    /**
+     * Resuming loads the bill into the shared active cart. If the cashier
+     * already built an order, replacing it silently would destroy work — ask
+     * first.
+     */
+    if (cartCount > 0) {
+      Alert.alert(
+        "Replace current order?",
+        "Your current cart will be replaced by this open bill.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Replace",
+            style: "destructive",
+            onPress: () => {
+              const bill = heldOrders.find((candidate) => candidate.id === id);
+              if (bill) onResumeEditing({ id: bill.id, label: bill.label });
+              resumeHeldOrder(id);
+            },
+          },
+        ],
+      );
+      return;
+    }
     const bill = heldOrders.find((candidate) => candidate.id === id);
     if (bill) onResumeEditing({ id: bill.id, label: bill.label });
-    feedbackTap();
     resumeHeldOrder(id);
   };
 
@@ -110,31 +112,35 @@ function EmptyCounter({
 
   return (
     <ScrollView contentContainerStyle={{ padding: 8 }}>
-      <Pressable
-        style={styles.actionCard}
-        onPress={() => {
-          router.navigate("/(tabs)");
-          feedbackTap();
-        }}
-        android_ripple={{ color: "#00000010" }}
-      >
-        <View style={styles.plusCircle}>
-          <Ionicons name="add" size={26} color={colors.white} />
-        </View>
-        <Text style={styles.actionTitle}>NEW ORDER</Text>
-      </Pressable>
+      {canSell && (
+        <Pressable
+          style={styles.actionCard}
+          onPress={() => {
+            router.navigate("/(tabs)");
+            feedbackTap();
+          }}
+          android_ripple={{ color: "#00000010" }}
+        >
+          <View style={styles.plusCircle}>
+            <Ionicons name="add" size={26} color={colors.white} />
+          </View>
+          <Text style={styles.actionTitle}>NEW ORDER</Text>
+        </Pressable>
+      )}
 
-      <Pressable
-        style={styles.expenseCard}
-        onPress={() => {
-          router.push("/expense-categories");
-          feedbackTap();
-        }}
-        android_ripple={{ color: "#00000010" }}
-      >
-        <MaterialCommunityIcons name="hand-coin" size={26} color={colors.green} />
-        <Text style={styles.expenseTitle}>ADD NEW EXPENSE</Text>
-      </Pressable>
+      {canExpense && (
+        <Pressable
+          style={styles.expenseCard}
+          onPress={() => {
+            router.push("/expense-categories");
+            feedbackTap();
+          }}
+          android_ripple={{ color: "#00000010" }}
+        >
+          <MaterialCommunityIcons name="hand-coin" size={26} color={colors.green} />
+          <Text style={styles.expenseTitle}>ADD NEW EXPENSE</Text>
+        </Pressable>
+      )}
 
       {heldOrders.length > 0 && (
         <>
@@ -185,19 +191,26 @@ function ActiveCounter({
   editing: EditingBill | null;
   onEditingChange: (bill: EditingBill | null) => void;
 }) {
+  const { can } = useAuth();
+  const canSell = can("sale:create");
+
   return (
     <>
-      <BillHeader editing={editing} onEditingChange={onEditingChange} />
+      <BillHeader editing={editing} onEditingChange={onEditingChange} canSell={canSell} />
 
       <FlatList
         data={lineIds}
         keyExtractor={(lineId) => lineId}
         contentContainerStyle={{ padding: 8, paddingBottom: 8 }}
-        renderItem={({ item: lineId }) => <CartLineRow lineId={lineId} />}
+        renderItem={({ item: lineId }) => (
+          <CartLineRow lineId={lineId} editable={canSell} />
+        )}
       />
 
-      <CounterTotals />
-      <CounterActions editing={editing} onEditingChange={onEditingChange} />
+      {/* Money is hidden from roles without selling rights (kitchen), matching
+          how the Reports/Today tabs are hidden without reports:view. */}
+      {canSell && <CounterTotals />}
+      {canSell && <CounterActions editing={editing} onEditingChange={onEditingChange} />}
     </>
   );
 }
@@ -205,11 +218,13 @@ function ActiveCounter({
 function BillHeader({
   editing,
   onEditingChange,
+  canSell,
 }: {
   editing: EditingBill | null;
   onEditingChange: (bill: EditingBill | null) => void;
+  canSell: boolean;
 }) {
-  const { count } = useCartSummarySnapshot();
+  const { count } = useCartSummary();
   const { clear } = useCartActions();
 
   return (
@@ -217,21 +232,29 @@ function BillHeader({
       <Text style={styles.billHeaderText}>
         {editing ? `Editing: ${editing.label}` : `${count} item(s)`}
       </Text>
-      <Pressable
-        onPress={() => {
-          clear();
-          onEditingChange(null);
-          feedbackTap();
-        }}
-      >
-        <Text style={styles.clear}>CLEAR</Text>
-      </Pressable>
+      {canSell && (
+        <Pressable
+          onPress={() => {
+            clear();
+            onEditingChange(null);
+            feedbackTap();
+          }}
+        >
+          <Text style={styles.clear}>CLEAR</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
 
-const CartLineRow = memo(function CartLineRow({ lineId }: { lineId: string }) {
-  const entry = useCartLineSnapshot(lineId);
+const CartLineRow = memo(function CartLineRow({
+  lineId,
+  editable,
+}: {
+  lineId: string;
+  editable: boolean;
+}) {
+  const entry = useCartLine(lineId);
   const { add, remove } = useCartActions();
   if (!entry) return null;
 
@@ -242,27 +265,31 @@ const CartLineRow = memo(function CartLineRow({ lineId }: { lineId: string }) {
         <Text style={styles.name}>{displayItemName(entry.item.name, entry.variant?.name)}</Text>
         <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)}</Text>
       </View>
-      <View style={styles.stepper}>
-        <Pressable
-          style={[styles.stepBtn, styles.stepMinus]}
-          onPress={() => {
-            remove(lineId);
-            feedbackTap();
-          }}
-        >
-          <Ionicons name="remove" size={22} color={colors.white} />
-        </Pressable>
-        <Text style={styles.qty}>{entry.qty}</Text>
-        <Pressable
-          style={[styles.stepBtn, styles.stepPlus]}
-          onPress={() => {
-            add(entry.item, entry.variant);
-            feedbackAddItem();
-          }}
-        >
-          <Ionicons name="add" size={22} color={colors.white} />
-        </Pressable>
-      </View>
+      {editable ? (
+        <View style={styles.stepper}>
+          <Pressable
+            style={[styles.stepBtn, styles.stepMinus]}
+            onPress={() => {
+              remove(lineId);
+              feedbackTap();
+            }}
+          >
+            <Ionicons name="remove" size={22} color={colors.white} />
+          </Pressable>
+          <Text style={styles.qty}>{entry.qty}</Text>
+          <Pressable
+            style={[styles.stepBtn, styles.stepPlus]}
+            onPress={() => {
+              add(entry.item, entry.variant);
+              feedbackAddItem();
+            }}
+          >
+            <Ionicons name="add" size={22} color={colors.white} />
+          </Pressable>
+        </View>
+      ) : (
+        <Text style={[styles.qty, { minWidth: 40 }]}>x{entry.qty}</Text>
+      )}
       <Text style={styles.lineTotal}>
         {formatMoney(unitPrice * entry.qty, entry.item.currency)}
       </Text>
@@ -271,7 +298,7 @@ const CartLineRow = memo(function CartLineRow({ lineId }: { lineId: string }) {
 });
 
 function CounterTotals() {
-  const { subtotal, taxTotal, total } = useCartSummarySnapshot();
+  const { subtotal, taxTotal, total } = useCartSummary();
   return (
     <View style={styles.totalsCard}>
       <TotalRow label={strings.subtotal} value={formatMoney(subtotal)} />

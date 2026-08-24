@@ -1,4 +1,4 @@
-﻿import { useMemo, useRef, useState } from "react";
+﻿import { memo, useMemo, useRef, useState } from "react";
 import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -16,27 +16,39 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { VariantChooser } from "@/components/VariantChooser";
 import {
-  cartLineKey,
+  displayItemName,
   hasVariants,
   itemAvailable,
   itemDisplayPrice,
-  useCart,
+  useCartActions,
+  useCartCount,
+  useCartLine,
+  useCartLineIds,
+  useItemQty,
   type Item,
 } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 const CURRENT = "CURRENT ORDER";
 
 /**
- * Order-taking screen reached after picking a table (SELECT CATEGORY).
- * Tabs: CURRENT ORDER first, then one per category. Swipe or tap to switch.
- * Tapping a row adds one; the trailing "x N" shows the running quantity.
+ * Order-taking screen reached after picking a table (SELECT CATEGORY). Tabs:
+ * CURRENT ORDER first, then one per category. Swipe or tap to switch.
+ *
+ * Like the Items grid and Counter, this screen never subscribes to the whole
+ * cart: each row tracks its own quantity, the CURRENT ORDER page tracks the
+ * line list, and the review bar tracks the count — so a tap re-renders only
+ * what changed.
+ *
+ * The table parameter is real state, not decoration: opening a table loads
+ * its running ticket into the cart, and leaving with items parks them back
+ * onto the same ticket (see openTableTicket/saveTableTicket in lib/cart).
  */
 export default function TakeOrderScreen() {
   const router = useRouter();
   const { table } = useLocalSearchParams<{ table?: string }>();
-  const { add, remove, qtyOf, count } = useCart();
   const { products, categories } = useCatalog();
   const { width } = useWindowDimensions();
   const pagerRef = useRef<ScrollView>(null);
@@ -52,10 +64,9 @@ export default function TakeOrderScreen() {
   const pages = useMemo(() => {
     const q = query.trim().toLowerCase();
     const match = (i: Item) => (q ? i.name.toLowerCase().includes(q) : true);
-    const inOrder = products.filter((i) => qtyOf(i.id) > 0 && match(i));
     const byCategory = categories.map((c) => products.filter((i) => i.categoryId === c.id && match(i)));
-    return [inOrder, ...byCategory];
-  }, [query, qtyOf, products, categories]);
+    return [products.filter(match), ...byCategory];
+  }, [query, products, categories]);
 
   const onMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const i = Math.round(e.nativeEvent.contentOffset.x / width);
@@ -71,37 +82,11 @@ export default function TakeOrderScreen() {
     pagerRef.current?.scrollTo({ x: i * width, animated: true });
   };
 
-  const onAdd = (item: Item) => {
-    if (!itemAvailable(item)) {
-      feedbackError();
-      return;
-    }
-    if (hasVariants(item)) {
-      feedbackTap();
-      setChooser(item);
-      return;
-    }
-    feedbackAddItem();
-    add(item);
-  };
-
-  const onRemove = (item: Item) => {
-    if (qtyOf(item.id) === 0) return;
-    feedbackTap();
-    if (hasVariants(item)) {
-      setChooser(item);
-      return;
-    }
-    remove(cartLineKey(item.id));
-  };
-
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       {/* Toolbar */}
       <View style={styles.toolbar}>
-        <Pressable onPress={() => router.back()} style={styles.toolbarBtn} hitSlop={8}>
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </Pressable>
+        <LeaveTableButton table={table} onBack={() => router.back()} />
 
         {searching ? (
           <TextInput
@@ -114,7 +99,7 @@ export default function TakeOrderScreen() {
           />
         ) : (
           <Pressable style={styles.titleWrap} onPress={() => goTo(index)}>
-            <Text style={styles.title}>SELECT CATEGORY</Text>
+            <Text style={styles.title}>{table ? table.toUpperCase() : "SELECT CATEGORY"}</Text>
             <Ionicons name="caret-down" size={14} color={colors.primary} />
           </Pressable>
         )}
@@ -160,40 +145,21 @@ export default function TakeOrderScreen() {
         contentOffset={{ x: width, y: 0 }}
         style={{ flex: 1 }}
       >
+        <View style={{ width }}>
+          <CurrentOrderPage onChoose={setChooser} />
+        </View>
         {pages.map((items, i) => (
-          <View key={tabs[i]} style={{ width }}>
+          <View key={tabs[i + 1]} style={{ width }}>
             {items.length === 0 ? (
               <View style={styles.emptyWrap}>
                 <Ionicons name="basket-outline" size={54} color={colors.grey400} />
-                <Text style={styles.emptyText}>
-                  {i === 0 ? "No items in this order yet" : "No items in this category"}
-                </Text>
+                <Text style={styles.emptyText}>No items in this category</Text>
               </View>
             ) : (
               <ScrollView contentContainerStyle={{ padding: 8, paddingBottom: 90 }}>
-                {items.map((item) => {
-                  const qty = qtyOf(item.id);
-                  const available = itemAvailable(item);
-                  const displayPrice = itemDisplayPrice(item);
-                  return (
-                    <Pressable
-                      key={item.id}
-                      style={[styles.itemRow, !available && styles.itemRowUnavailable]}
-                      onPress={() => onAdd(item)}
-                      onLongPress={() => onRemove(item)}
-                      android_ripple={{ color: "#00000010" }}
-                    >
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.itemName}>{item.name}</Text>
-                        <Text style={styles.itemPrice}>
-                          {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
-                          {!available ? " · Out of stock" : ""}
-                        </Text>
-                      </View>
-                      <Text style={[styles.itemQty, qty > 0 && { color: colors.primary }]}>x {qty}</Text>
-                    </Pressable>
-                  );
-                })}
+                {items.map((item) => (
+                  <CatalogRow key={item.id} item={item} onChoose={setChooser} />
+                ))}
               </ScrollView>
             )}
           </View>
@@ -203,17 +169,191 @@ export default function TakeOrderScreen() {
       <VariantChooser item={chooser} visible={!!chooser} onClose={() => setChooser(null)} />
 
       {/* Review order */}
-      <Pressable
-        style={[styles.reviewBtn, count === 0 && { opacity: 0.5 }]}
-        disabled={count === 0}
-        onPress={() => {
-          feedbackTap();
-          router.push("/counter");
-        }}
-      >
-        <Text style={styles.reviewText}>REVIEW ORDER</Text>
-      </Pressable>
+      <ReviewBar />
     </SafeAreaView>
+  );
+}
+
+/** Add-to-cart with variant routing; every caller shares the permission gate. */
+function useAddToCart(onChoose: (item: Item) => void) {
+  const { can } = useAuth();
+  const canSell = can("sale:create");
+  const { add } = useCartActions();
+
+  return (item: Item) => {
+    if (!canSell) {
+      feedbackError();
+      return;
+    }
+    if (!itemAvailable(item)) {
+      feedbackError();
+      return;
+    }
+    if (hasVariants(item)) {
+      feedbackTap();
+      onChoose(item);
+      return;
+    }
+    feedbackAddItem();
+    add(item);
+  };
+}
+
+const CatalogRow = memo(function CatalogRow({
+  item,
+  onChoose,
+}: {
+  item: Item;
+  onChoose: (item: Item) => void;
+}) {
+  const qty = useItemQty(item.id);
+  const { can } = useAuth();
+  const canSell = can("sale:create");
+  const { remove } = useCartActions();
+  const addToCart = useAddToCart(onChoose);
+
+  const available = itemAvailable(item);
+  const displayPrice = itemDisplayPrice(item);
+
+  const onRemove = () => {
+    if (!canSell || !available || qty === 0 || hasVariants(item)) return;
+    feedbackTap();
+    remove(`${item.id}`);
+  };
+
+  return (
+    <Pressable
+      style={[styles.itemRow, !available && styles.itemRowUnavailable]}
+      onPress={() => addToCart(item)}
+      onLongPress={onRemove}
+      android_ripple={{ color: "#00000010" }}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={styles.itemName}>{item.name}</Text>
+        <Text style={styles.itemPrice}>
+          {hasVariants(item) ? "From " : ""}
+          {formatMoney(displayPrice, item.currency)}
+          {!available ? " · Out of stock" : ""}
+        </Text>
+      </View>
+      <Text style={[styles.itemQty, qty > 0 && { color: colors.primary }]}>x {qty}</Text>
+    </Pressable>
+  );
+});
+
+/** The CURRENT ORDER page: one live row per cart line. */
+function CurrentOrderPage({ onChoose }: { onChoose: (item: Item) => void }) {
+  const lineIds = useCartLineIds();
+
+  if (lineIds.length === 0) {
+    return (
+      <View style={styles.emptyWrap}>
+        <Ionicons name="basket-outline" size={54} color={colors.grey400} />
+        <Text style={styles.emptyText}>No items in this order yet</Text>
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 8, paddingBottom: 90 }}>
+      {lineIds.map((lineId) => (
+        <OrderLineRow key={lineId} lineId={lineId} onChoose={onChoose} />
+      ))}
+    </ScrollView>
+  );
+}
+
+const OrderLineRow = memo(function OrderLineRow({
+  lineId,
+  onChoose,
+}: {
+  lineId: string;
+  onChoose: (item: Item) => void;
+}) {
+  const entry = useCartLine(lineId);
+  const addToCart = useAddToCart(onChoose);
+  const { can } = useAuth();
+  const canSell = can("sale:create");
+  const { remove } = useCartActions();
+
+  if (!entry) return null;
+
+  return (
+    <Pressable
+      style={styles.itemRow}
+      onPress={() => addToCart(entry.item)}
+      onLongPress={canSell ? () => remove(lineId) : undefined}
+      delayLongPress={250}
+      android_ripple={{ color: "#00000010" }}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={styles.itemName}>{displayItemName(entry.item.name, entry.variant?.name)}</Text>
+        <Text style={styles.itemPrice}>
+          {formatMoney((entry.variant?.price ?? entry.item.price) * entry.qty, entry.item.currency)}
+        </Text>
+      </View>
+      <Text style={[styles.itemQty, { color: colors.primary }]}>x {entry.qty}</Text>
+    </Pressable>
+  );
+});
+
+/**
+ * Toolbar back button that parks the table ticket on the way out: items stay
+ * on the table's running bill; an emptied bill frees the table. Without a
+ * table (deep link) it simply goes back and leaves the cart alone.
+ */
+function LeaveTableButton({
+  table,
+  onBack,
+}: {
+  table?: string;
+  onBack: () => void;
+}) {
+  const count = useCartCount();
+  const { saveTableTicket, abandonTableTicket } = useCartActions();
+
+  const leave = () => {
+    feedbackTap();
+    if (table) {
+      if (count > 0) saveTableTicket();
+      else abandonTableTicket();
+    }
+    onBack();
+  };
+
+  return (
+    <Pressable onPress={leave} style={styles.toolbarBtn} hitSlop={8}>
+      <Ionicons name="arrow-back" size={24} color={colors.primary} />
+    </Pressable>
+  );
+}
+
+/** Review bar; subscribes to the count so taps elsewhere don't rerender it. */
+function ReviewBar() {
+  const router = useRouter();
+  const { can } = useAuth();
+  const count = useCartCount();
+  const canSell = can("sale:create");
+
+  if (!canSell) {
+    return (
+      <View style={[styles.reviewBtn, { backgroundColor: colors.grey300 }]}>
+        <Text style={[styles.reviewText, { color: colors.grey600 }]}>SALES NOT ENABLED FOR YOUR ROLE</Text>
+      </View>
+    );
+  }
+
+  return (
+    <Pressable
+      style={[styles.reviewBtn, count === 0 && { opacity: 0.5 }]}
+      disabled={count === 0}
+      onPress={() => {
+        feedbackTap();
+        router.push("/counter");
+      }}
+    >
+      <Text style={styles.reviewText}>REVIEW ORDER{count > 0 ? ` (${count})` : ""}</Text>
+    </Pressable>
   );
 }
 
@@ -266,4 +406,3 @@ const styles = StyleSheet.create({
   },
   reviewText: { color: colors.white, fontSize: 17, fontWeight: "700", letterSpacing: 0.5 },
 });
-

@@ -3,6 +3,7 @@ import { startAutoSync } from "./sync";
 import { startRealtime } from "./realtime";
 import { registerForPush } from "./push";
 import { useAuth } from "./auth";
+import { OFFLINE_MODE } from "./offline";
 
 export type Store = {
   id: string;
@@ -58,18 +59,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     );
   }, [activeStore, stores]);
 
+  // Offline builds mount none of the network machinery at all.
   // Offline-first background sync for the active store. No-ops when sync is
   // disabled or there's no session, so the POS keeps working from local data.
-  useEffect(() => startAutoSync(store.id), [store.id]);
+  useEffect(() => {
+    if (OFFLINE_MODE) return;
+    return startAutoSync(store.id);
+  }, [store.id]);
 
   // Realtime channel on top of polling: the server pushes a nudge the moment
   // anything changes, so VIP orders land in ~1s. Polling remains the safety net.
-  useEffect(() => startRealtime(store.id), [store.id]);
+  useEffect(() => {
+    if (OFFLINE_MODE) return;
+    return startRealtime(store.id);
+  }, [store.id]);
 
   // Register this device for push, so a locked phone still gets alerted.
   // Silently no-ops on simulators or without an EAS project id.
   useEffect(() => {
-    if (store.id === "store_unknown") return;
+    if (OFFLINE_MODE || store.id === "store_unknown") return;
     void registerForPush(store.id);
   }, [store.id]);
 
