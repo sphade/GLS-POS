@@ -4,7 +4,7 @@ import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
 import { ITEM_IMAGES } from "./item-images";
 import { loadImageIds, saveImage } from "./image-store";
 import { logAudit } from "./audit";
-import { SYNC_ENABLED } from "./sync";
+import { SYNC_ENABLED, onSynced } from "./sync";
 import {
   getActiveStore,
   loadAll,
@@ -288,6 +288,22 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [tables, setTables] = useState<Table[]>(() => loadAll<Table>("tables"));
   const [customers, setCustomers] = useState<Customer[]>(() => loadAll<Customer>("customers"));
   const [staff, setStaff] = useState<StaffMember[]>(() => loadAll<StaffMember>("staff"));
+
+  // Re-read all local collections whenever sync pushes or pulls data, so the
+  // UI always reflects the current server truth — even on first install where
+  // the provider mounts before the initial pull completes.
+  useEffect(() => {
+    if (!SYNC_ENABLED) return;
+    return onSynced(() => {
+      setProducts(loadAll<Item>("products"));
+      setCategories(loadAll<Category>("categories"));
+      setModifiers(loadAll<ModifierGroup>("modifiers"));
+      setIngredients(loadAll<Ingredient>("ingredients"));
+      setTables(loadAll<Table>("tables"));
+      setCustomers(loadAll<Customer>("customers"));
+      setStaff(loadAll<StaffMember>("staff"));
+    });
+  }, []);
 
   /**
    * One-time image hydration for the seeded menu: download each photo and store

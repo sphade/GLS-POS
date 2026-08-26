@@ -22,13 +22,13 @@ export function SyncStatusBar() {
 
   // The engine fires many sub-second jobs (heartbeat pulls, tab-switch
   // deltas). Showing the bar for those reads as "perpetually syncing".
-  // Only surface it when work persists past 700ms — i.e., real transfers.
+  // Only surface it when work persists past 1.5s — i.e., real transfers.
   useEffect(() => {
     if (!activity.busy) {
       setShowBusy(false);
       return;
     }
-    const t = setTimeout(() => setShowBusy(true), 700);
+    const t = setTimeout(() => setShowBusy(true), 1500);
     return () => clearTimeout(t);
   }, [activity.busy]);
 
