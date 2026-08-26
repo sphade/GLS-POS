@@ -4,6 +4,8 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import { colors } from "@/constants/theme";
 import { useCartCount } from "@/lib/cart";
+import { quietPull } from "@/lib/sync";
+import { useStore } from "@/lib/store";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -43,6 +45,7 @@ const TABS: Record<string, TabMeta> = {
 export function PosTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const count = useCartCount();
+  const { store } = useStore();
 
   return (
     <View style={[styles.bar, { height: 58 + insets.bottom }]}>
@@ -63,6 +66,9 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
             android_ripple={{ color: focused ? "#FFFFFF22" : "#5AA02C22", borderless: false }}
             onPress={() => {
               feedbackTap();
+              // Every tab switch quietly checks the server for deltas from
+              // other devices — local data renders instantly either way.
+              quietPull(store.id);
               const event = navigation.emit({
                 type: "tabPress",
                 target: route.key,

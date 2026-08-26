@@ -1,5 +1,5 @@
 ﻿import { useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
@@ -8,6 +8,8 @@ import { PosHeader } from "@/components/PosHeader";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { useStore } from "@/lib/store";
+import { useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 
 const CURRENCY = "NGN";
@@ -79,6 +81,8 @@ export default function ReportsScreen() {
   const router = useRouter();
   const { receipts } = useCart();
   const { products } = useCatalog();
+  const { store } = useStore();
+  const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [rangeIndex, setRangeIndex] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const range = RANGES[rangeIndex]!;
@@ -178,7 +182,12 @@ export default function ReportsScreen() {
           <EmptyState text="No sales in this period" />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <ScrollView
+          contentContainerStyle={{ paddingBottom: 24 }}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
+          }
+        >
           <MetricCard
             label="TOTAL SALES"
             value={formatMoney(stats.totalSales, CURRENCY)}

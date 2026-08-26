@@ -4,6 +4,7 @@ import {
   FlatList,
   Modal,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -25,6 +26,8 @@ import {
   useCartSummary,
 } from "@/lib/cart";
 import { useAuth } from "@/lib/auth";
+import { useServerRefresh } from "@/lib/sync";
+import { useStore } from "@/lib/store";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 type EditingBill = { id: string; label: string };
@@ -39,6 +42,8 @@ type EditingBill = { id: string; label: string };
 export default function CounterScreen() {
   const lineIds = useCartLineIds();
   const [editing, setEditing] = useState<EditingBill | null>(null);
+  const { store } = useStore();
+  const { refreshing, onRefresh } = useServerRefresh(store.id);
 
   useEffect(() => {
     if (lineIds.length === 0) setEditing(null);
@@ -51,9 +56,15 @@ export default function CounterScreen() {
       </SafeAreaView>
 
       {lineIds.length === 0 ? (
-        <EmptyCounter onResumeEditing={setEditing} />
+        <EmptyCounter onResumeEditing={setEditing} refreshing={refreshing} onRefresh={onRefresh} />
       ) : (
-        <ActiveCounter lineIds={lineIds} editing={editing} onEditingChange={setEditing} />
+        <ActiveCounter
+          lineIds={lineIds}
+          editing={editing}
+          onEditingChange={setEditing}
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+        />
       )}
     </View>
   );
@@ -62,8 +73,12 @@ export default function CounterScreen() {
 /** Empty-cart actions and held bills update rarely, so the full context is safe here. */
 function EmptyCounter({
   onResumeEditing,
+  refreshing,
+  onRefresh,
 }: {
   onResumeEditing: (bill: EditingBill | null) => void;
+  refreshing: boolean;
+  onRefresh: () => void;
 }) {
   const router = useRouter();
   const { can } = useAuth();
@@ -111,7 +126,12 @@ function EmptyCounter({
   };
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 8 }}>
+    <ScrollView
+      contentContainerStyle={{ padding: 8 }}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
+      }
+    >
       {canSell && (
         <Pressable
           style={styles.actionCard}
@@ -186,10 +206,14 @@ function ActiveCounter({
   lineIds,
   editing,
   onEditingChange,
+  refreshing,
+  onRefresh,
 }: {
   lineIds: readonly string[];
   editing: EditingBill | null;
   onEditingChange: (bill: EditingBill | null) => void;
+  refreshing: boolean;
+  onRefresh: () => void;
 }) {
   const { can } = useAuth();
   const canSell = can("sale:create");
@@ -202,6 +226,9 @@ function ActiveCounter({
         data={lineIds}
         keyExtractor={(lineId) => lineId}
         contentContainerStyle={{ padding: 8, paddingBottom: 8 }}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
+        }
         renderItem={({ item: lineId }) => (
           <CartLineRow lineId={lineId} editable={canSell} />
         )}

@@ -4,6 +4,7 @@ import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
 import { ITEM_IMAGES } from "./item-images";
 import { loadImageIds, saveImage } from "./image-store";
 import { logAudit } from "./audit";
+import { SYNC_ENABLED } from "./sync";
 import {
   getActiveStore,
   loadAll,
@@ -106,12 +107,15 @@ const DEFAULT_STAFF: StaffMember[] = [];
 /**
  * Write the starter data into the ACTIVE store's database once.
  *
- * Called from the provider rather than at module load: with one database per
- * store, importing this file used to seed whichever database happened to be
- * active at import time — which was the bootstrap one, before any store was
- * known. Each branch now seeds its own copy on first open.
+ * ⛔ SYNC-ENABLED BUILDS NEVER SEED. The SERVER is the single source of truth:
+ * a fresh install starts empty and pulls the real menu/tables/history down.
+ * Client-side seeding was the root cause of two nasty bugs — fresh installs
+ * displayed default stock (10) over newer server values, and re-seeded default
+ * tables resurrected deleted ones by out-timestamping their tombstones.
+ * Seeding now exists ONLY for the offline demo mode (sync off).
  */
 function seedStore() {
+  if (SYNC_ENABLED) return;
   // Before sign-in the store is a placeholder; don't seed (or later download 62
   // images into) a throwaway database.
   if (!isRealStore()) return;
@@ -233,6 +237,7 @@ function isRealStore(): boolean {
  * there, without wiping anything the user has since edited.
  */
 function repairUnsyncedSeed() {
+  if (SYNC_ENABLED) return;
   if (!isRealStore()) return;
   seedOnce("seed_upload_repair_v1", () => {
     (
@@ -256,6 +261,7 @@ function repairUnsyncedSeed() {
  * and sync, clearing the rows from every device and the store's server copy.
  */
 function cleanupDemoData() {
+  if (SYNC_ENABLED) return;
   if (!isRealStore()) return;
   seedOnce("cleanup_demo_people_v1", () => {
     ["cu1", "cu2", "cu3"].forEach((id) => softDelete("customers", id));

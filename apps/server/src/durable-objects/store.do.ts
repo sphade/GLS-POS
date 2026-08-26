@@ -236,12 +236,26 @@ export class StoreDurableObject extends DurableObject<Env> {
    * capped to one page. The returned cursor is the last row *included*, so a
    * capped response still counts as progress and the next pull continues from
    * exactly there — never re-sending, never skipping.
+   *
+   * `product_images` is deliberately EXCLUDED from device sync: rows are
+   * 30–80KB of base64 each, and a fresh install otherwise drags megabytes of
+   * photos through dozens of round-trips. Item photos reach devices via their
+   * remote URLs instead (hydrated client-side). Rows are still stored, so an
+   * explicit future out-of-band channel can serve them.
    */
-  private changesSincePage(cursor: number): { changes: SyncChange[]; cursor: number } {
+  private changesSincePage(
+    cursor: number,
+    options?: { includeProductImages?: boolean },
+  ): { changes: SyncChange[]; cursor: number } {
+    const includeImages = options?.includeProductImages === true;
     const rows = this.db
       .select()
       .from(schema.documents)
-      .where(gt(schema.documents.serverSeq, cursor))
+      .where(
+        includeImages
+          ? gt(schema.documents.serverSeq, cursor)
+          : and(gt(schema.documents.serverSeq, cursor), sql`${schema.documents.collection} <> 'product_images'`),
+      )
       .orderBy(schema.documents.serverSeq)
       .limit(PULL_MAX_ROWS)
       .all();

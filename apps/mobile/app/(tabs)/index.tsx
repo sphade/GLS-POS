@@ -4,6 +4,7 @@ import {
   LayoutAnimation,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   SectionList,
   StyleSheet,
@@ -30,7 +31,10 @@ import {
 } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
+import { useServerRefresh } from "@/lib/sync";
+import { useStore } from "@/lib/store";
 import { ItemImage } from "@/components/ItemImage";
+import { EmptyState } from "@/components/EmptyState";
 import { warmImageCache } from "@/lib/image-store";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
@@ -81,6 +85,8 @@ export default function ItemsScreen() {
   const { can } = useAuth();
   const canEditCatalog = can("catalog:write");
   const canSell = can("sale:create");
+  const { store } = useStore();
+  const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [query, setQuery] = useState("");
   const [isGrid, setIsGrid] = useState(true);
   /** Item whose variant sheet is open. The sheet both adds and removes. */
@@ -304,6 +310,26 @@ export default function ItemsScreen() {
         maxToRenderPerBatch={8}
         updateCellsBatchingPeriod={50}
         windowSize={11}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+          />
+        }
+        ListEmptyComponent={
+          <View style={{ paddingTop: 80 }}>
+            <EmptyState
+              text={
+                canEditCatalog
+                  ? "No items yet.\nCreate your first item below, or pull down to sync."
+                  : "No items yet.\nPull down to sync, or ask an owner to add the menu."
+              }
+              size={120}
+            />
+          </View>
+        }
         renderSectionHeader={({ section }) =>
           section.title ? (
             // The whole white band toggles collapse/expand.

@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { AppState, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  AppState,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -10,7 +19,7 @@ import { useCart, type Receipt } from "@/lib/cart";
 import { useWebOrders } from "@/lib/web-orders";
 import { useStore } from "@/lib/store";
 import { loadDirtyIds } from "@/lib/db";
-import { onSynced, syncNowDetailed } from "@/lib/sync";
+import { onSynced, syncNowDetailed, useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 
 const modeIcon = (mode: string) => {
@@ -35,6 +44,7 @@ export default function TodayScreen() {
    */
   const [pendingIds, setPendingIds] = useState(() => loadDirtyIds("receipts"));
   const [syncError, setSyncError] = useState<string | null>(null);
+  const { refreshing, onRefresh: serverRefresh } = useServerRefresh(store.id);
   const pending = pendingIds.length;
   const pendingSet = new Set(pendingIds);
   /** This tab is Today, so older receipts belong in Reports, not this list. */
@@ -165,6 +175,13 @@ export default function TodayScreen() {
           keyExtractor={(r) => r.id}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 24 }}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={serverRefresh}
+              colors={[colors.primary]}
+            />
+          }
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <EmptyState text={q ? "No matching receipts" : strings.noTransactionsToday} size={120} />
@@ -185,6 +202,13 @@ export default function TodayScreen() {
           keyExtractor={(o) => o.id}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 24 }}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={serverRefresh}
+              colors={[colors.primary]}
+            />
+          }
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <EmptyState text={q ? "No matching orders" : "No VIP orders yet"} size={120} />

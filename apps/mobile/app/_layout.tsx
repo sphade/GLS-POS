@@ -13,6 +13,7 @@ import { WebOrdersProvider } from "@/lib/web-orders";
 import { setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { GlobalRefreshButton } from "@/components/GlobalRefreshButton";
+import { SyncStatusBar } from "@/components/SyncStatusBar";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
 import { colors } from "@/constants/theme";
@@ -116,6 +117,8 @@ function StoreScopedData() {
           <NewOrderBanner />
           {/* Manual pull from any route when staff want fresh server data now. */}
           <GlobalRefreshButton />
+          {/* Top strip: shows background sync activity + real failure reasons. */}
+          <SyncStatusBar />
         </WebOrdersProvider>
       </CartProvider>
     </CatalogProvider>

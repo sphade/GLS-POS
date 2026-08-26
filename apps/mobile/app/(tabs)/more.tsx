@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { OFFLINE_MODE } from "@/lib/offline";
 import { useStore } from "@/lib/store";
+import { useServerRefresh } from "@/lib/sync";
 import { useWebOrders } from "@/lib/web-orders";
 import { feedbackTap } from "@/lib/feedback";
 import type { Permission } from "@gls-pos/types";
@@ -39,6 +40,7 @@ export default function MoreScreen() {
   const { can } = useAuth();
   const { store } = useStore();
   const { pendingCount } = useWebOrders();
+  const { refreshing, onRefresh } = useServerRefresh(store.id);
 
   // Staff accounts live in the control plane (API), not the synced local
   // catalog — the old `staff.length` here always showed 0.
@@ -100,7 +102,13 @@ export default function MoreScreen() {
     <SafeAreaView edges={["top"]} style={styles.root}>
       <PosHeader />
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
+        }
+      >
         <View style={styles.grid}>
           {cards.map((c) => (
             <Pressable

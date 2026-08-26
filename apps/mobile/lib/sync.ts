@@ -1,5 +1,6 @@
 import * as Network from "expo-network";
 import { AppState } from "react-native";
+import { useCallback, useState } from "react";
 import type { SyncChange, SyncCollection, SyncPullResponse } from "@gls-pos/types";
 import { SYNC_COLLECTIONS } from "@gls-pos/types";
 import {
@@ -29,6 +30,24 @@ import { OFFLINE_MODE } from "./offline";
 
 const cursorKey = (storeId: string) => `sync_cursor_${storeId}`;
 const SYNC_TIMEOUT_MS = 15_000;
+
+// --- Cold-start boot state ---------------------------------------------------
+// A device that has never pulled history (cursor still 0) is "booting". While
+// booting, downloads take absolute priority: history — receipts, held bills —
+// lands before any uploads. Any successful pull marks the store booted, at
+// which point behaviour is identical to every other device.
+const bootedStores = new Set<string>();
+
+function isBooted(storeId: string): boolean {
+  return (
+    bootedStores.has(storeId) ||
+    (Number(metaGet(cursorKey(storeId)) ?? "0") || 0) > 0
+  );
+}
+
+/** Collections this device NEVER uploads. Product photos are 30–80KB base64 */
+/** blobs; they reach devices via remote URLs, not the sync stream. */
+const UPLOAD_SKIP: readonly SyncCollection[] = ["product_images"];
 
 export type SyncAttemptResult =
   | { ok: true; appliedCount: number }
@@ -143,6 +162,33 @@ function emitSynced(count: number) {
   });
 }
 
+// --- Visible activity (drives the top status bar) ---------------------------
+type SyncActivity = { busy: boolean; error: string | null };
+let activity: SyncActivity = { busy: false, error: null };
+const activityListeners = new Set<() => void>();
+
+function setActivity(patch: Partial<SyncActivity>): void {
+  const next = { ...activity, ...patch };
+  if (next.busy === activity.busy && next.error === activity.error) return;
+  activity = next;
+  activityListeners.forEach((fn) => {
+    try {
+      fn();
+    } catch {
+      /* bad listener */
+    }
+  });
+}
+
+export function subscribeSyncActivity(cb: () => void): () => void {
+  activityListeners.add(cb);
+  return () => activityListeners.delete(cb);
+}
+
+export function getSyncActivity(): SyncActivity {
+  return activity;
+}
+
 /**
  * Rows applied per JS-task when pulling. expo-sqlite writes are synchronous,
  * so a big catch-up (first install, long absence) applied in one go would hold
@@ -248,6 +294,10 @@ async function performPull(
         | { ok: false; error: { message: string } };
       if (!res.ok || !body.ok) return appliedTotal > 0 ? appliedTotal : -1;
 
+      // Any successful server conversation proves this device is now pulling
+      // normally — end cold-start deferrals.
+      bootedStores.add(storeId);
+
       const applied = await applyPulled(storeId, body.data, notify);
       if (applied > 0) appliedTotal += applied;
 
@@ -291,6 +341,7 @@ function enqueueJob<T>(key: string, run: () => Promise<T>): Promise<T> {
 
   if (!jobRunning) {
     jobRunning = true;
+    setActivity({ busy: true });
     void (async () => {
       for (;;) {
         const job = jobQueue.shift();
@@ -303,6 +354,7 @@ function enqueueJob<T>(key: string, run: () => Promise<T>): Promise<T> {
         }
       }
       jobRunning = false;
+      setActivity({ busy: false });
     })();
   }
   return promise as Promise<T>;
@@ -353,7 +405,14 @@ async function performSync(
       return { ok: false, kind: "offline", message: "This device is offline. Connect to the internet and retry." };
     }
 
-    const { changes } = collectDirty(onlyCollections);
+    // Photos never upload; everything else does. A booting device additionally
+    // holds ALL uploads until history is local.
+    const scope = onlyCollections
+      ? onlyCollections
+      : isBooted(storeId)
+        ? SYNC_COLLECTIONS.filter((c) => !UPLOAD_SKIP.includes(c))
+        : [];
+    const { changes } = collectDirty(scope);
     // One request per batch. The last one always runs even with nothing dirty,
     // so a sync with no local edits still pulls server changes.
     const batches = batchChanges(changes);
@@ -466,9 +525,16 @@ function syncRequestKey(
 //
 // A failed push used to wait for the next poll (up to 20s) before retrying,
 // which is why a sale could sit on one till for half a minute. Transient
-// failures now re-arm themselves quickly: 3s → 6s → 12s → 24s → 48s, then stop
-// (the poll, nudges, and connectivity-regain flush take over from there).
-const RETRY_DELAYS_MS = [3_000, 6_000, 12_000, 24_000, 48_000];
+// failures now re-arm themselves quickly, then stop (the poll, nudges, and
+// connectivity-regain flush take over from there):
+//  - network/timeout errors: 3s → 6s → 12s → 24s → 48s
+//  - "offline" verdicts: fixed 5s re-checks ×3 — expo-network can report
+//    offline spuriously right after bursts of activity, and silently skipping
+//    the push on a lying check is exactly how the "tap to sync" banner was
+//    born. A genuinely dead connection exhausts these quickly and falls back
+//    to the regain-flush + poll.
+const NETWORK_LADDER = [3_000, 6_000, 12_000, 24_000, 48_000];
+const OFFLINE_LADDER = [5_000, 5_000, 5_000];
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const retryAttempts = new Map<string, number>();
 
@@ -484,30 +550,40 @@ function clearRetryState(storeId: string): void {
 }
 
 /** Called after every full-sync attempt: success resets, transient failures
- *  schedule the next rung of the ladder, permanent ones stop auto-retrying. */
+ *  schedule the next rung of the ladder, permanent ones stop auto-retrying.
+ *  Also feeds the top status bar (error line). */
 function handleSyncOutcome(storeId: string, result: SyncAttemptResult): void {
   if (!SYNC_ENABLED) return;
   if (result.ok) {
     clearRetryState(storeId);
+    setActivity({ error: null });
     return;
   }
-  if (result.kind !== "network" && result.kind !== "timeout") {
-    // Auth/server/permission failures won't heal by hammering; leave them to
-    // the user (banners surface the reason) and the regular poll.
+  setActivity({ error: result.message });
+
+  const ladder =
+    result.kind === "network" || result.kind === "timeout"
+      ? NETWORK_LADDER
+      : result.kind === "offline"
+        ? OFFLINE_LADDER
+        : undefined;
+
+  // Auth/server/permission failures won't heal by hammering; leave them to
+  // the user (banners surface the reason) and the regular poll.
+  if (!ladder) {
     clearRetryState(storeId);
     return;
   }
 
   const attempts = (retryAttempts.get(storeId) ?? 0) + 1;
-  if (attempts > RETRY_DELAYS_MS.length) return; // ladder exhausted
+  if (attempts > ladder.length) return; // ladder exhausted
   if (retryTimers.has(storeId)) return; // a retry is already armed
 
   retryAttempts.set(storeId, attempts);
-  const delay = RETRY_DELAYS_MS[attempts - 1]!;
   const timer = setTimeout(() => {
     retryTimers.delete(storeId);
     void syncNow(storeId);
-  }, delay);
+  }, ladder[attempts - 1]!);
   retryTimers.set(storeId, timer);
 }
 
@@ -584,19 +660,38 @@ export const SYNC_ENABLED =
 export function startAutoSync(storeId: string, intervalMs = 20_000): () => void {
   if (!SYNC_ENABLED) return () => {};
   clearRetryState(storeId);
-  void syncNow(storeId);
+
+  // COLD START: a device that has never pulled history downloads it FIRST.
+  // Receipts and held bills are money; the photo backlog is cosmetics — so
+  // uploads (especially product_images) stay deferred until history is local,
+  // then any writes made while waiting flush immediately after.
+  let pendingUploads = false;
+  if (!isBooted(storeId)) {
+    void pullNow(storeId, true, true).then((result) => {
+      if (result >= 0 && pendingUploads) void syncNow(storeId);
+    });
+  } else {
+    void syncNow(storeId);
+  }
+
   const handle = setInterval(() => {
     if (AppState.currentState !== "active") return;
+    // Never let a poll-tick push the photo backlog ahead of history.
+    if (!isBooted(storeId)) return;
     void syncNow(storeId);
   }, intervalMs);
 
   // Push-on-write: a local edit schedules a sync ~1s later instead of waiting
   // for the next poll, so changes leave the device promptly. Debounced so a
-  // burst of edits (e.g. building a cart) collapses into one push.
+  // burst of edits (e.g. building a cart) collapses into one push. While still
+  // booting, writes are remembered and flushed the moment boot completes.
   let debounce: ReturnType<typeof setTimeout> | null = null;
   onLocalWrite(() => {
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => void syncNow(storeId), 1200);
+    debounce = setTimeout(() => {
+      if (isBooted(storeId)) void syncNow(storeId);
+      else pendingUploads = true;
+    }, 1200);
   });
 
   return () => {
@@ -605,4 +700,37 @@ export function startAutoSync(storeId: string, intervalMs = 20_000): () => void 
     onLocalWrite(null);
     clearRetryState(storeId);
   };
+}
+
+// --- Convenience APIs for screens -------------------------------------------
+
+let lastQuietPullAt = 0;
+
+/** Fire-and-forget background delta check, throttled to one per few seconds.
+ *  Used on tab switches / screen opens: local data keeps rendering; fresh
+ *  deltas from other devices arrive quietly via onSynced. */
+export function quietPull(storeId: string): void {
+  if (!SYNC_ENABLED) return;
+  const now = Date.now();
+  if (now - lastQuietPullAt < 3_000) return;
+  lastQuietPullAt = now;
+  void pullNow(storeId);
+}
+
+/** Pull-to-refresh for screens: pull server deltas, then run a full sync. */
+export function useServerRefresh(
+  storeId: string,
+): { refreshing: boolean; onRefresh: () => void } {
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = useCallback(async () => {
+    if (!SYNC_ENABLED) return;
+    setRefreshing(true);
+    try {
+      await pullNow(storeId);
+      await syncNowDetailed(storeId);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [storeId]);
+  return { refreshing, onRefresh };
 }
