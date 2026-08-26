@@ -147,9 +147,15 @@ function seedStore() {
       // Opening stock is recorded as an "initial" movement. The server rebuilds
       // stock from the movement log (never from a product's absolute value), so
       // without this the seeded stock would reset to zero on first sync.
+      //
+      // The ID is DETERMINISTIC (product-derived, not random): several devices
+      // each seed their own copy and push it, and with random IDs the server
+      // would apply every device's +N as fresh stock — ten phones meant
+      // "10 × N items in stock". With one stable id per product, replays
+      // collapse server-side into exactly one applied delta.
       if (typeof p.stockQuantity === "number" && p.stockQuantity !== 0) {
         dbPut<StockMovement>("stock_movements", {
-          id: uid("mov"),
+          id: `mov_initial_${p.id}`,
           productId: p.id,
           productName: p.name,
           reason: "initial",

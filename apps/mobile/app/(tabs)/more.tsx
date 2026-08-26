@@ -1,10 +1,14 @@
-﻿import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+﻿import { useEffect, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
+import { OFFLINE_MODE } from "@/lib/offline";
+import { useStore } from "@/lib/store";
 import { useWebOrders } from "@/lib/web-orders";
 import { feedbackTap } from "@/lib/feedback";
 import type { Permission } from "@gls-pos/types";
@@ -31,9 +35,27 @@ type Card = {
  */
 export default function MoreScreen() {
   const router = useRouter();
-  const { products, customers, staff } = useCatalog();
+  const { products, customers } = useCatalog();
   const { can } = useAuth();
+  const { store } = useStore();
   const { pendingCount } = useWebOrders();
+
+  // Staff accounts live in the control plane (API), not the synced local
+  // catalog — the old `staff.length` here always showed 0.
+  const [staffCount, setStaffCount] = useState<number | null>(null);
+  useEffect(() => {
+    if (OFFLINE_MODE || !can("staff:manage")) return;
+    let cancelled = false;
+    void api
+      .listMembers(store.id)
+      .then((res) => {
+        if (!cancelled && res.ok) setStaffCount(res.data.length);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [store.id, can]);
 
   const lowStock = products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length;
   // Real stock valuation at selling price. (No fabricated "cost price" estimate.)
@@ -65,7 +87,7 @@ export default function MoreScreen() {
       needs: "reports:view",
     },
     { key: "customers", value: String(customers.length), title: "Customers", route: "/customers", needs: "customers:manage" },
-    { key: "staff", value: String(staff.length), title: "Staff", route: "/staff", needs: "staff:manage" },
+    { key: "staff", value: staffCount === null ? "—" : String(staffCount), title: "Staff", route: "/staff", needs: "staff:manage" },
     { key: "expense", value: "Expenses", title: "Record & View", route: "/expense-categories", needs: "expenses:manage" },
     { key: "audit", value: "Activity", title: "Who did what", route: "/audit", needs: "audit:view" },
     { key: "settings", value: "Settings", title: "Business & Preferences", route: "/settings", needs: "settings:manage" },

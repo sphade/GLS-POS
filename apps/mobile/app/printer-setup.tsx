@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -7,28 +7,48 @@ import { colors } from "@/constants/theme";
 import {
   forgetPrinter,
   getSavedPrinter,
+  isClassicSupported,
+  listBondedPrinters,
   printTest,
   savePrinter,
   scanForPrinters,
+  type PrinterTransport,
   type SavedPrinter,
 } from "@/lib/printer";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
 import type { PaperWidth } from "@/lib/escpos";
 
 /**
- * Pair a Bluetooth (BLE) thermal receipt printer.
+ * Pair a thermal receipt printer.
  *
- * Only BLE printers show up here — that's what the app can drive directly.
- * Bluetooth Classic/SPP printers can't be reached from JS, so the screen says
- * so and points at the PDF/share route instead.
+ * PAIRED DEVICES comes first and is the primary path — it reads the phone's
+ * system bond table (Bluetooth settings ▸ paired devices). Manufacturer-bonded
+ * printers and Bluetooth Classic printers never show up in a discovery scan,
+ * but they all live there. The BLE scan below stays as the secondary option
+ * for printers that were never paired.
  */
 export default function PrinterSetupScreen() {
   const router = useRouter();
   const [saved, setSaved] = useState<SavedPrinter | null>(() => getSavedPrinter());
+  const [bonded, setBonded] = useState<{ id: string; name: string }[]>([]);
+  const [loadingBonded, setLoadingBonded] = useState(false);
   const [devices, setDevices] = useState<{ id: string; name: string }[]>([]);
   const [scanning, setScanning] = useState(false);
   const [testing, setTesting] = useState(false);
   const [paper, setPaper] = useState<PaperWidth>(() => getSavedPrinter()?.paper ?? 58);
+
+  const loadBonded = useCallback(async () => {
+    if (!isClassicSupported()) return;
+    setLoadingBonded(true);
+    try {
+      setBonded(await listBondedPrinters());
+    } catch (e) {
+      // Non-fatal: the BLE scan remains available.
+      Alert.alert("Couldn't read paired devices", (e as Error).message);
+    } finally {
+      setLoadingBonded(false);
+    }
+  }, []);
 
   const scan = async () => {
     feedbackTap();
@@ -41,7 +61,7 @@ export default function PrinterSetupScreen() {
       if (found.length === 0) {
         Alert.alert(
           "No Bluetooth printers found",
-          "Make sure the printer is switched on and close by.\n\nNote: very cheap printers often use Bluetooth Classic, which can't be detected here — use Share as PDF instead.",
+          "Pair the printer in Android's Bluetooth settings first (PIN is usually 0000 or 1234), then reopen this screen — it will appear under PAIRED DEVICES.",
         );
       }
     } catch (e) {
@@ -52,9 +72,9 @@ export default function PrinterSetupScreen() {
     }
   };
 
-  const choose = (d: { id: string; name: string }) => {
+  const choose = (d: { id: string; name: string }, transport: PrinterTransport) => {
     feedbackTap();
-    const next: SavedPrinter = { ...d, paper };
+    const next: SavedPrinter = { ...d, paper, transport };
     savePrinter(next);
     setSaved(next);
     Alert.alert("Printer saved", `${d.name} will be used for receipts.`, [
@@ -105,7 +125,8 @@ export default function PrinterSetupScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.savedName}>{saved.name}</Text>
                   <Text style={styles.savedMeta}>
-                    {saved.paper}mm paper · {saved.id.slice(0, 17)}
+                    {saved.transport === "classic" ? "Classic · " : "BLE · "}
+                    {saved.paper}mm paper
                   </Text>
                 </View>
               </View>
@@ -132,7 +153,9 @@ export default function PrinterSetupScreen() {
           ) : (
             <View style={styles.emptyRow}>
               <MaterialCommunityIcons name="printer-off" size={26} color={colors.grey500} />
-              <Text style={styles.emptyText}>No printer paired. Scan below to find one.</Text>
+              <Text style={styles.emptyText}>
+                No printer selected. Pick one from PAIRED DEVICES below.
+              </Text>
             </View>
           )}
         </View>
@@ -154,27 +177,72 @@ export default function PrinterSetupScreen() {
           ))}
         </View>
 
-        {/* Scan */}
-        <Text style={styles.section}>AVAILABLE DEVICES</Text>
+        {/* System-paired devices — the reliable path */}
+        <View style={styles.sectionRow}>
+          <Text style={styles.section}>PAIRED DEVICES</Text>
+          {isClassicSupported() && (
+            <Pressable
+              style={styles.refreshChip}
+              onPress={() => void loadBonded()}
+              disabled={loadingBonded}
+              hitSlop={6}
+            >
+              {loadingBonded ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <>
+                  <Ionicons name="sync" size={14} color={colors.primary} />
+                  <Text style={styles.refreshText}>REFRESH</Text>
+                </>
+              )}
+            </Pressable>
+          )}
+        </View>
+
+        {bonded.length > 0 &&
+          bonded.map((d) => (
+            <Pressable key={d.id} style={styles.deviceRow} onPress={() => choose(d, "classic")}>
+              <MaterialCommunityIcons name="printer" size={22} color={colors.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.deviceName}>{d.name}</Text>
+                <Text style={styles.deviceId}>Paired in Android settings · prints via Classic</Text>
+              </View>
+              {saved?.id === d.id && saved?.transport === "classic" ? (
+                <Ionicons name="checkmark-circle" size={22} color={colors.green} />
+              ) : (
+                <Text style={styles.useText}>USE</Text>
+              )}
+            </Pressable>
+          ))}
+        {isClassicSupported() && bonded.length === 0 && !loadingBonded && (
+          <Pressable style={styles.loadHint} onPress={() => void loadBonded()}>
+            <Text style={styles.loadHintText}>
+              Tap REFRESH to list phones/tablets/printers already paired with this device.
+            </Text>
+          </Pressable>
+        )}
+
+        {/* Nearby BLE discovery — secondary */}
+        <Text style={styles.section}>NEARBY (BLUETOOTH LE SCAN)</Text>
         <Pressable style={styles.scanBtn} onPress={() => void scan()} disabled={scanning}>
           {scanning ? (
             <ActivityIndicator color={colors.white} size="small" />
           ) : (
             <>
               <Ionicons name="bluetooth" size={18} color={colors.white} />
-              <Text style={styles.scanBtnText}>SCAN FOR PRINTERS</Text>
+              <Text style={styles.scanBtnText}>SCAN FOR NEW PRINTERS</Text>
             </>
           )}
         </Pressable>
 
         {devices.map((d) => (
-          <Pressable key={d.id} style={styles.deviceRow} onPress={() => choose(d)}>
+          <Pressable key={d.id} style={styles.deviceRow} onPress={() => choose(d, "ble")}>
             <MaterialCommunityIcons name="printer" size={22} color={colors.primary} />
             <View style={{ flex: 1 }}>
               <Text style={styles.deviceName}>{d.name}</Text>
               <Text style={styles.deviceId}>{d.id}</Text>
             </View>
-            {saved?.id === d.id ? (
+            {saved?.id === d.id && saved?.transport === "ble" ? (
               <Ionicons name="checkmark-circle" size={22} color={colors.green} />
             ) : (
               <Text style={styles.useText}>USE</Text>
@@ -185,16 +253,15 @@ export default function PrinterSetupScreen() {
         <View style={styles.help}>
           <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
           <Text style={styles.helpText}>
-            Only Bluetooth LE printers appear here. If your printer doesn't show up it's probably
-            Bluetooth Classic — you can still give customers a receipt with Share as PDF or WhatsApp
-            from the receipt screen.
+            Can't find your printer? Pair it once in Android's Bluetooth settings (PIN often
+            0000 or 1234), then use PAIRED DEVICES — printers that are already paired never show
+            up in a scan.
           </Text>
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
-
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
   toolbar: {
@@ -217,6 +284,19 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     marginLeft: 6,
   },
+  sectionRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingRight: 6 },
+  refreshChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: colors.blue50,
+  },
+  refreshText: { color: colors.primary, fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
+  loadHint: { paddingVertical: 10, paddingHorizontal: 8, borderRadius: 4, backgroundColor: colors.card },
+  loadHintText: { color: colors.grey600, fontSize: 12, lineHeight: 17 },
   card: { backgroundColor: colors.card, borderRadius: 4, padding: 12, elevation: 1 },
 
   savedRow: { flexDirection: "row", alignItems: "center", gap: 12 },

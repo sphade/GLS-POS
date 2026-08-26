@@ -1,5 +1,6 @@
 import { PermissionsAndroid, Platform } from "react-native";
 import { BleManager, type Device } from "react-native-ble-plx";
+import BluetoothClassic from "react-native-bluetooth-classic";
 import { Buffer } from "buffer";
 import { metaGet, metaSet } from "./db";
 import { buildReceiptBytes } from "./receipt-print";
@@ -7,27 +8,61 @@ import type { Receipt } from "./cart";
 import { EscPosBuilder, type PaperWidth } from "./escpos";
 
 /**
- * Bluetooth transport for ESC/POS thermal printers.
+ * Bluetooth transports for ESC/POS thermal printers.
  *
- * IMPORTANT — two kinds of Bluetooth exist on these printers:
- *  - **BLE (Bluetooth Low Energy)**: what this module drives, via
- *    react-native-ble-plx. We find a writable characteristic and push the
- *    receipt bytes to it in small chunks.
- *  - **Bluetooth Classic / SPP**: what many older, very cheap printers use.
- *    react-native-ble-plx cannot talk to Classic at all. For those, pair the
- *    printer in Android settings and use the PDF/share fallback, or swap in a
- *    Classic-SPP native module.
+ * Two kinds of Bluetooth exist on these printers, and the app now drives BOTH:
+ *  - **BLE (Bluetooth Low Energy)** via react-native-ble-plx: find a writable
+ *    characteristic and push receipt bytes in small chunks.
+ *  - **Bluetooth Classic / SPP** via react-native-bluetooth-classic: many
+ *    cheap printers (and most manufacturer-bonded ones) are Classic-only and
+ *    NEVER appear in a BLE scan. For those we read the phone's system-paired
+ *    device list instead — pairing once in Android settings is enough — and
+ *    print over an RFCOMM socket.
  *
- * Printer state (the chosen device + paper width) is persisted so the app
- * reconnects to the same printer without asking again.
+ * Printer state (chosen device, transport, paper width) persists so the app
+ * reconnects without asking again.
  */
+
+type ClassicConnection = { write(data: string, encoding?: string): Promise<boolean>; disconnect(): Promise<void> };
+
+/**
+ * Minimal structural typing over the native module: its bundled TS definitions
+ * have drifted across versions, so we pin only what we call — using the
+ * current documented API (adapter.getBondedDevices, device.connect/write).
+ */
+const classic = BluetoothClassic as unknown as {
+  isBluetoothEnabled(): Promise<boolean>;
+  requestBluetoothEnabled(): Promise<boolean>;
+  getBondedDevices(): Promise<ClassicDevice[]>;
+  connectToDevice(
+    id: string,
+    options?: Record<string, unknown>,
+  ): Promise<ClassicConnection & Record<string, unknown>>;
+  disconnectFromDevice?(id: string): Promise<unknown> | void;
+};
+
+type ClassicDevice = { id?: string; name?: string; address: string };
+
+/** Fails loudly-but-readably if the native module isn't in this build. */
+function requireClassicFn<K extends keyof typeof classic>(name: K): NonNullable<typeof classic[K]> {
+  const fn = classic[name];
+  if (typeof fn !== "function") {
+    throw new Error(
+      "Bluetooth Classic isn't available in this app build. Rebuild the app with react-native-bluetooth-classic installed.",
+    );
+  }
+  return fn as NonNullable<typeof classic[K]>;
+}
 
 const DEVICE_KEY = "printer_device_id";
 const NAME_KEY = "printer_device_name";
 const PAPER_KEY = "printer_paper_width";
+const TRANSPORT_KEY = "printer_transport";
 
 /** BLE caps each write; most printers accept 180–240 bytes per packet. */
 const CHUNK = 180;
+/** SPP sockets take larger writes than BLE characteristics. */
+const CLASSIC_CHUNK = 512;
 
 let manager: BleManager | null = null;
 function ble(): BleManager {
@@ -35,7 +70,13 @@ function ble(): BleManager {
   return manager;
 }
 
-export type SavedPrinter = { id: string; name: string; paper: PaperWidth };
+/** Classic/SPP printing is an Android capability (iOS needs MFi hardware). */
+export function isClassicSupported(): boolean {
+  return Platform.OS === "android";
+}
+
+export type PrinterTransport = "ble" | "classic";
+export type SavedPrinter = { id: string; name: string; paper: PaperWidth; transport: PrinterTransport };
 
 export function getSavedPrinter(): SavedPrinter | null {
   const id = metaGet(DEVICE_KEY);
@@ -44,6 +85,7 @@ export function getSavedPrinter(): SavedPrinter | null {
     id,
     name: metaGet(NAME_KEY) ?? "Printer",
     paper: (Number(metaGet(PAPER_KEY)) === 80 ? 80 : 58) as PaperWidth,
+    transport: metaGet(TRANSPORT_KEY) === "classic" ? "classic" : "ble",
   };
 }
 
@@ -51,11 +93,13 @@ export function savePrinter(p: SavedPrinter): void {
   metaSet(DEVICE_KEY, p.id);
   metaSet(NAME_KEY, p.name);
   metaSet(PAPER_KEY, String(p.paper));
+  metaSet(TRANSPORT_KEY, p.transport ?? "ble");
 }
 
 export function forgetPrinter(): void {
   metaSet(DEVICE_KEY, "");
   metaSet(NAME_KEY, "");
+  metaSet(TRANSPORT_KEY, "");
 }
 
 /** Android needs runtime location/BT permissions before it will scan. */
@@ -126,14 +170,100 @@ async function findWritable(device: Device) {
 }
 
 /**
- * Send raw ESC/POS bytes to the saved printer.
+ * List the phone's system-paired Bluetooth devices.
  *
- * Writes in small chunks with a short gap: thermal printers have tiny buffers
- * and silently drop data (or print garbage) if you push a whole receipt at once.
+ * This is how every shop-floor printer app works: the printer is (or becomes)
+ * paired in Android settings — sometimes permanently bonded by the
+ * manufacturer — and bonded devices do NOT reliably appear in discovery
+ * scans. Reading the bond table instead is instant, works offline, and needs
+ * no location permission. Each entry can be printed to over an SPP socket.
+ */
+export async function listBondedPrinters(): Promise<Array<{ id: string; name: string }>> {
+  if (!isClassicSupported()) return [];
+
+  const ok = await ensureBlePermissions();
+  if (!ok) throw new Error("Bluetooth permission denied");
+
+  const getBondedDevices = requireClassicFn("getBondedDevices");
+  const isBluetoothEnabled = requireClassicFn("isBluetoothEnabled");
+
+  let enabled = false;
+  try {
+    enabled = await isBluetoothEnabled.call(classic);
+  } catch {
+    /* adapter query failed; attempt enable below */
+  }
+  if (!enabled) {
+    try {
+      const requestBluetoothEnabled = requireClassicFn("requestBluetoothEnabled");
+      enabled = await requestBluetoothEnabled.call(classic);
+    } catch (e) {
+      if ((e as Error).message.startsWith("Bluetooth Classic isn't")) throw e;
+      /* user declined or not possible */
+    }
+  }
+  if (!enabled) throw new Error("Bluetooth is turned off");
+
+  const devices: ClassicDevice[] = await getBondedDevices.call(classic);
+  return devices
+    .filter((d) => !!d.name && d.name.trim().length > 0)
+    .map((d) => ({ id: d.address || d.id || d.name!, name: d.name! }));
+}
+
+/**
+ * Send raw ESC/POS bytes over a Bluetooth Classic SPP socket, chunked like the
+ * BLE path — thermal printers still have small buffers.
+ */
+async function printViaClassic(bytes: Uint8Array, saved: SavedPrinter): Promise<void> {
+  const ok = await ensureBlePermissions();
+  if (!ok) throw new Error("Bluetooth permission denied");
+
+  const connectToDevice = requireClassicFn("connectToDevice");
+
+  let connection: ClassicConnection;
+  try {
+    connection = await connectToDevice.call(classic, saved.id);
+  } catch (e) {
+    if ((e as Error).message.startsWith("Bluetooth Classic isn't")) throw e;
+    throw new Error(`Could not connect to ${saved.name}. Is it on, paired, and in range?`);
+  }
+
+  try {
+    for (let i = 0; i < bytes.length; i += CLASSIC_CHUNK) {
+      const b64 = Buffer.from(bytes.slice(i, i + CLASSIC_CHUNK)).toString("base64");
+      await connection.write(b64, "base64");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  } finally {
+    // Release the socket so the next print (or another till) can use it.
+    try {
+      await connection.disconnect();
+    } catch {
+      try {
+        await classic.disconnectFromDevice?.(saved.id);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+/**
+ * Send raw ESC/POS bytes to the saved printer, choosing the transport it was
+ * saved with.
+ *
+ * BLE writes go in small chunks with a short gap: thermal printers have tiny
+ * buffers and silently drop data (or print garbage) if you push a whole
+ * receipt at once.
  */
 export async function printBytes(bytes: Uint8Array): Promise<void> {
   const saved = getSavedPrinter();
   if (!saved) throw new Error("No printer paired yet. Set one up in Printer Setup.");
+
+  if (saved.transport === "classic") {
+    await printViaClassic(bytes, saved);
+    return;
+  }
 
   const ok = await ensureBlePermissions();
   if (!ok) throw new Error("Bluetooth permission denied");
@@ -147,7 +277,7 @@ export async function printBytes(bytes: Uint8Array): Promise<void> {
 
   try {
     const ch = await findWritable(device);
-    if (!ch) throw new Error(`${saved.name} has no writable channel (it may be Bluetooth Classic, not BLE).`);
+    if (!ch) throw new Error(`${saved.name} has no writable channel (it may be Bluetooth Classic — pair it in Android settings, then pick it under PAIRED DEVICES).`);
 
     const withResponse = ch.isWritableWithResponse;
     for (let i = 0; i < bytes.length; i += CHUNK) {

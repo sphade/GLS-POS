@@ -34,10 +34,6 @@ const TABS: Record<string, TabMeta> = {
     label: "Items",
     render: (c) => <MaterialCommunityIcons name="format-list-bulleted-square" size={24} color={c} />,
   },
-  performance: {
-    label: "Test",
-    render: (c) => <Ionicons name="speedometer-outline" size={23} color={c} />,
-  },
   more: {
     label: "More",
     render: (c) => <Ionicons name="grid" size={22} color={c} />,

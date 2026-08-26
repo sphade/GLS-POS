@@ -462,12 +462,94 @@ function syncRequestKey(
   return `${storeId}|sync|${scope}`;
 }
 
+// --- Failure retry ladder ---------------------------------------------------
+//
+// A failed push used to wait for the next poll (up to 20s) before retrying,
+// which is why a sale could sit on one till for half a minute. Transient
+// failures now re-arm themselves quickly: 3s → 6s → 12s → 24s → 48s, then stop
+// (the poll, nudges, and connectivity-regain flush take over from there).
+const RETRY_DELAYS_MS = [3_000, 6_000, 12_000, 24_000, 48_000];
+const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const retryAttempts = new Map<string, number>();
+
+function cancelRetry(storeId: string): void {
+  const timer = retryTimers.get(storeId);
+  if (timer) clearTimeout(timer);
+  retryTimers.delete(storeId);
+}
+
+function clearRetryState(storeId: string): void {
+  cancelRetry(storeId);
+  retryAttempts.delete(storeId);
+}
+
+/** Called after every full-sync attempt: success resets, transient failures
+ *  schedule the next rung of the ladder, permanent ones stop auto-retrying. */
+function handleSyncOutcome(storeId: string, result: SyncAttemptResult): void {
+  if (!SYNC_ENABLED) return;
+  if (result.ok) {
+    clearRetryState(storeId);
+    return;
+  }
+  if (result.kind !== "network" && result.kind !== "timeout") {
+    // Auth/server/permission failures won't heal by hammering; leave them to
+    // the user (banners surface the reason) and the regular poll.
+    clearRetryState(storeId);
+    return;
+  }
+
+  const attempts = (retryAttempts.get(storeId) ?? 0) + 1;
+  if (attempts > RETRY_DELAYS_MS.length) return; // ladder exhausted
+  if (retryTimers.has(storeId)) return; // a retry is already armed
+
+  retryAttempts.set(storeId, attempts);
+  const delay = RETRY_DELAYS_MS[attempts - 1]!;
+  const timer = setTimeout(() => {
+    retryTimers.delete(storeId);
+    void syncNow(storeId);
+  }, delay);
+  retryTimers.set(storeId, timer);
+}
+
+/** Immediate flush when the network comes back — no waiting for the ladder. */
+let networkListenerBound = false;
+
 export function syncNowDetailed(
   storeId: string,
   onlyCollections?: readonly SyncCollection[],
 ): Promise<SyncAttemptResult> {
   const key = syncRequestKey(storeId, onlyCollections);
-  return enqueueJob(key, () => performSync(storeId, onlyCollections));
+
+  // Bind once per app session: regaining internet retries instantly and wipes
+  // any backoff state, because a fresh connection makes the old failure count
+  // meaningless.
+  if (!networkListenerBound && SYNC_ENABLED) {
+    networkListenerBound = true;
+    try {
+      // Optional + structurally typed: older expo-network versions may not
+      // expose a listener; ladder + polling still cover those installs.
+      const networkModule = Network as unknown as {
+        addNetworkStateListener?: (
+          listener: (event: { networkState?: { isInternetReachable?: boolean | null } }) => void,
+        ) => { remove(): void };
+      };
+      networkModule.addNetworkStateListener?.((event) => {
+        if (event.networkState?.isInternetReachable === true) {
+          const affected = new Set([...retryTimers.keys(), ...retryAttempts.keys()]);
+          for (const store of affected) clearRetryState(store);
+          void syncNow(storeId);
+        }
+      });
+    } catch {
+      /* listener unsupported — ladder + polling still cover it */
+    }
+  }
+
+  return enqueueJob(key, async () => {
+    const result = await performSync(storeId, onlyCollections);
+    handleSyncOutcome(storeId, result);
+    return result;
+  });
 }
 
 /** Backward-compatible count result used by existing refresh UI. */
@@ -501,6 +583,7 @@ export const SYNC_ENABLED =
  */
 export function startAutoSync(storeId: string, intervalMs = 20_000): () => void {
   if (!SYNC_ENABLED) return () => {};
+  clearRetryState(storeId);
   void syncNow(storeId);
   const handle = setInterval(() => {
     if (AppState.currentState !== "active") return;
@@ -520,5 +603,6 @@ export function startAutoSync(storeId: string, intervalMs = 20_000): () => void 
     clearInterval(handle);
     if (debounce) clearTimeout(debounce);
     onLocalWrite(null);
+    clearRetryState(storeId);
   };
 }

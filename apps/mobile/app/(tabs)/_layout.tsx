@@ -3,7 +3,7 @@ import { PosTabBar } from "@/components/PosTabBar";
 import { useAuth } from "@/lib/auth";
 
 /**
- * 6-tab bottom navigation: Reports | Today | Counter | Items | Test | More.
+ * 5-tab bottom navigation: Reports | Today | Counter | Items | More.
  * "Items" is the default home. Rendering is delegated to PosTabBar so the
  * active tab can be filled edge-to-edge with primary green.
  *
@@ -28,7 +28,6 @@ export default function TabsLayout() {
       <Tabs.Screen name="today" options={{ title: "Today", href: seesReports ? undefined : null }} />
       <Tabs.Screen name="counter" options={{ title: "Counter" }} />
       <Tabs.Screen name="index" options={{ title: "Items" }} />
-      <Tabs.Screen name="performance" options={{ title: "Test" }} />
       <Tabs.Screen name="more" options={{ title: "More" }} />
     </Tabs>
   );
