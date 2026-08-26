@@ -45,6 +45,11 @@ type ClassicDevice = { id?: string; name?: string; address: string };
 
 /** Fails loudly-but-readably if the native module isn't in this build. */
 function requireClassicFn<K extends keyof typeof classic>(name: K): NonNullable<typeof classic[K]> {
+  if (!classic || typeof classic !== "object") {
+    throw new Error(
+      "Bluetooth Classic isn't available in this app build. Rebuild the app with react-native-bluetooth-classic installed.",
+    );
+  }
   const fn = classic[name];
   if (typeof fn !== "function") {
     throw new Error(
@@ -185,26 +190,23 @@ export async function listBondedPrinters(): Promise<Array<{ id: string; name: st
   if (!ok) throw new Error("Bluetooth permission denied");
 
   const getBondedDevices = requireClassicFn("getBondedDevices");
-  const isBluetoothEnabled = requireClassicFn("isBluetoothEnabled");
 
-  let enabled = false;
+  // Skip the isBluetoothEnabled / requestBluetoothEnabled pre-checks: those
+  // methods are unreliable on many Android devices and report "off" when
+  // Bluetooth is clearly on. Just call getBondedDevices directly — if BT is
+  // truly disabled, the native module throws with an accurate message.
+  let devices: ClassicDevice[];
   try {
-    enabled = await isBluetoothEnabled.call(classic);
-  } catch {
-    /* adapter query failed; attempt enable below */
-  }
-  if (!enabled) {
-    try {
-      const requestBluetoothEnabled = requireClassicFn("requestBluetoothEnabled");
-      enabled = await requestBluetoothEnabled.call(classic);
-    } catch (e) {
-      if ((e as Error).message.startsWith("Bluetooth Classic isn't")) throw e;
-      /* user declined or not possible */
+    devices = await getBondedDevices.call(classic);
+  } catch (e) {
+    const msg = (e as Error).message ?? "";
+    if (msg.toLowerCase().includes("bluetooth") && msg.toLowerCase().includes("off")) {
+      throw new Error(
+        "Bluetooth is turned off. Enable Bluetooth in your phone's settings, then try again.",
+      );
     }
+    throw e;
   }
-  if (!enabled) throw new Error("Bluetooth is turned off");
-
-  const devices: ClassicDevice[] = await getBondedDevices.call(classic);
   return devices
     .filter((d) => !!d.name && d.name.trim().length > 0)
     .map((d) => ({ id: d.address || d.id || d.name!, name: d.name! }));

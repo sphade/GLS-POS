@@ -91,7 +91,8 @@
           ],
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to receipt printers and card readers over Bluetooth."
         }
-      ]
+      ],
+      "./plugins/withBluetoothClassic"
     ],
     "experiments": {
       "typedRoutes": true
