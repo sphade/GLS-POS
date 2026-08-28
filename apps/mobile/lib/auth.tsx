@@ -71,6 +71,8 @@ type AuthState = {
 };
 
 const ACTIVE_STORE_KEY = "active_store_id";
+const CACHED_USER_KEY = "cached_user";
+const CACHED_STORES_KEY = "cached_stores";
 
 const AuthContext = createContext<AuthState | null>(null);
 
@@ -127,6 +129,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (res.ok) {
         setStores(res.data);
         setStoresStatus("ok");
+        // Cache for offline fallback
+        metaSet(CACHED_USER_KEY, JSON.stringify(sessionUser));
+        metaSet(CACHED_STORES_KEY, JSON.stringify(res.data));
         // Fall back to the first store when the cached one is gone.
         setActiveStoreId((prev) => {
           const keep = prev && res.data.some((s) => s.id === prev);
@@ -139,8 +144,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStoresStatus("failed");
       }
     } catch {
-      // Offline: keep whatever we already have so the POS stays usable.
-      setStoresStatus("failed");
+      // Offline: restore from cache so the POS stays usable.
+      const cachedUser = metaGet(CACHED_USER_KEY);
+      const cachedStores = metaGet(CACHED_STORES_KEY);
+      if (cachedUser) {
+        setUser(JSON.parse(cachedUser) as User);
+        if (cachedStores) setStores(JSON.parse(cachedStores) as StoreMembership[]);
+        setStoresStatus("failed");
+      } else {
+        setStoresStatus("failed");
+      }
     }
   }, []);
 
@@ -223,6 +236,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(null);
         setStores([]);
         setStoresStatus("ok");
+        metaSet(CACHED_USER_KEY, "");
+        metaSet(CACHED_STORES_KEY, "");
       },
 
       selectStore: (storeId) => {
