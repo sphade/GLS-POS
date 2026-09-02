@@ -4,7 +4,9 @@ import { requireNativeModule } from "expo-modules-core";
 import { Buffer } from "buffer";
 import { metaGet, metaSet } from "./db";
 import { buildReceiptBytes } from "./receipt-print";
+import { buildReturnBytes } from "./return-print";
 import type { Receipt } from "./cart";
+import type { SaleReturn } from "./return-model";
 import { EscPosBuilder, type PaperWidth } from "./escpos";
 
 /**
@@ -245,6 +247,12 @@ export async function printBytes(bytes: Uint8Array): Promise<void> {
     // Always release the connection so the next print (or another till) can use it.
     await device.cancelConnection().catch(() => {});
   }
+}
+
+/** Print a return credit note on the paired thermal printer. */
+export async function printReturn(ret: SaleReturn): Promise<void> {
+  const paper = getSavedPrinter()?.paper ?? 58;
+  await printBytes(buildReturnBytes(ret, paper));
 }
 
 /** Print a receipt on the paired thermal printer. */

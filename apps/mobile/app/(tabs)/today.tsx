@@ -11,11 +11,18 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useRouter, type Href } from "expo-router";
 import type { WebOrder } from "@gls-pos/types";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart, type Receipt } from "@/lib/cart";
+import {
+  isVoidReturn,
+  refundedTotalOf,
+  returnStateOf,
+  useReturns,
+  type ReturnState,
+} from "@/lib/returns";
 import { useWebOrders } from "@/lib/web-orders";
 import { useStore } from "@/lib/store";
 import { loadDirtyIds } from "@/lib/db";
@@ -32,6 +39,7 @@ const modeIcon = (mode: string) => {
 export default function TodayScreen() {
   const router = useRouter();
   const { receipts } = useCart();
+  const { returns: allReturns } = useReturns();
   const { orders } = useWebOrders();
   const { store } = useStore();
   const [tab, setTab] = useState<"pos" | "online">("pos");
@@ -53,6 +61,35 @@ export default function TodayScreen() {
     start.setHours(0, 0, 0, 0);
     return receipts.filter((receipt) => receipt.createdAt >= start.getTime());
   }, [receipts]);
+
+  /**
+   * Return state per receipt, derived from its credit notes so a refunded sale
+   * is obvious in the list without opening it.
+   */
+  const returnInfo = useMemo(() => {
+    const map = new Map<string, { refunded: number; state: ReturnState }>();
+    if (allReturns.length === 0) return map;
+    for (const receipt of todayReceipts) {
+      const rets = allReturns.filter((ret) => ret.receiptId === receipt.id);
+      if (rets.length === 0) continue;
+      map.set(receipt.id, {
+        refunded: refundedTotalOf(rets),
+        state: returnStateOf(receipt, rets),
+      });
+    }
+    return map;
+  }, [todayReceipts, allReturns]);
+
+  /** Money refunded today, by refund date — what the drawer actually paid back. */
+  const refundedToday = useMemo(() => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return allReturns.reduce(
+      (sum, ret) =>
+        !isVoidReturn(ret) && ret.createdAt >= start.getTime() ? sum + ret.total : sum,
+      0,
+    );
+  }, [allReturns]);
 
   const q = query.trim().toLowerCase();
   /** Filter receipts by number, customer, or payment mode. */
@@ -148,6 +185,22 @@ export default function TodayScreen() {
         </Pressable>
       )}
 
+      {refundedToday > 0 && tab === "pos" && (
+        <Pressable
+          style={styles.refundBar}
+          onPress={() => {
+            feedbackTap();
+            router.push("/returns" as Href);
+          }}
+        >
+          <MaterialCommunityIcons name="cash-refund" size={16} color={colors.red800} />
+          <Text style={styles.refundBarText}>
+            {formatMoney(refundedToday, store.currency)} refunded today
+          </Text>
+          <Ionicons name="chevron-forward" size={16} color={colors.red800} />
+        </Pressable>
+      )}
+
       <View style={styles.tabCard}>
         <Pressable
           style={[styles.tabHalf, tab === "pos" && styles.tabActive]}
@@ -191,6 +244,7 @@ export default function TodayScreen() {
             <ReceiptRow
               receipt={item}
               awaitingUpload={pendingSet.has(item.id)}
+              returned={returnInfo.get(item.id)}
               onPress={() => router.push({ pathname: "/receipt/[id]", params: { id: item.id } })}
             />
           )}
@@ -223,7 +277,17 @@ export default function TodayScreen() {
   );
 }
 
-function ReceiptRow({ receipt, awaitingUpload, onPress }: { receipt: Receipt; awaitingUpload: boolean; onPress: () => void }) {
+function ReceiptRow({
+  receipt,
+  awaitingUpload,
+  returned,
+  onPress,
+}: {
+  receipt: Receipt;
+  awaitingUpload: boolean;
+  returned?: { refunded: number; state: ReturnState };
+  onPress: () => void;
+}) {
   const time = new Date(receipt.createdAt);
   return (
     <Pressable style={styles.rcptCard} onPress={onPress} android_ripple={{ color: "#00000010" }}>
@@ -232,6 +296,13 @@ function ReceiptRow({ receipt, awaitingUpload, onPress }: { receipt: Receipt; aw
         <View style={styles.rcptTopRow}>
           <Text style={styles.rcptNumber}>{receipt.number}</Text>
           {awaitingUpload && <Ionicons name="sync" size={15} color={colors.red500} style={{ marginLeft: 4 }} />}
+          {returned && (
+            <View style={styles.returnChip}>
+              <Text style={styles.returnChipText}>
+                {returned.state === "full" ? "RETURNED" : "PART. RETURNED"}
+              </Text>
+            </View>
+          )}
         </View>
         <Text style={styles.rcptName}>
           {receipt.customerName ?? strings.guest} {strings.by} {receipt.mode}
@@ -240,7 +311,21 @@ function ReceiptRow({ receipt, awaitingUpload, onPress }: { receipt: Receipt; aw
           {receipt.itemCount} Items · {time.toLocaleDateString()} - {time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
         </Text>
       </View>
-      <Text style={styles.rcptTotal}>{formatMoney(receipt.total, receipt.currency)}</Text>
+      <View style={{ alignItems: "flex-end" }}>
+        <Text
+          style={[
+            styles.rcptTotal,
+            returned?.state === "full" && styles.rcptTotalVoided,
+          ]}
+        >
+          {formatMoney(receipt.total, receipt.currency)}
+        </Text>
+        {returned && returned.refunded > 0 && (
+          <Text style={styles.rcptRefunded}>
+            -{formatMoney(returned.refunded, receipt.currency)}
+          </Text>
+        )}
+      </View>
     </Pressable>
   );
 }
@@ -335,7 +420,36 @@ const styles = StyleSheet.create({
   rcptNumber: { fontSize: 16, fontWeight: "700", color: colors.grey900 },
   rcptName: { fontSize: 14, color: colors.grey700, marginTop: 1 },
   rcptMeta: { fontSize: 12, color: colors.grey500, marginTop: 1 },
-  rcptTotal: { fontSize: 18, fontWeight: "700", color: colors.primary, margin: 10 },
+  rcptTotal: { fontSize: 18, fontWeight: "700", color: colors.primary, marginHorizontal: 10, marginTop: 10 },
+  rcptTotalVoided: { color: colors.grey500, textDecorationLine: "line-through" },
+  rcptRefunded: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: colors.red500,
+    marginHorizontal: 10,
+    marginBottom: 8,
+    marginTop: 1,
+  },
+  returnChip: {
+    backgroundColor: "#FDECEA",
+    borderRadius: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginLeft: 6,
+  },
+  returnChipText: { fontSize: 9, fontWeight: "800", color: colors.red800, letterSpacing: 0.4 },
+  refundBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#FDECEA",
+    marginHorizontal: 10,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 4,
+  },
+  refundBarText: { flex: 1, fontSize: 13, fontWeight: "700", color: colors.red800 },
   footerBtn: { backgroundColor: colors.card, marginHorizontal: 10, marginBottom: 8, paddingVertical: 14, alignItems: "center", borderRadius: 4 },
   footerText: { color: colors.primary, fontWeight: "700", fontSize: 16 },
 });

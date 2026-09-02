@@ -25,6 +25,8 @@ import {
   useCartLineIds,
   useCartSummary,
 } from "@/lib/cart";
+import { DiscountSheet } from "@/components/DiscountSheet";
+import { discountAmount, discountLabel } from "@/lib/discount-model";
 import { useAuth } from "@/lib/auth";
 import { useServerRefresh } from "@/lib/sync";
 import { useStore } from "@/lib/store";
@@ -217,6 +219,8 @@ function ActiveCounter({
 }) {
   const { can } = useAuth();
   const canSell = can("sale:create");
+  /** Owner/manager only — a cashier can sell but never reprice. */
+  const canDiscount = can("discount:apply");
 
   return (
     <>
@@ -230,13 +234,13 @@ function ActiveCounter({
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
         }
         renderItem={({ item: lineId }) => (
-          <CartLineRow lineId={lineId} editable={canSell} />
+          <CartLineRow lineId={lineId} editable={canSell} canDiscount={canDiscount} />
         )}
       />
 
       {/* Money is hidden from roles without selling rights (kitchen), matching
           how the Reports/Today tabs are hidden without reports:view. */}
-      {canSell && <CounterTotals />}
+      {canSell && <CounterTotals canDiscount={canDiscount} />}
       {canSell && <CounterActions editing={editing} onEditingChange={onEditingChange} />}
     </>
   );
@@ -277,20 +281,52 @@ function BillHeader({
 const CartLineRow = memo(function CartLineRow({
   lineId,
   editable,
+  canDiscount,
 }: {
   lineId: string;
   editable: boolean;
+  canDiscount: boolean;
 }) {
   const entry = useCartLine(lineId);
-  const { add, remove } = useCartActions();
+  const { add, remove, setLineDiscount } = useCartActions();
+  const [discountOpen, setDiscountOpen] = useState(false);
   if (!entry) return null;
 
   const unitPrice = entry.variant?.price ?? entry.item.price;
+  const gross = unitPrice * entry.qty;
+  const discount = discountAmount(entry.discount, gross);
+  const net = gross - discount;
+  const name = displayItemName(entry.item.name, entry.variant?.name);
+
   return (
     <View style={styles.row}>
       <View style={{ flex: 1 }}>
-        <Text style={styles.name}>{displayItemName(entry.item.name, entry.variant?.name)}</Text>
+        <Text style={styles.name}>{name}</Text>
         <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)}</Text>
+        {canDiscount && (
+          <Pressable
+            style={styles.lineDiscountBtn}
+            hitSlop={6}
+            onPress={() => {
+              feedbackTap();
+              setDiscountOpen(true);
+            }}
+          >
+            <MaterialCommunityIcons
+              name="tag-outline"
+              size={13}
+              color={entry.discount ? colors.red500 : colors.primary}
+            />
+            <Text
+              style={[styles.lineDiscountText, entry.discount && { color: colors.red500 }]}
+              numberOfLines={1}
+            >
+              {entry.discount
+                ? `${discountLabel(entry.discount)} off · -${formatMoney(discount, entry.item.currency)}`
+                : "Add discount"}
+            </Text>
+          </Pressable>
+        )}
       </View>
       {editable ? (
         <View style={styles.stepper}>
@@ -317,21 +353,98 @@ const CartLineRow = memo(function CartLineRow({
       ) : (
         <Text style={[styles.qty, { minWidth: 40 }]}>x{entry.qty}</Text>
       )}
-      <Text style={styles.lineTotal}>
-        {formatMoney(unitPrice * entry.qty, entry.item.currency)}
-      </Text>
+      <View style={styles.lineAmounts}>
+        {discount > 0 && (
+          <Text style={styles.lineWas}>{formatMoney(gross, entry.item.currency)}</Text>
+        )}
+        <Text style={[styles.lineTotal, discount > 0 && styles.lineTotalDiscounted]}>
+          {formatMoney(net, entry.item.currency)}
+        </Text>
+      </View>
+
+      <DiscountSheet
+        visible={discountOpen}
+        title="Line discount"
+        subtitle={`${name} · ${entry.qty} × ${formatMoney(unitPrice, entry.item.currency)}`}
+        base={gross}
+        currency={entry.item.currency}
+        current={entry.discount ?? null}
+        onClose={() => setDiscountOpen(false)}
+        onApply={(next) => setLineDiscount(lineId, next)}
+      />
     </View>
   );
 });
 
-function CounterTotals() {
-  const { subtotal, taxTotal, total } = useCartSummary();
+function CounterTotals({ canDiscount }: { canDiscount: boolean }) {
+  const { count, gross, lineDiscountTotal, orderDiscountTotal, discountTotal, subtotal, taxTotal, total } =
+    useCartSummary();
+  const { setOrderDiscount, getOrderDiscount } = useCartActions();
+  const [sheetOpen, setSheetOpen] = useState(false);
+  // Read at open time: the sheet only needs it while it's on screen, so this
+  // avoids the totals card re-rendering on every discount change.
+  const current = sheetOpen ? getOrderDiscount() : null;
+  /** The order discount applies to what's left after line discounts. */
+  const orderBase = gross - lineDiscountTotal;
+
   return (
     <View style={styles.totalsCard}>
-      <TotalRow label={strings.subtotal} value={formatMoney(subtotal)} />
+      <TotalRow label={strings.subtotal} value={formatMoney(gross)} />
+
+      {lineDiscountTotal > 0 && (
+        <TotalRow label="Item discounts" value={`-${formatMoney(lineDiscountTotal)}`} negative />
+      )}
+
+      {canDiscount ? (
+        <Pressable
+          style={styles.discountRow}
+          onPress={() => {
+            feedbackTap();
+            setSheetOpen(true);
+          }}
+        >
+          <View style={styles.discountLabelWrap}>
+            <MaterialCommunityIcons
+              name="tag-multiple-outline"
+              size={15}
+              color={orderDiscountTotal > 0 ? colors.red500 : colors.primary}
+            />
+            <Text
+              style={[
+                styles.discountLabel,
+                orderDiscountTotal > 0 && { color: colors.red500, fontWeight: "700" },
+              ]}
+            >
+              {orderDiscountTotal > 0 ? "Bill discount" : "Add bill discount"}
+            </Text>
+          </View>
+          <Text
+            style={[styles.totalValue, orderDiscountTotal > 0 && styles.totalNegative]}
+          >
+            {orderDiscountTotal > 0 ? `-${formatMoney(orderDiscountTotal)}` : "—"}
+          </Text>
+        </Pressable>
+      ) : (
+        orderDiscountTotal > 0 && (
+          <TotalRow label="Bill discount" value={`-${formatMoney(orderDiscountTotal)}`} negative />
+        )
+      )}
+
+      {discountTotal > 0 && <TotalRow label="After discount" value={formatMoney(subtotal)} />}
       {taxTotal > 0 && <TotalRow label="Tax" value={formatMoney(taxTotal)} />}
       <View style={styles.divider} />
       <TotalRow label={strings.grandTotal} value={formatMoney(total)} bold />
+
+      <DiscountSheet
+        visible={sheetOpen}
+        title="Bill discount"
+        subtitle={`${count} item${count === 1 ? "" : "s"} · applies to the whole bill`}
+        base={orderBase}
+        currency="NGN"
+        current={current}
+        onClose={() => setSheetOpen(false)}
+        onApply={setOrderDiscount}
+      />
     </View>
   );
 }
@@ -427,11 +540,29 @@ function CounterActions({
   );
 }
 
-function TotalRow({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
+function TotalRow({
+  label,
+  value,
+  bold,
+  negative,
+}: {
+  label: string;
+  value: string;
+  bold?: boolean;
+  negative?: boolean;
+}) {
   return (
     <View style={styles.totalRow}>
       <Text style={[styles.totalLabel, bold && styles.totalBold]}>{label}</Text>
-      <Text style={[styles.totalValue, bold && styles.totalBold]}>{value}</Text>
+      <Text
+        style={[
+          styles.totalValue,
+          negative && styles.totalNegative,
+          bold && styles.totalBold,
+        ]}
+      >
+        {value}
+      </Text>
     </View>
   );
 }
@@ -529,7 +660,27 @@ const styles = StyleSheet.create({
   stepMinus: { backgroundColor: colors.actionRemove },
   stepPlus: { backgroundColor: colors.actionAdd },
   qty: { minWidth: 24, textAlign: "center", fontSize: 16, fontWeight: "800", color: colors.grey900 },
-  lineTotal: { width: 78, textAlign: "right", fontWeight: "700", color: colors.grey900 },
+  lineAmounts: { width: 82, alignItems: "flex-end" },
+  lineTotal: { textAlign: "right", fontWeight: "700", color: colors.grey900 },
+  lineTotalDiscounted: { color: colors.primary },
+  lineWas: {
+    fontSize: 11,
+    color: colors.grey500,
+    textDecorationLine: "line-through",
+    marginBottom: 1,
+  },
+  lineDiscountBtn: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 5 },
+  lineDiscountText: { fontSize: 12, fontWeight: "600", color: colors.primary, flexShrink: 1 },
+  discountRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 5,
+    gap: 12,
+  },
+  discountLabelWrap: { flexDirection: "row", alignItems: "center", gap: 6 },
+  discountLabel: { fontSize: 14, color: colors.primary, fontWeight: "600" },
+  totalNegative: { color: colors.red500, fontWeight: "700" },
 
   totalsCard: { backgroundColor: colors.card, margin: 8, marginTop: 0, borderRadius: 3, padding: 12, elevation: 1 },
   totalRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },

@@ -3,6 +3,7 @@ import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, currencySymbol } from "@/constants/theme";
+import { NumberInput } from "@/components/NumberInput";
 import { feedbackTap } from "@/lib/feedback";
 import type { Item, Variant } from "@/lib/cart";
 
@@ -75,24 +76,38 @@ function Labelled({
   value,
   onChangeText,
   keyboardType,
+  decimals = true,
 }: {
   label: string;
   hint: string;
   value: string;
   onChangeText: (t: string) => void;
   keyboardType?: "numeric" | "default";
+  /** Only meaningful with keyboardType="numeric". */
+  decimals?: boolean;
 }) {
   return (
     <View style={{ flex: 1 }}>
       <Text style={styles.smallLabel}>{label}</Text>
-      <TextInput
-        style={styles.filledInput}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={hint}
-        placeholderTextColor={colors.grey500}
-        keyboardType={keyboardType ?? "default"}
-      />
+      {keyboardType === "numeric" ? (
+        <NumberInput
+          style={styles.filledInput}
+          value={value}
+          onChangeText={onChangeText}
+          decimals={decimals}
+          placeholder={hint}
+          placeholderTextColor={colors.grey500}
+        />
+      ) : (
+        <TextInput
+          style={styles.filledInput}
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={hint}
+          placeholderTextColor={colors.grey500}
+          keyboardType={keyboardType ?? "default"}
+        />
+      )}
     </View>
   );
 }
@@ -221,6 +236,7 @@ export function VariantEditor({
                 value={draft.stock != null ? String(draft.stock) : ""}
                 onChangeText={(t) => set("stock", parseFloat(t) || 0)}
                 keyboardType="numeric"
+                decimals={sellByFraction}
               />
               <View style={styles.checkCol}>
                 <Text style={styles.smallLabel}>Low stock alerts?</Text>
@@ -235,6 +251,7 @@ export function VariantEditor({
                   value={draft.lowStockAt != null ? String(draft.lowStockAt) : ""}
                   onChangeText={(t) => set("lowStockAt", parseFloat(t) || 0)}
                   keyboardType="numeric"
+                  decimals={sellByFraction}
                 />
               </View>
             )}

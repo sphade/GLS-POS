@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -17,6 +18,12 @@ const TABS = ["ITEMS", "CATEGORIES", "MODIFIERS", "INGREDIENTS"];
 export default function InventoryScreen() {
   const router = useRouter();
   const { products, categories, modifiers, ingredients } = useCatalog();
+
+  /** Category name per id, so an item search can also match its category. */
+  const categoryNameById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c.name])),
+    [categories],
+  );
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -38,7 +45,13 @@ export default function InventoryScreen() {
                 title="Items"
                 data={products}
                 keyExtractor={(p) => p.id}
-                searchOf={(p) => p.name}
+                // Searching a category name lists everything in it, which is how
+                // staff actually look for an item ("all the drinks").
+                searchOf={(p) =>
+                  `${p.name} ${categoryNameById.get(p.categoryId ?? "") ?? ""} ${
+                    p.variants?.map((v) => v.name).join(" ") ?? ""
+                  }`
+                }
                 emptyText="No items yet"
                 addLabel="New Item"
                 onAdd={() => router.push("/item-editor")}
@@ -102,7 +115,7 @@ export default function InventoryScreen() {
                 title="Modifiers"
                 data={modifiers}
                 keyExtractor={(m) => m.id}
-                searchOf={(m) => m.name}
+                searchOf={(m) => `${m.name} ${m.options.map((o) => o.name).join(" ")}`}
                 emptyText="No modifier sets yet"
                 addLabel="New Modifier Set"
                 onAdd={() => router.push("/modifier-editor")}
@@ -126,7 +139,7 @@ export default function InventoryScreen() {
               title="Ingredients"
               data={ingredients}
               keyExtractor={(g) => g.id}
-              searchOf={(g) => g.name}
+              searchOf={(g) => `${g.name} ${g.unit}`}
               emptyText="No ingredients yet"
               addLabel="New Ingredient"
               onAdd={() => router.push("/ingredient-editor")}

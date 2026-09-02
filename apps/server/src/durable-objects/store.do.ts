@@ -106,6 +106,9 @@ const WRITE_PERMISSION: Record<string, Permission> = {
   customers: "customers:manage",
   staff: "staff:manage",
   receipts: "sale:create",
+  // Credit notes reverse money, so they need the refund permission — a cashier
+  // who can sell still cannot push a return.
+  returns: "sale:refund",
   stock_movements: "sale:create",
   product_images: "catalog:write",
   // Staff advance a web order through preparing → ready → served while selling.
@@ -116,6 +119,29 @@ const WRITE_PERMISSION: Record<string, Permission> = {
   // Open/held bills are created and settled by anyone who can sell.
   held_orders: "sale:create",
 };
+
+/**
+ * Whether a pushed receipt reprices the sale with a discount.
+ *
+ * Checked on the whole document (the order-level total and every line) so a
+ * device can't slip a reduction past the role check by putting it on one line.
+ */
+function isDiscounted(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const doc = data as {
+    discountTotal?: unknown;
+    orderDiscount?: unknown;
+    lines?: { discount?: unknown; orderDiscountShare?: unknown }[];
+  };
+  if (typeof doc.discountTotal === "number" && doc.discountTotal > 0) return true;
+  if (doc.orderDiscount && typeof doc.orderDiscount === "object") return true;
+  if (!Array.isArray(doc.lines)) return false;
+  return doc.lines.some(
+    (line) =>
+      (typeof line?.discount === "number" && line.discount > 0) ||
+      (typeof line?.orderDiscountShare === "number" && line.orderDiscountShare > 0),
+  );
+}
 
 const stockDidNotIncrease = (before: unknown, after: unknown): boolean => {
   if (JSON.stringify(before) === JSON.stringify(after)) return true;
@@ -415,14 +441,24 @@ export class StoreDurableObject extends DurableObject<Env> {
   /**
    * Whether `role` may apply this change.
    *
-   * Normally the collection's write permission decides. The one exception is
-   * selling: a cashier/waiter has `sale:create` but not `catalog:write`, and
-   * completing a sale must decrement stock. So a product write is allowed when
-   * it changes `stockQuantity` alone and doesn't increase it.
+   * Normally the collection's write permission decides, with two exceptions:
+   *
+   *  - Selling: a cashier/waiter has `sale:create` but not `catalog:write`, and
+   *    completing a sale must decrement stock. So a product write is allowed
+   *    when it changes `stockQuantity` alone and doesn't increase it.
+   *  - Discounting: a receipt only needs `sale:create`, but a *discounted*
+   *    receipt reprices the sale, so it additionally needs `discount:apply`.
+   *    Otherwise a cashier's device could reduce a bill by writing the discount
+   *    straight into the document.
    */
   private mayWrite(change: SyncChange, role: StoreRole, storedJson?: string): boolean {
     const required = WRITE_PERMISSION[change.collection];
     if (!required) return false;
+
+    if (change.collection === "receipts" && !change.deleted && isDiscounted(change.data)) {
+      if (!roleCan(role, "discount:apply")) return false;
+    }
+
     if (roleCan(role, required)) return true;
 
     if (change.collection === "products" && roleCan(role, "sale:create") && !change.deleted) {

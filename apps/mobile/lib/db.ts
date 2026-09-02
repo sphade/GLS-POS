@@ -30,6 +30,7 @@ export const COLLECTIONS = [
   "customers",
   "staff",
   "receipts",
+  "returns",
   "stock_movements",
   "product_images",
   "web_orders",

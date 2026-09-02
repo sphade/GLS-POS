@@ -113,6 +113,7 @@ export default function TableEditorScreen() {
             setTouched(true);
           }}
           keyboardType="numeric"
+          decimals={false}
           showTick={false}
         />
       </ScrollView>

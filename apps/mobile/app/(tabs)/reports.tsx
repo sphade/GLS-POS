@@ -8,6 +8,7 @@ import { PosHeader } from "@/components/PosHeader";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { isVoidReturn, useReturns } from "@/lib/returns";
 import { useStore } from "@/lib/store";
 import { useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
@@ -81,6 +82,7 @@ export default function ReportsScreen() {
   const router = useRouter();
   const { receipts } = useCart();
   const { products } = useCatalog();
+  const { returns } = useReturns();
   const { store } = useStore();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [rangeIndex, setRangeIndex] = useState(0);
@@ -93,28 +95,66 @@ export default function ReportsScreen() {
     [receipts, from, to],
   );
 
+  /**
+   * Returns are scoped by when the refund happened, not when the original sale
+   * did — otherwise refunding today would silently rewrite a closed day's
+   * report. Voids never moved money, so they're excluded from the figures.
+   */
+  const scopedReturns = useMemo(
+    () =>
+      returns.filter((ret) => !isVoidReturn(ret) && ret.createdAt >= from && ret.createdAt < to),
+    [returns, from, to],
+  );
+
   const stats = useMemo(() => {
-    const totalSales = scoped.reduce((s, r) => s + r.total, 0);
+    const grossSales = scoped.reduce((s, r) => s + r.total, 0);
+    const refunded = scopedReturns.reduce((s, ret) => s + ret.total, 0);
+    /**
+     * What was given away at the till. Tracked separately from returns because
+     * discounts are the classic staff-fraud vector — an owner wants to see them
+     * as a share of what was actually sold.
+     */
+    const discounted = scoped.reduce((s, r) => s + (r.discountTotal ?? 0), 0);
+    const discountRate =
+      grossSales + discounted > 0
+        ? Math.round((discounted * 1000) / (grossSales + discounted)) / 10
+        : 0;
     const byMode: Record<string, number> = {};
     const byItem: Record<string, number> = {};
     scoped.forEach((r) => {
       byMode[r.mode] = (byMode[r.mode] ?? 0) + r.total;
       r.lines.forEach((l) => (byItem[l.name] = (byItem[l.name] ?? 0) + l.qty));
     });
-    const topItem = Object.entries(byItem).sort((a, b) => b[1] - a[1])[0];
-    const topMode = Object.entries(byMode).sort((a, b) => b[1] - a[1])[0];
+    // Net the refund back out of the method it was paid back through, so the
+    // top payment method reflects money actually kept.
+    scopedReturns.forEach((ret) => {
+      byMode[ret.method] = (byMode[ret.method] ?? 0) - ret.total;
+      ret.lines.forEach((l) => (byItem[l.name] = (byItem[l.name] ?? 0) - l.qty));
+    });
+    const topItem = Object.entries(byItem)
+      .filter(([, qty]) => qty > 0)
+      .sort((a, b) => b[1] - a[1])[0];
+    const topMode = Object.entries(byMode)
+      .filter(([, value]) => value > 0)
+      .sort((a, b) => b[1] - a[1])[0];
+    const netSales = grossSales - refunded;
     return {
-      totalSales,
+      grossSales,
+      refunded,
+      discounted,
+      discountRate,
+      netSales,
+      returnCount: scopedReturns.length,
       count: scoped.length,
-      avg: scoped.length ? Math.round(totalSales / scoped.length) : 0,
+      avg: scoped.length ? Math.round(netSales / scoped.length) : 0,
       topItem,
       topMode,
       lowStock: products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length,
       remaining: products.reduce((s, i) => s + (i.stockQuantity ?? 0), 0),
     };
-  }, [scoped, products]);
+  }, [scoped, scopedReturns, products]);
 
-  const hasData = scoped.length > 0;
+  const hasData = scoped.length > 0 || scopedReturns.length > 0;
 
   const step = (dir: -1 | 1) => {
     feedbackTap();
@@ -126,7 +166,16 @@ export default function ReportsScreen() {
     feedbackTap();
     router.push({
       pathname: "/report/[type]",
-      params: { type, title, from: String(from), to: String(to), label: dateLabelFor(range) },
+      params: {
+        type,
+        title,
+        from: String(from),
+        to: String(to),
+        label: dateLabelFor(range),
+        // The chart groups itself by whatever this range makes sense as:
+        // a day goes hour by hour, a year month by month.
+        range,
+      },
     });
   };
 
@@ -189,10 +238,35 @@ export default function ReportsScreen() {
           }
         >
           <MetricCard
-            label="TOTAL SALES"
-            value={formatMoney(stats.totalSales, CURRENCY)}
+            label="NET SALES"
+            value={formatMoney(stats.netSales, CURRENCY)}
+            message={
+              stats.refunded > 0
+                ? `${formatMoney(stats.grossSales, CURRENCY)} sold less ${formatMoney(stats.refunded, CURRENCY)} refunded`
+                : undefined
+            }
             onPress={() => openChart("revenue", "Total Sales")}
           />
+          {stats.refunded > 0 && (
+            <MetricCard
+              label="RETURNS"
+              value={`-${formatMoney(stats.refunded, CURRENCY)}`}
+              valueColor={colors.red500}
+              message={`${stats.returnCount} return${stats.returnCount === 1 ? "" : "s"}`}
+              onPress={() => {
+                feedbackTap();
+                router.push("/returns" as Href);
+              }}
+            />
+          )}
+          {stats.discounted > 0 && (
+            <MetricCard
+              label="DISCOUNTS GIVEN"
+              value={`-${formatMoney(stats.discounted, CURRENCY)}`}
+              valueColor={colors.red500}
+              message={`${stats.discountRate}% of what was sold`}
+            />
+          )}
           <MetricCard
             label="RECEIPTS"
             value={String(stats.count)}

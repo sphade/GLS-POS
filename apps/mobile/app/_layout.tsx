@@ -8,11 +8,11 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { CartProvider, useCartActions } from "@/lib/cart";
 import { CatalogProvider, useCatalog } from "@/lib/catalog";
+import { ReturnsProvider } from "@/lib/returns";
 import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
-import { GlobalRefreshButton } from "@/components/GlobalRefreshButton";
 import { SyncStatusBar } from "@/components/SyncStatusBar";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
@@ -107,19 +107,21 @@ function StoreScopedData() {
   return (
     <CatalogProvider key={`catalog-${store.id}`}>
       <CartProvider key={`cart-${store.id}`}>
-        <WebOrdersProvider key={`orders-${store.id}`}>
-          <CartCatalogBridge />
-          <StatusBar style="light" backgroundColor={colors.primaryDark} />
-          <AuthGate>
-            <RootStack />
-          </AuthGate>
-          {/* Floats above every screen so staff never miss an order. */}
-          <NewOrderBanner />
-          {/* Manual pull from any route when staff want fresh server data now. */}
-          <GlobalRefreshButton />
-          {/* Top strip: shows background sync activity + real failure reasons. */}
-          <SyncStatusBar />
-        </WebOrdersProvider>
+        {/* Refunds are cold data, so they sit outside the cart's hot path: a
+            return raised elsewhere must never re-render the item grid. */}
+        <ReturnsProvider key={`returns-${store.id}`}>
+          <WebOrdersProvider key={`orders-${store.id}`}>
+            <CartCatalogBridge />
+            <StatusBar style="light" backgroundColor={colors.primaryDark} />
+            <AuthGate>
+              <RootStack />
+            </AuthGate>
+            {/* Floats above every screen so staff never miss an order. */}
+            <NewOrderBanner />
+            {/* Top strip: shows background sync activity + real failure reasons. */}
+            <SyncStatusBar />
+          </WebOrdersProvider>
+        </ReturnsProvider>
       </CartProvider>
     </CatalogProvider>
   );
@@ -197,6 +199,11 @@ function RootStack() {
       <Stack.Screen name="cash-payment" options={MODAL} />
       <Stack.Screen name="receipt/[id]" options={MODAL} />
       <Stack.Screen name="scanner" options={MODAL} />
+
+      {/* Returns / refunds */}
+      <Stack.Screen name="return/[receiptId]" options={MODAL} />
+      <Stack.Screen name="return-receipt/[id]" options={MODAL} />
+      <Stack.Screen name="returns" options={MODAL} />
 
       {/* Catalog management */}
       <Stack.Screen name="inventory" options={MODAL} />

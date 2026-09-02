@@ -72,6 +72,7 @@ class BluetoothClassicModule : Module() {
                 socket?.close()
             } catch (_: Exception) {}
             socket = null
+            null
         }
     }
 }

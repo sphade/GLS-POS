@@ -47,6 +47,7 @@ export function EntityListScreen<T>({
       <FlatList
         data={filtered}
         keyExtractor={keyExtractor}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ padding: 8, paddingBottom: 96 }}
         ListEmptyComponent={
           <View style={styles.emptyWrap}>
@@ -71,7 +72,50 @@ export function EntityListScreen<T>({
     </>
   );
 
-  if (embedded) return <View style={{ flex: 1 }}>{body}</View>;
+  /**
+   * Embedded lists (the Inventory tabs) have no toolbar of their own, so the
+   * search box lives above the rows instead of behind a toggle. Each tab keeps
+   * its own query — swiping from Items to Categories shouldn't carry a stale
+   * filter across.
+   */
+  if (embedded) {
+    return (
+      <View style={{ flex: 1 }}>
+        <View style={styles.embeddedSearchRow}>
+          <View style={styles.embeddedSearchBox}>
+            <Ionicons name="search" size={18} color={colors.grey600} />
+            <TextInput
+              style={styles.embeddedSearchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder={`Search ${title.toLowerCase()}`}
+              placeholderTextColor={colors.grey500}
+              returnKeyType="search"
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+            {query.length > 0 && (
+              <Pressable
+                hitSlop={8}
+                onPress={() => {
+                  feedbackTap();
+                  setQuery("");
+                }}
+              >
+                <Ionicons name="close-circle" size={18} color={colors.grey500} />
+              </Pressable>
+            )}
+          </View>
+          {q.length > 0 && (
+            <Text style={styles.resultCount}>
+              {filtered.length} of {data.length}
+            </Text>
+          )}
+        </View>
+        {body}
+      </View>
+    );
+  }
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -162,6 +206,27 @@ const styles = StyleSheet.create({
   toolbarBtn: { width: 44, alignItems: "center" },
   toolbarTitle: { flex: 1, fontSize: 18, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
   searchInput: { flex: 1, fontSize: 16, color: colors.grey900, paddingHorizontal: 8 },
+
+  embeddedSearchRow: { paddingHorizontal: 8, paddingTop: 8 },
+  embeddedSearchBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.white,
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    height: 44,
+    elevation: 1,
+  },
+  embeddedSearchInput: { flex: 1, fontSize: 15, color: colors.grey900, padding: 0 },
+  resultCount: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: colors.grey600,
+    marginTop: 6,
+    marginLeft: 4,
+    letterSpacing: 0.3,
+  },
 
   emptyWrap: { marginTop: 60, alignItems: "center" },
 

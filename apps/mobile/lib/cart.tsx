@@ -12,6 +12,7 @@
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
 import { loadAll, metaGet, metaSet, put as dbPut, softDelete } from "./db";
+import { computeTotals, type Discount, type PricedLine } from "./discount-model";
 import { logAudit } from "./audit";
 import { onSynced } from "./sync";
 
@@ -127,6 +128,20 @@ export type ReceiptLine = {
   name: string;
   qty: number;
   price: number;
+  /**
+   * The line's own discount in minor units, for the printed itemisation.
+   * Absent on receipts raised before discounts existed.
+   */
+  discount?: number;
+  /** The line's share of an order-level discount, in minor units. */
+  orderDiscountShare?: number;
+  /**
+   * What this line actually contributed to the pre-tax total, after every
+   * discount. Returns refund from this, so a discounted sale can never be
+   * refunded at list price. Absent on older receipts, where `price × qty` is
+   * the correct net by definition.
+   */
+  netTotal?: number;
 };
 
 export type Receipt = {
@@ -141,6 +156,10 @@ export type Receipt = {
   createdAt: number;
   synced: boolean;
   lines: ReceiptLine[];
+  /** Every discount on this sale (line + order), in minor units. */
+  discountTotal?: number;
+  /** The order-level discount as entered, so the slip can say "10% off". */
+  orderDiscount?: Discount;
   cashReceived?: number;
   /** Snapshot of who/where sold it, so a reprint is always accurate. */
   storeName: string;
@@ -150,7 +169,14 @@ export type Receipt = {
   paidAt?: number;
 };
 
-export type CartEntry = { lineId: string; item: Item; variant?: Variant; qty: number };
+export type CartEntry = {
+  lineId: string;
+  item: Item;
+  variant?: Variant;
+  qty: number;
+  /** Line-level discount, if a manager gave one. */
+  discount?: Discount;
+};
 
 /**
  * A parked bill: the cart snapshotted so a table can keep ordering (or a
@@ -167,6 +193,8 @@ export type HeldOrder = {
   total: number;
   currency: string;
   createdAt: number;
+  /** Order-level discount parked with the bill, so resuming restores it. */
+  orderDiscount?: Discount;
   /**
    * Set while the bill is loaded in the active cart. The record is kept (not
    * deleted) until the cart is charged, held again, or cleared — so killing
@@ -187,6 +215,11 @@ type CartState = {
   /** Total quantity across all variants of a product. */
   qtyOf: (productId: string) => number;
   clear: () => void;
+
+  /** Discounts (owner/manager only — the UI gates on `discount:apply`). */
+  orderDiscount: Discount | null;
+  setLineDiscount: (lineId: string, discount: Discount | null) => void;
+  setOrderDiscount: (discount: Discount | null) => void;
 
   /** Open/held bills, newest first. */
   heldOrders: HeldOrder[];
@@ -251,33 +284,81 @@ const CartContext = createContext<CartState | null>(null);
  */
 export type CartSummary = {
   count: number;
+  /** Undiscounted value of the bill. */
+  gross: number;
+  lineDiscountTotal: number;
+  orderDiscountTotal: number;
+  /** line + order discounts. */
+  discountTotal: number;
+  /** Pre-tax value after discounts — what tax is charged on. */
   subtotal: number;
   taxTotal: number;
   total: number;
 };
 
-function calculateCartSummary(entries: Record<string, CartEntry>): CartSummary {
-  let count = 0;
-  let subtotal = 0;
-  let taxTotal = 0;
+/** Unit price actually charged for a line (variant overrides the item). */
+const unitPriceOf = (entry: CartEntry): number => entry.variant?.price ?? entry.item.price;
 
-  for (const entry of Object.values(entries)) {
-    const unitPrice = entry.variant?.price ?? entry.item.price;
-    const taxRateBps = entry.variant
-      ? entry.variant.taxOn
-        ? Math.round((entry.variant.taxPercent ?? 0) * 100)
-        : 0
-      : (entry.item.taxRateBps ?? 0);
-    count += entry.qty;
-    subtotal += entry.qty * unitPrice;
-    taxTotal += Math.round((entry.qty * unitPrice * taxRateBps) / 10000);
-  }
+/**
+ * Tax rate for a line in basis points. A variant carries its own percent and
+ * only charges tax when `taxOn`; a simple item uses `taxRateBps`.
+ */
+const taxRateBpsOf = (entry: CartEntry): number =>
+  entry.variant
+    ? entry.variant.taxOn
+      ? Math.round((entry.variant.taxPercent ?? 0) * 100)
+      : 0
+    : (entry.item.taxRateBps ?? 0);
 
-  return { count, subtotal, taxTotal, total: subtotal + taxTotal };
+/** Cart entries in the shape the discount engine prices. */
+function pricedLinesOf(entries: Record<string, CartEntry>): PricedLine[] {
+  return Object.values(entries).map((entry) => ({
+    id: entry.lineId,
+    unitPrice: unitPriceOf(entry),
+    qty: entry.qty,
+    taxRateBps: taxRateBpsOf(entry),
+    discount: entry.discount,
+  }));
+}
+
+/**
+ * Price the cart. Discounts come off first and tax is charged on what's left,
+ * so `subtotal` is the discounted pre-tax figure — which is what `total`,
+ * receipts and the Charge button have always meant.
+ */
+function calculateCartSummary(
+  entries: Record<string, CartEntry>,
+  orderDiscount: Discount | null,
+): CartSummary {
+  const totals = computeTotals(pricedLinesOf(entries), orderDiscount);
+  return {
+    count: totals.count,
+    gross: totals.gross,
+    lineDiscountTotal: totals.lineDiscountTotal,
+    orderDiscountTotal: totals.orderDiscountTotal,
+    discountTotal: totals.discountTotal,
+    subtotal: totals.subtotal,
+    taxTotal: totals.taxTotal,
+    total: totals.total,
+  };
 }
 
 function sameLineIds(previous: readonly string[], next: readonly string[]): boolean {
   return previous.length === next.length && previous.every((id, index) => id === next[index]);
+}
+
+/** Whether any figure a totals subscriber renders has moved. */
+function summaryDiffers(a: CartSummary, b: CartSummary): boolean {
+  return (
+    a.count !== b.count ||
+    a.gross !== b.gross ||
+    a.lineDiscountTotal !== b.lineDiscountTotal ||
+    a.orderDiscountTotal !== b.orderDiscountTotal ||
+    a.discountTotal !== b.discountTotal ||
+    a.subtotal !== b.subtotal ||
+    a.taxTotal !== b.taxTotal ||
+    a.total !== b.total
+  );
 }
 
 type CartFast = {
@@ -293,6 +374,11 @@ type CartFast = {
   openTableTicket: (tableLabel: string) => void;
   saveTableTicket: () => void;
   abandonTableTicket: () => void;
+  /** Set or clear one line's discount. Pass null to remove it. */
+  setLineDiscount: (lineId: string, discount: Discount | null) => void;
+  /** Set or clear the whole-bill discount. Pass null to remove it. */
+  setOrderDiscount: (discount: Discount | null) => void;
+  getOrderDiscount: () => Discount | null;
   subscribeToProduct: (productId: string, cb: () => void) => () => void;
   subscribeToCount: (cb: () => void) => () => void;
   subscribeToLine: (lineId: string, cb: () => void) => () => void;
@@ -309,6 +395,7 @@ const CartFastContext = createContext<CartFast | null>(null);
 
 export function CartProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
+  const [orderDiscount, setOrderDiscountState] = useState<Discount | null>(null);
 
   // --- Synchronous fine-grained quantity store ----------------------------
   // React state remains the source rendered by checkout/report screens, while
@@ -316,8 +403,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
   // subscribe to one product, one variant-safe line, the line structure, or
   // totals without waking the rest of the cart UI.
   const entriesRef = useRef(entries);
+  const orderDiscountRef = useRef<Discount | null>(orderDiscount);
   const lineIdsRef = useRef<readonly string[]>(Object.keys(entries));
-  const summaryRef = useRef<CartSummary>(calculateCartSummary(entries));
+  const summaryRef = useRef<CartSummary>(calculateCartSummary(entries, orderDiscount));
   const productListeners = useRef(new Map<string, Set<() => void>>());
   const lineListeners = useRef(new Map<string, Set<() => void>>());
   const countListeners = useRef(new Set<() => void>());
@@ -338,6 +426,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const getLine = useCallback((lineId: string) => entriesRef.current[lineId], []);
   const getLineIds = useCallback(() => lineIdsRef.current, []);
   const getSummary = useCallback(() => summaryRef.current, []);
+  const getOrderDiscount = useCallback(() => orderDiscountRef.current, []);
 
   const subscribeToProduct = useCallback((productId: string, cb: () => void) => {
     let listeners = productListeners.current.get(productId);
@@ -403,26 +492,30 @@ export function CartProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const replaceEntries = useCallback(
-    (next: Record<string, CartEntry>) => {
+  /**
+   * Commit a new cart state — lines and/or the order-level discount — updating
+   * the synchronous snapshots first, then React state, then only the listeners
+   * whose slice actually changed.
+   */
+  const publish = useCallback(
+    (next: Record<string, CartEntry>, nextOrderDiscount: Discount | null) => {
       const previous = entriesRef.current;
-      if (next === previous) return;
+      const previousOrderDiscount = orderDiscountRef.current;
+      if (next === previous && nextOrderDiscount === previousOrderDiscount) return;
 
       const previousLineIds = lineIdsRef.current;
       const nextLineIds = Object.keys(next);
       const lineIdsChanged = !sameLineIds(previousLineIds, nextLineIds);
       const previousSummary = summaryRef.current;
-      const nextSummary = calculateCartSummary(next);
-      const summaryChanged =
-        previousSummary.count !== nextSummary.count ||
-        previousSummary.subtotal !== nextSummary.subtotal ||
-        previousSummary.taxTotal !== nextSummary.taxTotal ||
-        previousSummary.total !== nextSummary.total;
+      const nextSummary = calculateCartSummary(next, nextOrderDiscount);
+      const summaryChanged = summaryDiffers(previousSummary, nextSummary);
 
       entriesRef.current = next;
+      orderDiscountRef.current = nextOrderDiscount;
       if (lineIdsChanged) lineIdsRef.current = nextLineIds;
       if (summaryChanged) summaryRef.current = nextSummary;
-      setEntries(next);
+      if (next !== previous) setEntries(next);
+      if (nextOrderDiscount !== previousOrderDiscount) setOrderDiscountState(nextOrderDiscount);
 
       notifyChangedEntries(previous, next);
       if (lineIdsChanged) lineIdsListeners.current.forEach((listener) => listener());
@@ -432,6 +525,36 @@ export function CartProvider({ children }: { children: ReactNode }) {
       if (summaryChanged) summaryListeners.current.forEach((listener) => listener());
     },
     [notifyChangedEntries],
+  );
+
+  /**
+   * Replace the cart lines, keeping the current order discount unless one is
+   * given explicitly. Pass `null` when the bill itself is going away (charged,
+   * cleared, parked) so the next sale never inherits someone else's discount.
+   */
+  const replaceEntries = useCallback(
+    (next: Record<string, CartEntry>, nextOrderDiscount?: Discount | null) =>
+      publish(next, nextOrderDiscount === undefined ? orderDiscountRef.current : nextOrderDiscount),
+    [publish],
+  );
+
+  const setLineDiscount = useCallback(
+    (lineId: string, discount: Discount | null) => {
+      const previous = entriesRef.current;
+      const existing = previous[lineId];
+      if (!existing) return;
+      if ((existing.discount ?? null) === discount) return;
+      const nextEntry: CartEntry = { ...existing };
+      if (discount) nextEntry.discount = discount;
+      else delete nextEntry.discount;
+      replaceEntries({ ...previous, [lineId]: nextEntry });
+    },
+    [replaceEntries],
+  );
+
+  const setOrderDiscount = useCallback(
+    (discount: Discount | null) => publish(entriesRef.current, discount),
+    [publish],
   );
 
   // --- Stable actions (identity never changes) ----------------------------
@@ -492,7 +615,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
       resumedHeldIdRef.current = null;
       tableTagRef.current = null;
     }
-    replaceEntries({});
+    // The bill is gone, so its discount goes with it.
+    replaceEntries({}, null);
   }, [replaceEntries]);
 
   // --- Dine-in table tickets (stable identities) ---------------------------
@@ -508,10 +632,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
         marked.entries.forEach((e) => {
           next[e.lineId] = e;
         });
-        replaceEntries(next);
+        replaceEntries(next, marked.orderDiscount ?? null);
         resumedHeldIdRef.current = existing.id;
       } else {
-        replaceEntries({});
+        replaceEntries({}, null);
         resumedHeldIdRef.current = null;
       }
       tableTagRef.current = label;
@@ -536,27 +660,29 @@ export function CartProvider({ children }: { children: ReactNode }) {
       }
       resumedHeldIdRef.current = null;
       tableTagRef.current = null;
-      replaceEntries({});
+      replaceEntries({}, null);
       return;
     }
 
     const now = Date.now();
     const prior = res ? heldOrdersRef.current.find((h) => h.id === res) : undefined;
+    const parkedDiscount = orderDiscountRef.current;
     const held: HeldOrder = {
       id: res ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
       label,
       note: prior?.note,
       entries: list,
       itemCount: list.reduce((s, e) => s + e.qty, 0),
-      total: summaryRef.current.subtotal + summaryRef.current.taxTotal,
+      total: summaryRef.current.total,
       currency: list[0]?.item.currency ?? "NGN",
       createdAt: prior?.createdAt ?? now,
+      ...(parkedDiscount ? { orderDiscount: parkedDiscount } : {}),
     };
     dbPut("held_orders", held);
     setHeldOrders((prev) => [held, ...prev.filter((h) => h.id !== held.id)]);
     resumedHeldIdRef.current = null;
     tableTagRef.current = null;
-    replaceEntries({});
+    replaceEntries({}, null);
   }, [replaceEntries]);
 
   /** Leave the table for good: discard any open ticket and empty the cart. */
@@ -568,7 +694,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
     }
     resumedHeldIdRef.current = null;
     tableTagRef.current = null;
-    replaceEntries({});
+    replaceEntries({}, null);
   }, [replaceEntries]);
 
   const fast = useMemo<CartFast>(
@@ -580,6 +706,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
       openTableTicket,
       saveTableTicket,
       abandonTableTicket,
+      setLineDiscount,
+      setOrderDiscount,
+      getOrderDiscount,
       subscribeToProduct,
       subscribeToCount,
       subscribeToLine,
@@ -599,6 +728,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
       openTableTicket,
       saveTableTicket,
       abandonTableTicket,
+      setLineDiscount,
+      setOrderDiscount,
+      getOrderDiscount,
       subscribeToProduct,
       subscribeToCount,
       subscribeToLine,
@@ -641,14 +773,21 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
-    const priceOf = (entry: CartEntry) => entry.variant?.price ?? entry.item.price;
-    const { count, subtotal, taxTotal, total } = summaryRef.current;
+    const priceOf = unitPriceOf;
+    // Price the bill once: the aggregate feeds the totals, and the per-line
+    // breakdown lets a receipt record exactly what each line paid.
+    const totals = computeTotals(pricedLinesOf(entries), orderDiscount);
+    const { count, subtotal, taxTotal, total, discountTotal } = totals;
+    const breakdown = new Map(totals.lines.map((line) => [line.id, line]));
     return {
       entries,
       count,
       subtotal,
       taxTotal,
       total,
+      orderDiscount,
+      setLineDiscount,
+      setOrderDiscount,
       qtyOf: (productId) =>
         list.reduce((sum, entry) => sum + (entry.item.id === productId ? entry.qty : 0), 0),
       add,
@@ -674,9 +813,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
           note,
           entries: list,
           itemCount: list.reduce((s, e) => s + e.qty, 0),
-          total: subtotal + taxTotal,
+          total,
           currency: list[0]?.item.currency ?? "NGN",
           createdAt: now,
+          ...(orderDiscount ? { orderDiscount } : {}),
         };
         dbPut("held_orders", held);
         // Replace in place when updating, otherwise prepend.
@@ -701,7 +841,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         marked.entries.forEach((e) => {
           next[e.lineId] = e;
         });
-        replaceEntries(next);
+        replaceEntries(next, marked.orderDiscount ?? null);
         resumedHeldIdRef.current = id;
         tableTagRef.current = null;
       },
@@ -755,18 +895,30 @@ export function CartProvider({ children }: { children: ReactNode }) {
           mode,
           status: settled,
           itemCount: list.reduce((s, e) => s + e.qty, 0),
-          total: subtotal + taxTotal,
+          total,
           currency: list[0]?.item.currency ?? "NGN",
           createdAt: now,
           synced: false,
-          lines: list.map((entry) => ({
-            productId: entry.item.id,
-            variantId: entry.variant?.id,
-            variantName: entry.variant?.name,
-            name: displayItemName(entry.item.name, entry.variant?.name),
-            qty: entry.qty,
-            price: priceOf(entry),
-          })),
+          lines: list.map((entry) => {
+            const line = breakdown.get(entry.lineId);
+            return {
+              productId: entry.item.id,
+              variantId: entry.variant?.id,
+              variantName: entry.variant?.name,
+              name: displayItemName(entry.item.name, entry.variant?.name),
+              qty: entry.qty,
+              price: priceOf(entry),
+              // Snapshot what this line actually paid. Returns refund from
+              // `netTotal`, so a discounted sale can't be refunded at list price.
+              ...(line && line.lineDiscount > 0 ? { discount: line.lineDiscount } : {}),
+              ...(line && line.orderDiscountShare > 0
+                ? { orderDiscountShare: line.orderDiscountShare }
+                : {}),
+              ...(line ? { netTotal: line.taxable } : {}),
+            };
+          }),
+          ...(discountTotal > 0 ? { discountTotal } : {}),
+          ...(orderDiscount ? { orderDiscount } : {}),
           cashReceived,
           storeName,
           storeReference,
@@ -780,7 +932,13 @@ export function CartProvider({ children }: { children: ReactNode }) {
           action: "sale.complete",
           entity: "receipt",
           entityId: receipt.id,
-          summary: `Sale ${receipt.number} · ${receipt.itemCount} item${receipt.itemCount === 1 ? "" : "s"} · ${mode} · ${formatMoney(receipt.total, receipt.currency)}`,
+          summary:
+            `Sale ${receipt.number} · ${receipt.itemCount} item${receipt.itemCount === 1 ? "" : "s"} · ${mode} · ${formatMoney(receipt.total, receipt.currency)}` +
+            // Discounts are the classic till-fraud vector, so every discounted
+            // sale names the amount and the reason in the audit trail.
+            (discountTotal > 0
+              ? ` · discount ${formatMoney(discountTotal, receipt.currency)}${orderDiscount?.reason ? ` (${orderDiscount.reason})` : ""}`
+              : ""),
         });
         return receipt;
       },
@@ -822,7 +980,21 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
     };
-  }, [entries, receipts, heldOrders, add, remove, clear, replaceEntries]);
+  }, [
+    entries,
+    orderDiscount,
+    receipts,
+    heldOrders,
+    add,
+    remove,
+    clear,
+    replaceEntries,
+    setLineDiscount,
+    setOrderDiscount,
+    openTableTicket,
+    saveTableTicket,
+    abandonTableTicket,
+  ]);
 
   return (
     <CartContext.Provider value={value}>

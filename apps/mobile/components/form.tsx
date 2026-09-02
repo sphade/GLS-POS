@@ -2,6 +2,7 @@
 import { Alert, Image, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
+import { NumberInput } from "@/components/NumberInput";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -61,13 +62,20 @@ export function EditorToolbar({
   );
 }
 
-/** Labelled text field in a white card, with the validity tick. */
+/**
+ * Labelled text field in a white card, with the validity tick.
+ *
+ * `keyboardType="numeric"` switches the input to a NumberInput, so every number
+ * field in the app selects its current value on focus and rejects stray
+ * characters. Pass `decimals={false}` for counts that can't be fractional.
+ */
 export function FieldCard({
   label,
   hint,
   value,
   onChangeText,
   keyboardType,
+  decimals = true,
   valid,
   showTick = true,
 }: {
@@ -76,6 +84,8 @@ export function FieldCard({
   value: string;
   onChangeText: (t: string) => void;
   keyboardType?: "numeric" | "default" | "phone-pad" | "email-address";
+  /** Only meaningful with keyboardType="numeric". */
+  decimals?: boolean;
   valid?: boolean;
   showTick?: boolean;
 }) {
@@ -87,14 +97,25 @@ export function FieldCard({
         )}
         <View style={{ flex: 1 }}>
           <Text style={styles.fieldLabel}>{label}</Text>
-          <TextInput
-            style={styles.fieldInput}
-            value={value}
-            onChangeText={onChangeText}
-            placeholder={hint}
-            placeholderTextColor={colors.hint}
-            keyboardType={keyboardType ?? "default"}
-          />
+          {keyboardType === "numeric" ? (
+            <NumberInput
+              style={styles.fieldInput}
+              value={value}
+              onChangeText={onChangeText}
+              decimals={decimals}
+              placeholder={hint}
+              placeholderTextColor={colors.hint}
+            />
+          ) : (
+            <TextInput
+              style={styles.fieldInput}
+              value={value}
+              onChangeText={onChangeText}
+              placeholder={hint}
+              placeholderTextColor={colors.hint}
+              keyboardType={keyboardType ?? "default"}
+            />
+          )}
         </View>
       </View>
     </View>

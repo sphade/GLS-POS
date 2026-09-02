@@ -14,7 +14,9 @@ const ROLES = ["Owner", "Manager", "Cashier", "Waiter", "Kitchen"];
 const PERMISSIONS: Record<string, string[]> = {
   Owner: ["Everything"],
   Manager: ["Sell", "Refunds", "Discounts", "Reports", "Inventory", "Staff"],
-  Cashier: ["Sell", "Discounts (limited)"],
+  // No discounts and no refunds: both reprice or reverse money, and both are
+  // enforced server-side, so promising them here would be a lie.
+  Cashier: ["Sell", "Customers", "Tables"],
   Waiter: ["Sell", "Tables"],
   Kitchen: ["Kitchen display"],
 };

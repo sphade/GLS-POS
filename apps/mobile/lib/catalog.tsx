@@ -36,7 +36,7 @@ export type Customer = { id: string; name: string; phone?: string; email?: strin
 export type StaffMember = { id: string; name: string; role: string; phone?: string; active: boolean };
 
 /** Why stock moved. Every change to a tracked item's stock writes one of these. */
-export type StockMovementReason = "sale" | "adjustment" | "initial" | "restock";
+export type StockMovementReason = "sale" | "adjustment" | "initial" | "restock" | "return";
 export type StockMovement = {
   id: string;
   productId: string;
@@ -199,6 +199,12 @@ type CatalogState = {
 
   /** Decrement stock for tracked items sold, logging a movement per line. */
   recordSale: (lines: { productId: string; variantId?: string; qty: number }[], ref?: string) => void;
+  /**
+   * Put stock back for returned units, logging a movement per line. Only the
+   * lines a cashier chose to restock are passed in — a damaged return stays
+   * written off, so its units are never restored.
+   */
+  recordReturn: (lines: { productId: string; variantId?: string; qty: number }[], ref?: string) => void;
   /** Log a manual stock change (adjustment/initial/restock). Does not itself
    *  write the product; the caller has already persisted the new quantity.
    *  Pass `variant` when the change is to a specific variant's stock. */
@@ -511,6 +517,71 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
               productName: product.name,
               reason: "sale",
               delta: -(product.stockQuantity - resulting),
+              resulting,
+              at: now,
+              ref,
+            });
+            changed = true;
+            return updated;
+          });
+          return changed ? next : prev;
+        });
+      },
+
+      recordReturn: (lines, ref) => {
+        const now = Date.now();
+        const quantities = new Map<string, number>();
+        for (const line of lines) {
+          if (!Number.isFinite(line.qty) || line.qty <= 0) continue;
+          const key = `${line.productId}\u0000${line.variantId ?? ""}`;
+          quantities.set(key, (quantities.get(key) ?? 0) + line.qty);
+        }
+        if (quantities.size === 0) return;
+
+        setProducts((prev) => {
+          let changed = false;
+          const next = prev.map((product) => {
+            if (product.variants?.length) {
+              let productChanged = false;
+              const variants = product.variants.map((variant) => {
+                const qty = quantities.get(`${product.id}\u0000${variant.id}`) ?? 0;
+                // Untracked variants (and ones the owner excluded from auto
+                // stock) refund money without touching a stock number.
+                if (qty <= 0 || !variant.autoUpdateStock || variant.stock == null) return variant;
+                const resulting = variant.stock + qty;
+                productChanged = true;
+                dbPut<StockMovement>("stock_movements", {
+                  id: uid("mov"),
+                  productId: product.id,
+                  productName: product.name,
+                  variantId: variant.id,
+                  variantName: variant.name,
+                  reason: "return",
+                  delta: qty,
+                  resulting,
+                  at: now,
+                  ref,
+                });
+                return { ...variant, stock: resulting };
+              });
+              if (!productChanged) return product;
+              const updated = { ...product, variants };
+              dbPut("products", updated);
+              changed = true;
+              return updated;
+            }
+
+            const qty = quantities.get(`${product.id}\u0000`) ?? 0;
+            if (qty <= 0 || product.stockQuantity == null) return product;
+            const resulting = product.stockQuantity + qty;
+            const updated = { ...product, stockQuantity: resulting };
+            dbPut("products", updated);
+            dbPut<StockMovement>("stock_movements", {
+              id: uid("mov"),
+              productId: product.id,
+              productName: product.name,
+              reason: "return",
+              delta: qty,
               resulting,
               at: now,
               ref,

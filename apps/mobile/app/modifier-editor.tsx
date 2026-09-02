@@ -5,6 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, currencySymbol } from "@/constants/theme";
 import { EditorToolbar, FieldCard, ToggleRow, confirmDelete, formStyles } from "@/components/form";
+import { NumberInput } from "@/components/NumberInput";
 import { useCatalog, type ModifierOption } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
@@ -102,13 +103,12 @@ export default function ModifierEditorScreen() {
               />
               <View style={styles.priceWrap}>
                 <Text style={styles.priceSym}>{SYM}</Text>
-                <TextInput
+                <NumberInput
                   style={styles.optionPrice}
                   value={o.price ? String(o.price / 100) : ""}
                   onChangeText={(t) => updateOption(i, { price: Math.round((parseFloat(t) || 0) * 100) })}
                   placeholder="0"
                   placeholderTextColor={colors.hint}
-                  keyboardType="numeric"
                 />
               </View>
               <Pressable

@@ -1,4 +1,5 @@
 import { EscPosBuilder, type PaperWidth } from "./escpos";
+import { discountLabel } from "./discount-model";
 import type { Receipt } from "./cart";
 
 /**
@@ -32,11 +33,28 @@ function when(ts: number): string {
   return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
+/**
+ * Gross / discount / net / tax for a receipt.
+ *
+ * `netTotal` is only present on receipts raised after discounts existed; for
+ * older ones the list value *is* the net, so every figure below collapses to
+ * what the slip has always printed.
+ */
+function moneyBreakdown(r: Receipt) {
+  const gross = r.lines.reduce((sum, line) => sum + line.price * line.qty, 0);
+  const net = r.lines.reduce((sum, line) => sum + (line.netTotal ?? line.price * line.qty), 0);
+  const discount = r.discountTotal ?? Math.max(0, gross - net);
+  return { gross, net, discount, tax: Math.max(0, r.total - net) };
+}
+
+/** What a single line contributed after its discounts. */
+const lineNet = (line: Receipt["lines"][number]): number =>
+  line.netTotal ?? line.price * line.qty;
+
 /** Bytes for a thermal printer. */
 export function buildReceiptBytes(r: Receipt, paper: PaperWidth = 58): Uint8Array {
   const b = new EscPosBuilder(paper);
-  const subtotal = r.lines.reduce((s, l) => s + l.price * l.qty, 0);
-  const tax = r.total - subtotal;
+  const { gross, net, discount, tax } = moneyBreakdown(r);
 
   b.align("center").big(true).bold(true).line(r.storeName).big(false);
   if (r.storeReference) b.line(r.storeReference);
@@ -49,11 +67,16 @@ export function buildReceiptBytes(r: Receipt, paper: PaperWidth = 58): Uint8Arra
   b.rule();
 
   for (const l of r.lines) {
-    b.item(l.name, l.qty, amount(l.price), amount(l.price * l.qty));
+    b.item(l.name, l.qty, amount(l.price), amount(lineNet(l)));
   }
   b.rule();
 
-  b.keyValue("Subtotal", money(subtotal, r.currency));
+  b.keyValue("Subtotal", money(gross, r.currency));
+  if (discount > 0) {
+    const label = r.orderDiscount ? `Discount (${discountLabel(r.orderDiscount)})` : "Discount";
+    b.keyValue(label, `-${money(discount, r.currency)}`);
+    b.keyValue("After discount", money(net, r.currency));
+  }
   if (tax > 0) b.keyValue("Tax", money(tax, r.currency));
   b.bold(true).big(true).keyValue("TOTAL", amount(r.total)).big(false).bold(false);
 
@@ -76,8 +99,7 @@ export function buildReceiptBytes(r: Receipt, paper: PaperWidth = 58): Uint8Arra
  * on WhatsApp). Styled to look like a receipt at 58mm width.
  */
 export function buildReceiptHtml(r: Receipt): string {
-  const subtotal = r.lines.reduce((s, l) => s + l.price * l.qty, 0);
-  const tax = r.total - subtotal;
+  const { gross, net, discount, tax } = moneyBreakdown(r);
   const sym = r.currency === "NGN" ? "&#8358;" : `${r.currency} `;
   const row = (label: string, value: string, bold = false) =>
     `<div class="kv${bold ? " b" : ""}"><span>${label}</span><span>${value}</span></div>`;
@@ -109,12 +131,25 @@ export function buildReceiptHtml(r: Receipt): string {
     .map(
       (l) =>
         `<div class="item"><div class="kv"><span>${escapeHtml(l.name)}</span><span>${sym}${amount(
-          l.price * l.qty,
-        )}</span></div><div class="sub">${l.qty} x ${sym}${amount(l.price)}</div></div>`,
+          lineNet(l),
+        )}</span></div><div class="sub">${l.qty} x ${sym}${amount(l.price)}${
+          lineNet(l) < l.price * l.qty
+            ? ` &middot; less ${sym}${amount(l.price * l.qty - lineNet(l))}`
+            : ""
+        }</div></div>`,
     )
     .join("")}
   <hr />
-  ${row("Subtotal", `${sym}${amount(subtotal)}`)}
+  ${row("Subtotal", `${sym}${amount(gross)}`)}
+  ${
+    discount > 0
+      ? row(
+          r.orderDiscount ? `Discount (${escapeHtml(discountLabel(r.orderDiscount))})` : "Discount",
+          `-${sym}${amount(discount)}`,
+        )
+      : ""
+  }
+  ${discount > 0 ? row("After discount", `${sym}${amount(net)}`) : ""}
   ${tax > 0 ? row("Tax", `${sym}${amount(tax)}`) : ""}
   ${row("TOTAL", `${sym}${amount(r.total)}`, true)}
   ${r.cashReceived != null ? row("Cash", `${sym}${amount(r.cashReceived)}`) : ""}
@@ -129,16 +164,29 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * Shared with return-print.ts so a credit note formats money and dates exactly
+ * like the sale receipt it reverses.
+ */
+export {
+  amount as printableAmount,
+  money as printableMoney,
+  when as printableWhen,
+  escapeHtml as escapePrintHtml,
+};
+
 /** Plain text version, for WhatsApp/SMS sharing. */
 export function buildReceiptText(r: Receipt): string {
+  const { discount: discountTotal } = moneyBreakdown(r);
   const lines = [
     r.storeName,
     r.storeReference ?? "",
     `Receipt ${r.number} — ${when(r.createdAt)}`,
     `Served by ${r.servedBy}`,
     "",
-    ...r.lines.map((l) => `${l.qty} x ${l.name} — ${money(l.price * l.qty, r.currency)}`),
+    ...r.lines.map((l) => `${l.qty} x ${l.name} — ${money(lineNet(l), r.currency)}`),
     "",
+    discountTotal > 0 ? `Discount: -${money(discountTotal, r.currency)}` : "",
     `TOTAL: ${money(r.total, r.currency)}`,
     `Payment: ${r.mode.toUpperCase()}`,
     "",

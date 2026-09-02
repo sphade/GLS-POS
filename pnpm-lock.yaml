@@ -161,9 +161,6 @@ importers:
       react-native-ble-plx:
         specifier: ^3.5.1
         version: 3.5.1(react-native@0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1))(react@18.3.1)
-      react-native-bluetooth-classic:
-        specifier: 1.73.0-rc.17
-        version: 1.73.0-rc.17(react-native@0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1))
       react-native-gesture-handler:
         specifier: ~2.20.2
         version: 2.20.2(react-native@0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1))(react@18.3.1)
@@ -195,9 +192,6 @@ importers:
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
-      with-rn-bluetooth-classic:
-        specifier: ^1.0.5
-        version: 1.0.5
 
   apps/server:
     dependencies:
@@ -4769,11 +4763,6 @@ packages:
       react: '*'
       react-native: '*'
 
-  react-native-bluetooth-classic@1.73.0-rc.17:
-    resolution: {integrity: sha512-/6jlnDZj3CbMZuCwc6YHTxk6gXiocxGkEDT01wFUGOuBxaNDSUq5rSYh8jm988l2QXGuEhr7WScRBce8t+IJFg==}
-    peerDependencies:
-      react-native: '>=0.73.1'
-
   react-native-gesture-handler@2.20.2:
     resolution: {integrity: sha512-HqzFpFczV4qCnwKlvSAvpzEXisL+Z9fsR08YV5LfJDkzuArMhBu2sOoSPUF/K62PCoAb+ObGlTC83TKHfUd0vg==}
     peerDependencies:
@@ -5480,9 +5469,6 @@ packages:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
     engines: {node: '>= 8'}
     hasBin: true
-
-  with-rn-bluetooth-classic@1.0.5:
-    resolution: {integrity: sha512-+sNT3Da2WoNvIZUj371R9wL5vd6u3tF8Oajy1DoO+nt3vPYWSmhqAE9uS39hlfONuFDq9LNoi/1Mc7hu73F+zA==}
 
   wonka@6.3.6:
     resolution: {integrity: sha512-MXH+6mDHAZ2GuMpgKS055FR6v0xVP3XwquxIMYXgiW+FejHQlMGlvVRZT4qMCxR+bEo/FCtIdKxwej9WV3YQag==}
@@ -10495,11 +10481,6 @@ snapshots:
       react: 18.3.1
       react-native: 0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1)
 
-  react-native-bluetooth-classic@1.73.0-rc.17(react-native@0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1)):
-    dependencies:
-      buffer: 6.0.3
-      react-native: 0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1)
-
   react-native-gesture-handler@2.20.2(react-native@0.76.9(@babel/core@7.29.7)(@babel/preset-env@7.29.7(@babel/core@7.29.7))(@types/react@18.3.31)(react@18.3.1))(react@18.3.1):
     dependencies:
       '@egjs/hammerjs': 2.0.17
@@ -11246,12 +11227,6 @@ snapshots:
   which@2.0.2:
     dependencies:
       isexe: 2.0.0
-
-  with-rn-bluetooth-classic@1.0.5:
-    dependencies:
-      '@expo/config-plugins': 3.1.0
-    transitivePeerDependencies:
-      - supports-color
 
   wonka@6.3.6: {}
 

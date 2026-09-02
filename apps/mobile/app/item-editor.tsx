@@ -7,6 +7,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, confirmDelete, formStyles } from "@/components/form";
 import { VariantEditor, VARIANT_ICONS } from "@/components/VariantEditor";
+import { NumberInput } from "@/components/NumberInput";
 import { swatches, useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { getImageUri, removeImage, saveImage } from "@/lib/image-store";
@@ -365,22 +366,24 @@ export default function ItemEditorScreen() {
             <FeatureCard icon="cube-outline" label="Track stock" on={trackStock} onToggle={setTrackStock}>
               <View style={styles.stockRow}>
                 <Text style={styles.stockLabel}>Quantity in stock</Text>
-                <TextInput
+                <NumberInput
                   style={styles.stockInput}
                   value={stockQty}
                   onChangeText={edit(setStockQty)}
-                  keyboardType="numeric"
+                  // Loose/weighed items are counted in fractions of a Kg or Ltr;
+                  // everything else is whole units.
+                  decimals={isFraction}
                   placeholder="0"
                   placeholderTextColor={colors.hint}
                 />
               </View>
               <View style={styles.stockRow}>
                 <Text style={styles.stockLabel}>Alert when stock at or below</Text>
-                <TextInput
+                <NumberInput
                   style={styles.stockInput}
                   value={lowAlert}
                   onChangeText={edit(setLowAlert)}
-                  keyboardType="numeric"
+                  decimals={isFraction}
                   placeholder="—"
                   placeholderTextColor={colors.hint}
                 />

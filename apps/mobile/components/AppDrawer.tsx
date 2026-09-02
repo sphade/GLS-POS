@@ -40,6 +40,7 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
       { label: "Staff Management", icon: "account-tie-outline", route: "/staff", needs: "staff:manage" },
       { label: "Add Expense", icon: "cash-minus", route: "/expense-categories", needs: "expenses:manage" },
       { label: "Receipts", icon: "receipt", route: "/(tabs)/today", needs: "reports:view" },
+      { label: "Returns & Refunds", icon: "cash-refund", route: "/returns", needs: "sale:refund" },
       { label: "Activity History", icon: "history", route: "/audit", needs: "audit:view" },
     ],
   },

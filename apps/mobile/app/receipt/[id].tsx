@@ -6,6 +6,18 @@ import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatAmount, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth";
+import {
+  isOverReturned,
+  isVoidReturn,
+  lineNetOf,
+  receiptNetOf,
+  receiptTaxOf,
+  refundedTotalOf,
+  remainingByLine,
+  returnStateOf,
+  useReturns,
+} from "@/lib/returns";
+import { discountLabel } from "@/lib/discount-model";
 import { getSavedPrinter, printReceipt } from "@/lib/printer";
 import {
   printViaSystem,
@@ -21,8 +33,10 @@ export default function ReceiptScreen() {
   const router = useRouter();
   const { receipts, settleReceipt } = useCart();
   const { can } = useAuth();
+  const { returnsFor } = useReturns();
   const [busy, setBusy] = useState(false);
   const receipt = receipts.find((r) => r.id === id);
+  const returns = receipt ? returnsFor(receipt.id) : [];
 
   /** Run a share/print action, surfacing any failure instead of failing silently. */
   const run = async (fn: () => Promise<void>) => {
@@ -81,9 +95,27 @@ export default function ReceiptScreen() {
     );
   }
 
-  const subtotal = receipt.lines.reduce((s, l) => s + l.price * l.qty, 0);
-  const tax = receipt.total - subtotal;
+  /**
+   * Gross is the list value; net is what was actually charged before tax. With
+   * no discount the two are equal, which is why older receipts still read the
+   * same. Tax is whatever the total holds above the net.
+   */
+  const gross = receipt.lines.reduce((s, l) => s + l.price * l.qty, 0);
+  const net = receiptNetOf(receipt);
+  const discountTotal = receipt.discountTotal ?? Math.max(0, gross - net);
+  const tax = receiptTaxOf(receipt);
   const time = new Date(receipt.createdAt);
+
+  /**
+   * Return state is derived from this receipt's credit notes, never stored on
+   * the receipt itself — the printed original stays immutable and two tills
+   * can't overwrite each other's refund.
+   */
+  const returnState = returnStateOf(receipt, returns);
+  const refunded = refundedTotalOf(returns);
+  const returnable = remainingByLine(receipt, returns).some((qty) => qty > 0);
+  const overReturned = isOverReturned(receipt, returns);
+  const netTotal = Math.max(0, receipt.total - refunded);
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -128,14 +160,17 @@ export default function ReceiptScreen() {
               <Text style={[styles.outlineBtnText, { color: colors.green }]}>MARK AS PAID</Text>
             </Pressable>
           )}
-          {can("sale:refund") && (
+          {can("sale:refund") && returnable && (
             <Pressable
               style={[styles.outlineBtn, { borderColor: colors.red500 }]}
-              onPress={() =>
-                Alert.alert("Refunds", "Refunds aren't built yet — coming next.")
-              }
+              onPress={() => {
+                feedbackTap();
+                router.push(`/return/${receipt.id}` as Href);
+              }}
             >
-              <Text style={[styles.outlineBtnText, { color: colors.red500 }]}>RETURN</Text>
+              <Text style={[styles.outlineBtnText, { color: colors.red500 }]}>
+                {receipt.status === "unpaid" ? "VOID ITEMS" : "RETURN"}
+              </Text>
             </Pressable>
           )}
         </View>
@@ -146,6 +181,59 @@ export default function ReceiptScreen() {
             <Text style={styles.unpaidBannerText}>
               UNPAID · {receipt.mode.toUpperCase()} — customer pays against this receipt
             </Text>
+          </View>
+        )}
+
+        {returnState !== "none" && (
+          <View style={styles.returnBanner}>
+            <MaterialCommunityIcons name="cash-refund" size={18} color={colors.red800} />
+            <Text style={styles.returnBannerText}>
+              {returnState === "full" ? "FULLY RETURNED" : "PARTIALLY RETURNED"} ·{" "}
+              {formatMoney(refunded, receipt.currency)} refunded
+              {returnState === "partial" ? ` · ${formatMoney(netTotal, receipt.currency)} net` : ""}
+            </Text>
+          </View>
+        )}
+
+        {overReturned && (
+          <View style={styles.returnBanner}>
+            <MaterialCommunityIcons name="alert-outline" size={18} color={colors.red800} />
+            <Text style={styles.returnBannerText}>
+              More has been returned than was sold — likely two tills refunding offline. Needs a
+              manager review.
+            </Text>
+          </View>
+        )}
+
+        {returns.length > 0 && (
+          <View style={styles.returnList}>
+            <Text style={styles.returnListTitle}>CREDIT NOTES</Text>
+            {returns.map((ret) => (
+              <Pressable
+                key={ret.id}
+                style={styles.returnRow}
+                onPress={() => {
+                  feedbackTap();
+                  router.push(`/return-receipt/${ret.id}` as Href);
+                }}
+                android_ripple={{ color: "#00000010" }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.returnRowTitle}>
+                    {ret.number}
+                    {isVoidReturn(ret) ? " · VOID" : ""}
+                  </Text>
+                  <Text style={styles.returnRowMeta}>
+                    {ret.itemCount} item{ret.itemCount === 1 ? "" : "s"} ·{" "}
+                    {new Date(ret.createdAt).toLocaleDateString()} · {ret.method}
+                  </Text>
+                </View>
+                <Text style={styles.returnRowAmount}>
+                  -{formatMoney(ret.total, ret.currency)}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.grey500} />
+              </Pressable>
+            ))}
           </View>
         )}
 
@@ -175,19 +263,43 @@ export default function ReceiptScreen() {
             <Text style={[styles.itemsHeaderText, styles.colTotal]}>Total</Text>
           </View>
 
-          {receipt.lines.map((l, idx) => (
-            <View key={idx} style={styles.itemRow}>
-              <Text style={[styles.itemText, { flex: 1 }]} numberOfLines={1}>
-                {l.name}
-              </Text>
-              <Text style={[styles.itemText, styles.colPrice]}>{formatAmount(l.price)}</Text>
-              <Text style={[styles.itemText, styles.colQty]}>{l.qty}</Text>
-              <Text style={[styles.itemText, styles.colTotal]}>{formatAmount(l.price * l.qty)}</Text>
-            </View>
-          ))}
+          {receipt.lines.map((l, idx) => {
+            const lineGross = l.price * l.qty;
+            const lineNet = lineNetOf(l);
+            return (
+              <View key={idx} style={styles.itemRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.itemText} numberOfLines={1}>
+                    {l.name}
+                  </Text>
+                  {lineNet < lineGross && (
+                    <Text style={styles.itemDiscountNote}>
+                      less {formatAmount(lineGross - lineNet)} discount
+                    </Text>
+                  )}
+                </View>
+                <Text style={[styles.itemText, styles.colPrice]}>{formatAmount(l.price)}</Text>
+                <Text style={[styles.itemText, styles.colQty]}>{l.qty}</Text>
+                <Text style={[styles.itemText, styles.colTotal]}>{formatAmount(lineNet)}</Text>
+              </View>
+            );
+          })}
 
           <View style={styles.hr} />
-          <TotalLine label={strings.subtotal} value={formatMoney(subtotal, receipt.currency)} />
+          <TotalLine label={strings.subtotal} value={formatMoney(gross, receipt.currency)} />
+          {discountTotal > 0 && (
+            <TotalLine
+              label={
+                receipt.orderDiscount
+                  ? `Discount (${discountLabel(receipt.orderDiscount)})`
+                  : "Discount"
+              }
+              value={`-${formatMoney(discountTotal, receipt.currency)}`}
+            />
+          )}
+          {discountTotal > 0 && (
+            <TotalLine label="After discount" value={formatMoney(net, receipt.currency)} />
+          )}
           {tax > 0 && <TotalLine label="Tax" value={formatMoney(tax, receipt.currency)} />}
           <View style={styles.hr} />
           <TotalLine label={strings.grandTotal} value={formatMoney(receipt.total, receipt.currency)} bold />
@@ -274,6 +386,31 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   unpaidBannerText: { flex: 1, color: colors.red500, fontWeight: "700", fontSize: 12, letterSpacing: 0.3 },
+  returnBanner: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    backgroundColor: "#FDECEA",
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+  },
+  returnBannerText: { flex: 1, color: colors.red800, fontWeight: "700", fontSize: 12, lineHeight: 17 },
+  returnList: { backgroundColor: colors.white, borderRadius: 4, paddingVertical: 4, marginBottom: 8, elevation: 1 },
+  returnListTitle: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: colors.grey600,
+    letterSpacing: 0.7,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 2,
+  },
+  returnRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
+  returnRowTitle: { fontSize: 13, fontWeight: "700", color: colors.grey900 },
+  returnRowMeta: { fontSize: 11, color: colors.grey600, marginTop: 2 },
+  returnRowAmount: { fontSize: 13, fontWeight: "800", color: colors.red500 },
   receiptCard: { backgroundColor: colors.white, borderRadius: 4, padding: 14, elevation: 2 },
   storeName: { fontSize: 20, fontWeight: "800", color: colors.grey900, textAlign: "center" },
   storeMeta: { fontSize: 13, color: colors.grey600, textAlign: "center", marginTop: 2 },
@@ -287,8 +424,9 @@ const styles = StyleSheet.create({
   colPrice: { width: 56, textAlign: "right" },
   colQty: { width: 34, textAlign: "right" },
   colTotal: { width: 62, textAlign: "right" },
-  itemRow: { flexDirection: "row", paddingVertical: 4 },
+  itemRow: { flexDirection: "row", alignItems: "center", paddingVertical: 4 },
   itemText: { fontSize: 12, color: colors.grey800 },
+  itemDiscountNote: { fontSize: 10, color: colors.red500, fontWeight: "700", marginTop: 1 },
   totalLine: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 2 },
   totalLabel: { fontSize: 13, color: colors.grey700 },
   totalValue: { fontSize: 13, color: colors.grey900, fontWeight: "600" },

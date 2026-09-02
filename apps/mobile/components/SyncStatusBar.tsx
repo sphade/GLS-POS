@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,28 +7,39 @@ import { getSyncActivity, subscribeSyncActivity } from "@/lib/sync";
 
 /**
  * Thin strip pinned to the top of the app, above every screen:
- *  - while any sync/pull is in flight: green "SYNCING…" with a spinner
+ *  - the first real sync after opening the store: green "SYNCING…" with a
+ *    spinner, so the initial catch-up is visible
  *  - after a failed full sync: red strip with the real reason (tap to dismiss;
  *    it also clears itself on the next successful sync)
  *
- * This makes background revalidation visible — staff can see the app is
- * pulling fresh data instead of wondering whether it happened.
+ * Only that first catch-up is announced. Once staff have seen the app fetch its
+ * data, every later sync runs silently in the background — a strip that keeps
+ * reappearing all shift reads as something being wrong when nothing is.
+ * Failures are still surfaced, because a till that isn't uploading receipts is
+ * something staff need to know about.
  */
 export function SyncStatusBar() {
   const insets = useSafeAreaInsets();
   const [dismissed, setDismissed] = useState(false);
   const [showBusy, setShowBusy] = useState(false);
   const activity = useSyncExternalStore(subscribeSyncActivity, getSyncActivity);
+  /** Set once the strip has actually been shown, which retires it for good. */
+  const announced = useRef(false);
 
-  // The engine fires many sub-second jobs (heartbeat pulls, tab-switch
-  // deltas). Showing the bar for those reads as "perpetually syncing".
-  // Only surface it when work persists past 1.5s — i.e., real transfers.
+  // The engine fires many sub-second jobs (heartbeat pulls, tab-switch deltas).
+  // Showing the bar for those reads as "perpetually syncing", so it only
+  // surfaces when work persists past 1.5s — and only the first time. Quick syncs
+  // clear the timer before it fires, so they never use up that one appearance.
   useEffect(() => {
     if (!activity.busy) {
       setShowBusy(false);
       return;
     }
-    const t = setTimeout(() => setShowBusy(true), 1500);
+    if (announced.current) return;
+    const t = setTimeout(() => {
+      announced.current = true;
+      setShowBusy(true);
+    }, 1500);
     return () => clearTimeout(t);
   }, [activity.busy]);
 
