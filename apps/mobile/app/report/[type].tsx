@@ -7,7 +7,15 @@ import { colors, formatMoney } from "@/constants/theme";
 import { BarChart, type Bar } from "@/components/BarChart";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart, type Receipt } from "@/lib/cart";
-import { isVoidReturn, useReturns, type SaleReturn } from "@/lib/returns";
+import { prorate } from "@/lib/discount-model";
+import {
+  isVoidReturn,
+  lineNetOf,
+  receiptTaxOf,
+  returnLineNetOf,
+  useReturns,
+  type SaleReturn,
+} from "@/lib/returns";
 import { feedbackTap } from "@/lib/feedback";
 
 const CURRENCY = "NGN";
@@ -61,8 +69,10 @@ function hourRange(hour: number): string {
 }
 
 type Bucket = {
-  /** Chronological sort key within the range. */
-  key: number;
+  /** Stable identity for React keys. */
+  id: string;
+  /** Chronological position within the range. Unused when grouping by item. */
+  order: number;
   /** Short label for the chart axis. */
   label: string;
   /** Fuller label for the list rows. */
@@ -80,21 +90,21 @@ function bucketOf(at: number, granularity: Granularity) {
   switch (granularity) {
     case "hour": {
       const hour = d.getHours();
-      return { key: hour, label: shortHour(hour), longLabel: hourRange(hour) };
+      return { order: hour, label: shortHour(hour), longLabel: hourRange(hour) };
     }
     case "weekday": {
       const day = d.getDay();
       const name = WEEKDAYS[day]!;
-      return { key: day, label: name, longLabel: name };
+      return { order: day, label: name, longLabel: name };
     }
     case "date": {
       const date = d.getDate();
-      return { key: date, label: String(date), longLabel: `${date} ${MONTHS[d.getMonth()]!}` };
+      return { order: date, label: String(date), longLabel: `${date} ${MONTHS[d.getMonth()]!}` };
     }
     case "month": {
       const month = d.getMonth();
       const name = MONTHS[month]!;
-      return { key: month, label: name, longLabel: name };
+      return { order: month, label: name, longLabel: name };
     }
   }
 }
@@ -106,18 +116,18 @@ const lineUnits = (lines: { qty: number }[]) => lines.reduce((sum, line) => sum 
  * refunded in. Only buckets with activity appear, so a shop that opens at 9am
  * doesn't get eight empty bars.
  */
-function bucketize(
+function bucketizeByTime(
   receipts: Receipt[],
   returns: SaleReturn[],
   granularity: Granularity,
 ): Bucket[] {
   const map = new Map<number, Bucket>();
   const touch = (at: number): Bucket => {
-    const { key, label, longLabel } = bucketOf(at, granularity);
-    let bucket = map.get(key);
+    const { order, label, longLabel } = bucketOf(at, granularity);
+    let bucket = map.get(order);
     if (!bucket) {
-      bucket = { key, label, longLabel, amount: 0, items: 0, count: 0 };
-      map.set(key, bucket);
+      bucket = { id: `t${order}`, order, label, longLabel, amount: 0, items: 0, count: 0 };
+      map.set(order, bucket);
     }
     return bucket;
   };
@@ -137,23 +147,96 @@ function bucketize(
   return [...map.values()];
 }
 
+/** Trim a menu name down to something that fits under a chart bar. */
+const shortName = (name: string) => (name.length > 11 ? `${name.slice(0, 10)}…` : name);
+
+/**
+ * Group by what was actually sold.
+ *
+ * Each line's share of the receipt's tax is added back on, so the item
+ * breakdown adds up to exactly the same money as the time breakdown — a
+ * report that disagreed with itself depending on how you sliced it would be
+ * worse than no report. Variants stay separate rows, since that's how they're
+ * priced and counted in stock.
+ */
+function bucketizeByItem(receipts: Receipt[], returns: SaleReturn[]): Bucket[] {
+  const map = new Map<string, Bucket>();
+  const touch = (id: string, name: string): Bucket => {
+    let bucket = map.get(id);
+    if (!bucket) {
+      bucket = {
+        id,
+        order: 0,
+        label: shortName(name),
+        longLabel: name,
+        amount: 0,
+        items: 0,
+        count: 0,
+      };
+      map.set(id, bucket);
+    }
+    return bucket;
+  };
+
+  for (const receipt of receipts) {
+    const nets = receipt.lines.map(lineNetOf);
+    const taxShares = prorate(receiptTaxOf(receipt), nets);
+    receipt.lines.forEach((line, index) => {
+      const id = line.productId
+        ? `${line.productId}:${line.variantId ?? ""}`
+        : `name:${line.name}`;
+      const bucket = touch(id, line.name);
+      bucket.amount += (nets[index] ?? 0) + (taxShares[index] ?? 0);
+      bucket.items += line.qty;
+      // Cart lines are unique per product+variant, so this counts the number of
+      // sales that included the item rather than the number of lines.
+      bucket.count += 1;
+    });
+  }
+
+  for (const ret of returns) {
+    const nets = ret.lines.map(returnLineNetOf);
+    const refundedTax = Math.max(
+      0,
+      ret.total - nets.reduce((sum, net) => sum + net, 0),
+    );
+    const taxShares = prorate(refundedTax, nets);
+    ret.lines.forEach((line, index) => {
+      const id = line.productId
+        ? `${line.productId}:${line.variantId ?? ""}`
+        : `name:${line.name}`;
+      const bucket = touch(id, line.name);
+      bucket.amount -= (nets[index] ?? 0) + (taxShares[index] ?? 0);
+      bucket.items -= line.qty;
+    });
+  }
+
+  return [...map.values()];
+}
+
+/** Which breakdown the screen is showing. */
+type Breakdown = "item" | "time";
+
 type SortField = "time" | "amount" | "items" | "count";
 type SortDir = "asc" | "desc";
 
-const SORT_FIELDS: { key: SortField; label: string }[] = [
-  { key: "time", label: "Chronological" },
-  { key: "amount", label: "By amount" },
-  { key: "items", label: "By items sold" },
-  { key: "count", label: "By number of sales" },
+const SORT_FIELDS: { key: SortField; label: string; views: Breakdown[] }[] = [
+  { key: "time", label: "Chronological", views: ["time"] },
+  { key: "amount", label: "By amount", views: ["item", "time"] },
+  { key: "items", label: "By items sold", views: ["item", "time"] },
+  { key: "count", label: "By number of sales", views: ["item", "time"] },
 ];
 
 function sortBuckets(buckets: Bucket[], field: SortField, dir: SortDir): Bucket[] {
   const valueOf = (b: Bucket) =>
-    field === "time" ? b.key : field === "amount" ? b.amount : field === "items" ? b.items : b.count;
+    field === "time" ? b.order : field === "amount" ? b.amount : field === "items" ? b.items : b.count;
   return [...buckets].sort((a, b) =>
     dir === "asc" ? valueOf(a) - valueOf(b) : valueOf(b) - valueOf(a),
   );
 }
+
+/** Bars stay readable, so a long menu is topped-and-tailed in the chart only. */
+const MAX_ITEM_BARS = 8;
 
 /**
  * Report drill-down.
@@ -170,6 +253,8 @@ export default function ReportDetailScreen() {
     to,
     label,
     range = "Today",
+    view,
+    granularity: granularityParam,
   } = useLocalSearchParams<{
     type?: string;
     title?: string;
@@ -177,6 +262,10 @@ export default function ReportDetailScreen() {
     to?: string;
     label?: string;
     range?: string;
+    /** Which breakdown to open on. Defaults per report type. */
+    view?: Breakdown;
+    /** Set for hand-picked date windows, which have no preset to infer from. */
+    granularity?: Granularity;
   }>();
   const { receipts: allReceipts } = useCart();
   const { returns: allReturns } = useReturns();
@@ -202,16 +291,43 @@ export default function ReportDetailScreen() {
     [allReturns, bounds],
   );
 
-  const granularity = granularityFor(String(range));
+  const granularity = granularityParam ?? granularityFor(String(range));
   const isCount = type === "salesCount";
 
-  const [sortField, setSortField] = useState<SortField>("time");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  /**
+   * Money reports open on what sold, which is the question an owner actually
+   * has. A receipt-count report opens on when they came in.
+   */
+  const defaultSortFor = (next: Breakdown): { field: SortField; dir: SortDir } =>
+    next === "time"
+      ? { field: "time", dir: "asc" }
+      : { field: isCount ? "count" : "amount", dir: "desc" };
+
+  const initialView: Breakdown = view === "time" || isCount ? "time" : "item";
+  const [activeView, setActiveView] = useState<Breakdown>(initialView);
+  const [sortField, setSortField] = useState<SortField>(defaultSortFor(initialView).field);
+  const [sortDir, setSortDir] = useState<SortDir>(defaultSortFor(initialView).dir);
   const [sortOpen, setSortOpen] = useState(false);
 
+  const switchView = (next: Breakdown) => {
+    if (next === activeView) return;
+    feedbackTap();
+    setActiveView(next);
+    const { field, dir } = defaultSortFor(next);
+    setSortField(field);
+    setSortDir(dir);
+  };
+
   const buckets = useMemo(
-    () => sortBuckets(bucketize(receipts, returns, granularity), sortField, sortDir),
-    [receipts, returns, granularity, sortField, sortDir],
+    () =>
+      sortBuckets(
+        activeView === "item"
+          ? bucketizeByItem(receipts, returns)
+          : bucketizeByTime(receipts, returns, granularity),
+        sortField,
+        sortDir,
+      ),
+    [activeView, receipts, returns, granularity, sortField, sortDir],
   );
 
   const totals = useMemo(
@@ -236,9 +352,18 @@ export default function ReportDetailScreen() {
       ? `${formatMoney(b.amount, CURRENCY)} · ${b.items} item${b.items === 1 ? "" : "s"}`
       : `${b.items} item${b.items === 1 ? "" : "s"} · ${b.count} sale${b.count === 1 ? "" : "s"}`;
 
-  const chartData: Bar[] = buckets.map((b) => ({ label: b.label, value: primaryOf(b) }));
+  // A long menu would squeeze the bars into unreadable slivers, so the chart
+  // shows the leading few while the list below stays complete.
+  const charted = activeView === "item" ? buckets.slice(0, MAX_ITEM_BARS) : buckets;
+  const chartData: Bar[] = charted.map((b) => ({ label: b.label, value: primaryOf(b) }));
   const max = Math.max(...buckets.map((b) => Math.abs(primaryOf(b))), 1);
   const subtitle = (label ?? "All time").toUpperCase();
+  const caption =
+    activeView === "item"
+      ? buckets.length > MAX_ITEM_BARS
+        ? `Top ${MAX_ITEM_BARS} of ${buckets.length} items · full list below`
+        : "What sold"
+      : GRANULARITY_CAPTION[granularity];
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -251,6 +376,11 @@ export default function ReportDetailScreen() {
           <Text style={styles.headerSub}>{subtitle}</Text>
         </View>
         <View style={styles.headerBtn} />
+      </View>
+
+      <View style={styles.viewTabs}>
+        <ViewTab label="BY ITEM" active={activeView === "item"} onPress={() => switchView("item")} />
+        <ViewTab label="BY TIME" active={activeView === "time"} onPress={() => switchView("time")} />
       </View>
 
       {buckets.length === 0 ? (
@@ -270,7 +400,7 @@ export default function ReportDetailScreen() {
 
           <View style={styles.captionRow}>
             <MaterialCommunityIcons name="chart-bar" size={15} color={colors.grey600} />
-            <Text style={styles.caption}>{GRANULARITY_CAPTION[granularity]}</Text>
+            <Text style={styles.caption}>{caption}</Text>
           </View>
 
           <BarChart data={chartData} formatValue={formatAxis} />
@@ -278,7 +408,7 @@ export default function ReportDetailScreen() {
           {buckets.map((bucket) => {
             const pct = Math.round((Math.max(0, primaryOf(bucket)) / max) * 100);
             return (
-              <View key={bucket.key} style={styles.listCard}>
+              <View key={bucket.id} style={styles.listCard}>
                 <View style={styles.listTop}>
                   <Text style={styles.listLabel}>{bucket.longLabel}</Text>
                   <Text style={styles.listValue}>{formatPrimary(bucket)}</Text>
@@ -327,7 +457,7 @@ export default function ReportDetailScreen() {
               </Pressable>
             </View>
             <View style={styles.sheetBody}>
-              {SORT_FIELDS.map((option) => (
+              {SORT_FIELDS.filter((option) => option.views.includes(activeView)).map((option) => (
                 <Pressable
                   key={option.key}
                   style={[styles.sortOption, sortField === option.key && styles.sortOptionActive]}
@@ -366,6 +496,23 @@ export default function ReportDetailScreen() {
         </Pressable>
       </Modal>
     </SafeAreaView>
+  );
+}
+
+function ViewTab({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable style={styles.viewTab} onPress={onPress} android_ripple={{ color: "#00000010" }}>
+      <Text style={[styles.viewTabText, active && styles.viewTabTextActive]}>{label}</Text>
+      {active && <View style={styles.viewTabIndicator} />}
+    </Pressable>
   );
 }
 
@@ -442,6 +589,19 @@ const styles = StyleSheet.create({
   headerSub: { fontSize: 13, fontWeight: "700", color: colors.primary, marginTop: 1 },
 
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 60 },
+
+  viewTabs: { flexDirection: "row", backgroundColor: colors.grey50 },
+  viewTab: { flex: 1, alignItems: "center", justifyContent: "center", height: 44 },
+  viewTabText: { fontSize: 13, fontWeight: "700", color: colors.grey600, letterSpacing: 0.6 },
+  viewTabTextActive: { color: colors.primary },
+  viewTabIndicator: {
+    position: "absolute",
+    bottom: 0,
+    left: 20,
+    right: 20,
+    height: 3,
+    backgroundColor: colors.primary,
+  },
 
   summaryCard: {
     flexDirection: "row",

@@ -1,12 +1,11 @@
 ﻿import { useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
 import { colors, strings } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
-import { useAuth } from "@/lib/auth";
 import { AppDrawer } from "@/components/AppDrawer";
+import { StoreSwitcherList } from "@/components/StoreSwitcherList";
 
 /**
  * Shared primary-blue app bar (content_home_base.xml). Shows either the store
@@ -29,9 +28,7 @@ export function PosHeader({
   onLayoutSwitch?: () => void;
   onAddCustomer?: () => void;
 }) {
-  const { store, stores, setStoreId } = useStore();
-  const { canManageBusiness } = useAuth();
-  const router = useRouter();
+  const { store } = useStore();
   const [open, setOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -106,56 +103,7 @@ export function PosHeader({
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
           <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
-            <Text style={styles.sheetTitle}>SWITCH SHOP</Text>
-            {stores.map((s) => {
-              const active = s.id === store.id;
-              return (
-                <Pressable
-                  key={s.id}
-                  style={styles.storeRow}
-                  onPress={() => {
-                    feedbackTap();
-                    setStoreId(s.id);
-                    setOpen(false);
-                  }}
-                  android_ripple={{ color: "#00000010" }}
-                >
-                  <View style={[styles.avatar, active && { backgroundColor: colors.primary }]}>
-                    <Text style={[styles.avatarText, active && { color: colors.white }]}>{s.initials}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.rowName, active && { color: colors.primary, fontWeight: "700" }]}>
-                      {s.name}
-                    </Text>
-                    {s.reference ? <Text style={styles.rowRef}>{s.reference}</Text> : null}
-                  </View>
-                  {active && <Ionicons name="checkmark-circle" size={22} color={colors.primary} />}
-                </Pressable>
-              );
-            })}
-            {/* Opening or editing a business is the owner's job. A cashier or
-                waiter only switches between the shops they've been added to. */}
-            {canManageBusiness && (
-              <>
-                <View style={styles.sheetDivider} />
-                <Pressable
-                  style={styles.sheetAction}
-                  onPress={() => {
-                    feedbackTap();
-                    setOpen(false);
-                    router.push("/create-store");
-                  }}
-                  android_ripple={{ color: "#00000010" }}
-                >
-                  <Ionicons name="add-circle-outline" size={22} color={colors.primary} />
-                  <Text style={styles.sheetActionText}>Create Shop</Text>
-                </Pressable>
-                <Pressable style={styles.sheetAction} onPress={() => { feedbackTap(); setOpen(false); router.push("/business-settings" as never); }} android_ripple={{ color: "#00000010" }}>
-                  <MaterialCommunityIcons name="store-cog-outline" size={22} color={colors.primary} />
-                  <Text style={styles.sheetActionText}>Edit Business</Text>
-                </Pressable>
-              </>
-            )}
+            <StoreSwitcherList onDone={() => setOpen(false)} />
           </Pressable>
         </Pressable>
       </Modal>
@@ -252,21 +200,5 @@ const styles = StyleSheet.create({
 
   backdrop: { flex: 1, backgroundColor: "#00000066", justifyContent: "flex-start", paddingTop: 70, paddingHorizontal: 12 },
   sheet: { backgroundColor: colors.white, borderRadius: 6, paddingVertical: 8, elevation: 8 },
-  sheetTitle: { fontSize: 12, fontWeight: "800", color: colors.grey600, paddingHorizontal: 16, paddingVertical: 8 },
-  storeRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 12 },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.grey200,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avatarText: { fontSize: 15, fontWeight: "800", color: colors.grey700 },
-  rowName: { fontSize: 16, color: colors.grey800, fontWeight: "500" },
-  rowRef: { fontSize: 12, color: colors.grey500, marginTop: 2 },
-  sheetDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300, marginVertical: 6 },
-  sheetAction: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 13 },
-  sheetActionText: { fontSize: 15, color: colors.primary, fontWeight: "600" },
 });
 

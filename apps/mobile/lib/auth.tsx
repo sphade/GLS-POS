@@ -250,6 +250,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const res = await api.createStore({ name, currency: "NGN" });
         if (!res.ok) return { ok: false, error: res.error.message };
         await refresh();
+        /**
+         * Switch into the shop that was just created.
+         *
+         * `refresh` keeps whichever store was already active, so without this an
+         * owner opening a second location was dropped back into the first one
+         * and would start ringing up sales against the wrong shop. Done after
+         * the refresh so the new store is already in the list.
+         */
+        metaSet(ACTIVE_STORE_KEY, res.data.id);
+        setActiveStoreId(res.data.id);
         return { ok: true };
       },
 

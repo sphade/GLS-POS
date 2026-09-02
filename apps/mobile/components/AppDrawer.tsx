@@ -16,6 +16,7 @@ import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { StoreSwitcherList } from "@/components/StoreSwitcherList";
 
 type Entry = {
   label: string;
@@ -69,10 +70,12 @@ const DURATION = 220;
 export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const router = useRouter();
   const { store } = useStore();
-  const { can, canManageBusiness, signOut } = useAuth();
+  const { can, canManageBusiness, signOut, stores } = useAuth();
+  const canSwitch = stores.length > 1;
 
   // Keep the modal mounted through the close animation.
   const [mounted, setMounted] = useState(visible);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const translateX = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const backdrop = useRef(new Animated.Value(0)).current;
 
@@ -88,7 +91,11 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
         Animated.timing(translateX, { toValue: -DRAWER_WIDTH, duration: DURATION, useNativeDriver: true }),
         Animated.timing(backdrop, { toValue: 0, duration: DURATION, useNativeDriver: true }),
       ]).start(({ finished }) => {
-        if (finished) setMounted(false);
+        if (finished) {
+          setMounted(false);
+          // Reopening should start collapsed, not on whatever was left expanded.
+          setSwitcherOpen(false);
+        }
       });
     }
   }, [visible, mounted, translateX, backdrop]);
@@ -113,7 +120,18 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
         <Animated.View style={[styles.drawer, { transform: [{ translateX }] }]}>
           <View style={styles.header}>
             <Text style={styles.appName}>GLS-POS</Text>
-            <View style={styles.storeRow}>
+            {/* Tappable only when there's somewhere to switch to, so a
+                single-shop owner isn't given a control that does nothing. */}
+            <Pressable
+              style={styles.storeRow}
+              disabled={!canSwitch}
+              accessibilityRole={canSwitch ? "button" : undefined}
+              accessibilityLabel={canSwitch ? "Switch shop" : undefined}
+              onPress={() => {
+                feedbackTap();
+                setSwitcherOpen((v) => !v);
+              }}
+            >
               <View style={styles.avatar}>
                 <Text style={styles.avatarText}>{store.initials}</Text>
               </View>
@@ -123,16 +141,46 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
                 </Text>
                 <Text style={styles.storeRef}>{store.reference}</Text>
               </View>
-            </View>
-            {/* Owner-only: staff can see which shop they're in, not change it. */}
+              {canSwitch && (
+                <MaterialCommunityIcons
+                  name={switcherOpen ? "chevron-up" : "unfold-more-horizontal"}
+                  size={22}
+                  color={colors.white}
+                />
+              )}
+            </Pressable>
+            {/* Anyone with two memberships can switch shop above; only an owner
+                can open or reshape one. Both live here because the header's
+                switcher is hidden on any tab that shows a title instead. */}
             {canManageBusiness && (
-              <Pressable onPress={() => go("/business-settings")} style={styles.editBusiness}>
-                <Text style={styles.editBusinessText}>Edit Business</Text>
-              </Pressable>
+              <View style={styles.ownerActions}>
+                <Pressable onPress={() => go("/business-settings")} style={styles.ownerAction}>
+                  <MaterialCommunityIcons name="store-cog-outline" size={15} color={colors.white} />
+                  <Text style={styles.ownerActionText}>Edit business</Text>
+                </Pressable>
+                <Pressable onPress={() => go("/create-store")} style={styles.ownerAction}>
+                  <MaterialCommunityIcons name="plus-circle-outline" size={15} color={colors.white} />
+                  <Text style={styles.ownerActionText}>Add shop</Text>
+                </Pressable>
+              </View>
             )}
           </View>
 
           <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+            {switcherOpen && (
+              <View style={styles.switcher}>
+                <StoreSwitcherList
+                  showTitle={false}
+                  // The header above already offers Add shop / Edit business.
+                  showOwnerActions={false}
+                  onDone={() => {
+                    setSwitcherOpen(false);
+                    onClose();
+                  }}
+                />
+              </View>
+            )}
+
             {GROUPS.map((g) => {
               const allowed = g.entries.filter((e) => !e.needs || can(e.needs));
               if (allowed.length === 0) return null;
@@ -204,8 +252,23 @@ const styles = StyleSheet.create({
   avatarText: { color: colors.white, fontSize: 17, fontWeight: "800" },
   storeName: { color: colors.white, fontSize: 16, fontWeight: "700" },
   storeRef: { color: "#FFFFFFBB", fontSize: 12, marginTop: 2 },
-  editBusiness: { marginTop: 12 },
-  editBusinessText: { color: colors.white, fontSize: 13, fontWeight: "700", textDecorationLine: "underline" },
+  ownerActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 14 },
+  ownerAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: "#FFFFFF22",
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  ownerActionText: { color: colors.white, fontSize: 12, fontWeight: "700" },
+  switcher: {
+    backgroundColor: colors.grey100,
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.grey300,
+  },
 
   groupTitle: {
     fontSize: 11,

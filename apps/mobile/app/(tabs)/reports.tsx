@@ -5,6 +5,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
+import { DatePickerSheet } from "@/components/DatePickerSheet";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
@@ -63,6 +64,50 @@ function rangeBounds(range: string): { from: number; to: number } {
   }
 }
 
+const startOfDay = (ms: number) => {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+};
+
+/** Calendar-day arithmetic, so a window stays whole days across a DST shift. */
+const addDays = (ms: number, n: number) => {
+  const d = new Date(ms);
+  d.setDate(d.getDate() + n);
+  return d.getTime();
+};
+
+/** Exclusive end-of-day, so a single date covers that whole day. */
+const endOfDay = (ms: number) => addDays(startOfDay(ms), 1);
+
+const dayLabel = (ms: number) => {
+  const d = new Date(ms);
+  return `${String(d.getDate()).padStart(2, "0")} ${d.toLocaleString("en-US", { month: "short" })}`;
+};
+
+/** "12 Aug" for one day, "12 Aug - 18 Aug" for a span. */
+function customLabel(from: number, to: number): string {
+  // `to` is exclusive, so step inside it to name the final day.
+  const lastDay = to - 1;
+  const single = startOfDay(from) === startOfDay(lastDay);
+  const year = new Date(from).getFullYear();
+  const suffix = year === new Date().getFullYear() ? "" : ` ${year}`;
+  return single
+    ? `${dayLabel(from)}${suffix}`
+    : `${dayLabel(from)} - ${dayLabel(lastDay)}${suffix}`;
+}
+
+/**
+ * How the chart should group a hand-picked window. Presets carry their own
+ * sensible grouping; a custom span has to be judged by its length.
+ */
+function granularityForSpan(from: number, to: number): "hour" | "date" | "month" {
+  const days = Math.max(1, Math.round((to - from) / DAY));
+  if (days <= 1) return "hour";
+  if (days <= 62) return "date";
+  return "month";
+}
+
 /** "Yesterday : 04 Aug" style label shown in the date bar. */
 function dateLabelFor(range: string) {
   const { from } = rangeBounds(range);
@@ -87,8 +132,17 @@ export default function ReportsScreen() {
   const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [rangeIndex, setRangeIndex] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
+  /** A hand-picked window. Overrides the preset while it's set. */
+  const [custom, setCustom] = useState<{ from: number; to: number } | null>(null);
+  /** Which end of a custom range is being chosen. */
+  const [picking, setPicking] = useState<"from" | "to" | null>(null);
+  const [draftFrom, setDraftFrom] = useState<number | null>(null);
+
   const range = RANGES[rangeIndex]!;
-  const { from, to } = rangeBounds(range);
+  const presetBounds = rangeBounds(range);
+  const from = custom ? custom.from : presetBounds.from;
+  const to = custom ? custom.to : presetBounds.to;
+  const rangeLabel = custom ? customLabel(custom.from, custom.to) : dateLabelFor(range);
 
   const scoped = useMemo(
     () => receipts.filter((r) => r.createdAt >= from && r.createdAt < to),
@@ -156,13 +210,50 @@ export default function ReportsScreen() {
 
   const hasData = scoped.length > 0 || scopedReturns.length > 0;
 
+  /**
+   * With a preset, the arrows move between presets. With a custom window they
+   * slide it by its own length, so picking one day lets you walk back through
+   * history a day at a time.
+   */
   const step = (dir: -1 | 1) => {
     feedbackTap();
+    if (custom) {
+      const days = Math.max(1, Math.round((custom.to - custom.from) / DAY));
+      const nextFrom = addDays(custom.from, dir * days);
+      // Never scroll past today.
+      if (dir === 1 && nextFrom >= endOfDay(Date.now())) return;
+      setCustom({ from: nextFrom, to: addDays(nextFrom, days) });
+      return;
+    }
     setRangeIndex((i) => Math.min(RANGES.length - 1, Math.max(0, i + dir)));
   };
 
+  /** Start the two-step from/to flow. */
+  const startCustom = () => {
+    feedbackTap();
+    setPickerOpen(false);
+    setDraftFrom(null);
+    setPicking("from");
+  };
+
+  const onPickDate = (date: Date) => {
+    if (picking === "from") {
+      setDraftFrom(startOfDay(date.getTime()));
+      setPicking("to");
+      return;
+    }
+    const start = draftFrom ?? startOfDay(date.getTime());
+    const picked = startOfDay(date.getTime());
+    // Tolerate the two dates being chosen in either order.
+    const lo = Math.min(start, picked);
+    const hi = Math.max(start, picked);
+    setCustom({ from: lo, to: endOfDay(hi) });
+    setPicking(null);
+    setDraftFrom(null);
+  };
+
   /** Open the sales chart for the current range. */
-  const openChart = (type: string, title: string) => {
+  const openChart = (type: string, title: string, view?: "item" | "time") => {
     feedbackTap();
     router.push({
       pathname: "/report/[type]",
@@ -171,10 +262,14 @@ export default function ReportsScreen() {
         title,
         from: String(from),
         to: String(to),
-        label: dateLabelFor(range),
+        label: rangeLabel,
         // The chart groups itself by whatever this range makes sense as:
         // a day goes hour by hour, a year month by month.
         range,
+        // A hand-picked window has no preset name to infer grouping from, so
+        // it's judged by how long the span is.
+        ...(custom ? { granularity: granularityForSpan(custom.from, custom.to) } : {}),
+        ...(view ? { view } : {}),
       },
     });
   };
@@ -201,7 +296,9 @@ export default function ReportsScreen() {
           }}
         >
           <MaterialCommunityIcons name="calendar-month" size={24} color={colors.primary} />
-          <Text style={styles.dateText}>{dateLabelFor(range)}</Text>
+          <Text style={styles.dateText} numberOfLines={1}>
+            {rangeLabel}
+          </Text>
         </Pressable>
         <Pressable style={styles.dateArrow} hitSlop={8} onPress={() => step(1)}>
           <Ionicons name="arrow-forward" size={22} color={colors.primary} />
@@ -210,21 +307,49 @@ export default function ReportsScreen() {
 
       {pickerOpen && (
         <View style={styles.presetGrid}>
-          {RANGES.map((r, i) => (
-            <Pressable
-              key={r}
-              style={[styles.preset, range === r && styles.presetActive]}
-              onPress={() => {
-                feedbackTap();
-                setRangeIndex(i);
-                setPickerOpen(false);
-              }}
-            >
-              <Text style={[styles.presetText, range === r && { color: colors.white }]}>{r}</Text>
-            </Pressable>
-          ))}
+          {RANGES.map((r, i) => {
+            const active = !custom && range === r;
+            return (
+              <Pressable
+                key={r}
+                style={[styles.preset, active && styles.presetActive]}
+                onPress={() => {
+                  feedbackTap();
+                  setCustom(null);
+                  setRangeIndex(i);
+                  setPickerOpen(false);
+                }}
+              >
+                <Text style={[styles.presetText, active && { color: colors.white }]}>{r}</Text>
+              </Pressable>
+            );
+          })}
+          <Pressable
+            style={[styles.preset, styles.presetCustom, !!custom && styles.presetActive]}
+            onPress={startCustom}
+          >
+            <MaterialCommunityIcons
+              name="calendar-range"
+              size={15}
+              color={custom ? colors.white : colors.primary}
+            />
+            <Text style={[styles.presetText, !!custom && { color: colors.white }]}>Pick dates</Text>
+          </Pressable>
         </View>
       )}
+
+      <DatePickerSheet
+        visible={picking !== null}
+        title={picking === "from" ? "From date" : "To date"}
+        value={new Date(picking === "to" ? (draftFrom ?? from) : from)}
+        maximumDate={new Date()}
+        minimumDate={picking === "to" && draftFrom ? new Date(draftFrom) : undefined}
+        onCancel={() => {
+          setPicking(null);
+          setDraftFrom(null);
+        }}
+        onConfirm={onPickDate}
+      />
 
       {!hasData ? (
         <View style={styles.emptyWrap}>
@@ -281,7 +406,8 @@ export default function ReportsScreen() {
             label="TOP ITEM"
             value={stats.topItem ? stats.topItem[0] : "—"}
             message={stats.topItem ? `${stats.topItem[1]} sold` : undefined}
-            onPress={openInventory}
+            // Opens the full what-sold breakdown rather than the stock list.
+            onPress={() => openChart("revenue", "Item Sales", "item")}
           />
           <MetricCard
             label="TOP PAYMENT METHOD"
@@ -369,6 +495,12 @@ const styles = StyleSheet.create({
   },
   presetActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   presetText: { color: colors.grey700, fontWeight: "600", fontSize: 13 },
+  presetCustom: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderColor: colors.primary,
+  },
 
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 80 },
 
