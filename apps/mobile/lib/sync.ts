@@ -4,13 +4,11 @@ import { useCallback, useState } from "react";
 import type { SyncChange, SyncCollection, SyncPullResponse } from "@gls-pos/types";
 import { SYNC_COLLECTIONS } from "@gls-pos/types";
 import {
-  applyRemote,
-  clearDirty,
-  loadDirty,
-  metaGet,
-  metaSet,
+  getActiveStore,
   onLocalWrite,
+  storeScope,
   type ChangeRow,
+  type StoreScope,
 } from "./db";
 import { API_URL, authCookie } from "./auth-client";
 import { OFFLINE_MODE } from "./offline";
@@ -41,7 +39,7 @@ const bootedStores = new Set<string>();
 function isBooted(storeId: string): boolean {
   return (
     bootedStores.has(storeId) ||
-    (Number(metaGet(cursorKey(storeId)) ?? "0") || 0) > 0
+    (Number(storeScope(storeId).metaGet(cursorKey(storeId)) ?? "0") || 0) > 0
   );
 }
 
@@ -114,15 +112,22 @@ function batchChanges(changes: SyncChange[]): PushBatch[] {
   return batches;
 }
 
-/** Gather dirty changes, optionally limiting the push to selected collections. */
+/**
+ * Gather dirty changes, optionally limiting the push to selected collections.
+ *
+ * Reads from the store being synced, not whichever store is active — otherwise a
+ * cycle that outlived a shop switch uploads the newly-opened shop's rows into the
+ * previous shop's Durable Object.
+ */
 function collectDirty(
+  db: StoreScope,
   onlyCollections?: readonly SyncCollection[],
 ): { changes: SyncChange[]; idsByCollection: Record<string, string[]> } {
   const changes: SyncChange[] = [];
   const idsByCollection: Record<string, string[]> = {};
 
   for (const collection of onlyCollections ?? SYNC_COLLECTIONS) {
-    const dirty = loadDirty<unknown>(collection);
+    const dirty = db.loadDirty<unknown>(collection);
     if (dirty.length === 0) continue;
     idsByCollection[collection] = dirty.map((d) => d.id);
     for (const d of dirty) {
@@ -203,11 +208,12 @@ async function applyPulled(storeId: string, data: SyncPullResponse, notify = tru
   // was rebuilt at some point (e.g. a Durable Object storage reset). Our cursor
   // would point past its history forever, making every future pull silently
   // empty. Rewind once and catch up from scratch — rows re-apply idempotently.
-  const prior = Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
+  const db = storeScope(storeId);
+  const prior = Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
   const head = data.head ?? 0;
   if (head > 0 && prior > head) {
     console.warn("[sync] store oplog rebuilt (head", head, "< cursor", prior, ") — pulling from zero");
-    metaSet(cursorKey(storeId), "0");
+    db.metaSet(cursorKey(storeId), "0");
   }
 
   let applied = 0;
@@ -221,7 +227,7 @@ async function applyPulled(storeId: string, data: SyncPullResponse, notify = tru
         updatedAt: change.updatedAt,
         deleted: change.deleted,
       };
-      applyRemote(change.collection as SyncCollection, row);
+      db.applyRemote(change.collection as SyncCollection, row);
     }
     applied += batch.length;
     if (start + APPLY_CHUNK < data.changes.length) {
@@ -232,7 +238,7 @@ async function applyPulled(storeId: string, data: SyncPullResponse, notify = tru
   // The cursor advances only once every row is in, so an app killed mid-pull
   // simply refetches the tail instead of losing it. Re-applying rows is safe —
   // every write is an idempotent upsert guarded by last-write-wins.
-  metaSet(cursorKey(storeId), String(data.cursor));
+  db.metaSet(cursorKey(storeId), String(data.cursor));
   if (notify && applied > 0) emitSynced(applied);
   return applied;
 }
@@ -273,6 +279,8 @@ async function performPull(
   const cookie = authCookie();
   if (!cookie) return -1;
 
+  const db = storeScope(storeId);
+
   try {
     const netState = await Network.getNetworkStateAsync();
     if (netState.isInternetReachable === false) return -1;
@@ -284,7 +292,7 @@ async function performPull(
       // to zero after detecting a rebuilt server oplog.
       const cursor = page === 0 && fromBeginning
         ? 0
-        : Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
+        : Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
 
       const res = await fetchWithTimeout(`${API_URL}/api/sync?cursor=${cursor}`, {
         headers: { Cookie: cookie, "x-store-id": storeId },
@@ -412,7 +420,7 @@ async function performSync(
       : isBooted(storeId)
         ? SYNC_COLLECTIONS.filter((c) => !UPLOAD_SKIP.includes(c))
         : [];
-    const { changes } = collectDirty(scope);
+    const { changes } = collectDirty(storeScope(storeId), scope);
     // One request per batch. The last one always runs even with nothing dirty,
     // so a sync with no local edits still pulls server changes.
     const batches = batchChanges(changes);
@@ -443,9 +451,10 @@ async function pushBatch(
   batch: PushBatch,
 ): Promise<SyncAttemptResult> {
   const { changes, idsByCollection } = batch;
+  const db = storeScope(storeId);
   try {
     // Re-read per batch: an earlier batch advances the cursor.
-    const cursor = Number(metaGet(cursorKey(storeId)) ?? "0") || 0;
+    const cursor = Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
     const res = await fetchWithTimeout(`${API_URL}/api/sync`, {
       method: "POST",
       headers: {
@@ -490,7 +499,7 @@ async function pushBatch(
     }
 
     for (const [collection, ids] of Object.entries(idsByCollection)) {
-      clearDirty(collection as SyncCollection, ids);
+      db.clearDirty(collection as SyncCollection, ids);
     }
 
     return { ok: true, appliedCount: await applyPulled(storeId, body.data) };
@@ -613,7 +622,11 @@ export function syncNowDetailed(
         if (event.networkState?.isInternetReachable === true) {
           const affected = new Set([...retryTimers.keys(), ...retryAttempts.keys()]);
           for (const store of affected) clearRetryState(store);
-          void syncNow(storeId);
+          // Bound once per app session, so it must NOT capture whichever store
+          // happened to trigger the first sync — that id would outlive every
+          // later shop switch. Catch up on whatever shop is open right now.
+          const active = getActiveStore();
+          if (active) void syncNow(active);
         }
       });
     } catch {
@@ -704,7 +717,8 @@ export function startAutoSync(storeId: string, intervalMs = 20_000): () => void 
 
 // --- Convenience APIs for screens -------------------------------------------
 
-let lastQuietPullAt = 0;
+/** Per store: one shared throttle let a pull for one shop starve another. */
+const lastQuietPullAt = new Map<string, number>();
 
 /** Fire-and-forget background delta check, throttled to one per few seconds.
  *  Used on tab switches / screen opens: local data keeps rendering; fresh
@@ -712,8 +726,8 @@ let lastQuietPullAt = 0;
 export function quietPull(storeId: string): void {
   if (!SYNC_ENABLED) return;
   const now = Date.now();
-  if (now - lastQuietPullAt < 3_000) return;
-  lastQuietPullAt = now;
+  if (now - (lastQuietPullAt.get(storeId) ?? 0) < 3_000) return;
+  lastQuietPullAt.set(storeId, now);
   void pullNow(storeId);
 }
 

@@ -1008,4 +1008,44 @@ export class StoreDurableObject extends DurableObject<Env> {
       .all();
     return Object.fromEntries(rows.map((r) => [r.collection, r.count]));
   }
+
+  /**
+   * Permanently erase this store's entire operational database. Irreversible.
+   *
+   * Decommissioning a store needs this: once its registry row is gone from D1
+   * nothing can route here again, so the storage would otherwise sit orphaned
+   * and still be billed.
+   *
+   * Currently has NO CALLER. It was driven by a temporary operator route that
+   * has since been removed, and is kept because a proper owner-facing "delete
+   * shop" feature — which the app still lacks — needs exactly this. Wire it to
+   * something owner-only and confirmation-gated, never to a bare route.
+   *
+   * `deleteAll()` rather than DELETE/DROP because Cloudflare documents that
+   * removing rows or dropping tables leaves internal metadata behind, and only
+   * `deleteAll()` empties storage enough for the object itself to be reclaimed.
+   * The alarm is cleared first because this Worker's compatibility date predates
+   * `deleteAll()` covering alarms (harmless here — this class sets none).
+   *
+   * Counts every row including tombstones, so the return value is a true record
+   * of what was destroyed.
+   */
+  async wipe(): Promise<{ collections: Record<string, number>; rows: number }> {
+    const rows = this.db
+      .select({
+        collection: schema.documents.collection,
+        count: sql<number>`count(*)`,
+      })
+      .from(schema.documents)
+      .groupBy(schema.documents.collection)
+      .all();
+
+    const collections = Object.fromEntries(rows.map((r) => [r.collection, r.count]));
+    const total = rows.reduce((sum, r) => sum + Number(r.count), 0);
+
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+
+    return { collections, rows: total };
+  }
 }

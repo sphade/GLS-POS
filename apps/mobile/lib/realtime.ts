@@ -22,6 +22,20 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let attempts = 0;
 let stopped = false;
 let currentStore: string | null = null;
+let generation = 0;
+
+/**
+ * Every connection attempt is stamped with a generation.
+ *
+ * A socket that gets replaced — by a shop switch or a reconnect — still fires
+ * its handlers asynchronously afterwards, and those handlers close over the
+ * *old* store id. Without this stamp the replaced socket's `close` event ran
+ * against the new state: it reconnected for the shop the user had just left and
+ * synced that shop's products, tables and VIP orders into the newly opened
+ * shop's database. Stamping lets a superseded connection recognise itself and
+ * do nothing.
+ */
+const isCurrent = (gen: number) => gen === generation && !stopped;
 
 function clearTimers() {
   if (pingTimer) {
@@ -34,25 +48,34 @@ function clearTimers() {
   }
 }
 
-function scheduleReconnect(storeId: string) {
-  if (stopped) return;
+function scheduleReconnect(storeId: string, gen: number) {
+  if (!isCurrent(gen)) return;
   attempts += 1;
   const wait = Math.min(1000 * 2 ** (attempts - 1), MAX_BACKOFF_MS);
-  retryTimer = setTimeout(() => connect(storeId), wait);
+  retryTimer = setTimeout(() => {
+    if (!isCurrent(gen)) return;
+    connect(storeId);
+  }, wait);
 }
 
 function connect(storeId: string) {
   if (stopped) return;
 
+  const gen = ++generation;
+
   const cookie = authCookie();
   if (!cookie) {
     // Not signed in yet — try again shortly rather than failing for good.
-    scheduleReconnect(storeId);
+    scheduleReconnect(storeId, gen);
     return;
   }
 
   const url = `${API_URL.replace(/^http/, "ws")}/api/realtime`;
 
+  // Handlers hold their own reference rather than reading the module variable,
+  // so a late event from this socket can never null out or de-timer whichever
+  // socket happens to be live by then.
+  let ws: WebSocket;
   try {
     // React Native's WebSocket accepts headers, which is how we pass the
     // better-auth cookie and the store scope (browsers can't do this).
@@ -64,41 +87,55 @@ function connect(storeId: string) {
       options: { headers: Record<string, string> },
     ) => WebSocket;
 
-    socket = new RNWebSocket(url, undefined, {
+    ws = new RNWebSocket(url, undefined, {
       headers: { Cookie: cookie, "x-store-id": storeId },
     });
   } catch {
-    scheduleReconnect(storeId);
+    scheduleReconnect(storeId, gen);
     return;
   }
+  socket = ws;
 
-  socket.onopen = () => {
+  ws.onopen = () => {
+    if (!isCurrent(gen)) {
+      // Superseded while the handshake was in flight. Hang up quietly — syncing
+      // here would be a sync for the shop the user just left.
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     attempts = 0;
     // Catch up on anything missed while disconnected.
     void syncNow(storeId);
     pingTimer = setInterval(() => {
+      if (!isCurrent(gen)) return;
       try {
-        socket?.send("ping");
+        ws.send("ping");
       } catch {
         /* the close handler will deal with it */
       }
     }, PING_MS);
   };
 
-  socket.onmessage = (event) => {
+  ws.onmessage = (event) => {
+    if (!isCurrent(gen)) return;
     if (event.data === "pong") return;
     // Any change notification simply triggers a sync.
     void syncNow(storeId);
   };
 
-  socket.onerror = () => {
+  ws.onerror = () => {
     // onclose always follows; reconnect is handled there.
   };
 
-  socket.onclose = () => {
+  ws.onclose = () => {
+    if (!isCurrent(gen)) return;
     clearTimers();
     socket = null;
-    scheduleReconnect(storeId);
+    scheduleReconnect(storeId, gen);
   };
 }
 
@@ -123,11 +160,17 @@ export function startRealtime(storeId: string): () => void {
 export function stopRealtime(): void {
   stopped = true;
   currentStore = null;
+  // Retire every outstanding handler BEFORE closing. startRealtime sets
+  // `stopped` back to false immediately, so the close event this triggers
+  // arrives once the channel looks open again — the generation is what stops it
+  // reconnecting to the shop we're leaving.
+  generation += 1;
   clearTimers();
+  const closing = socket;
+  socket = null;
   try {
-    socket?.close();
+    closing?.close();
   } catch {
     /* ignore */
   }
-  socket = null;
 }

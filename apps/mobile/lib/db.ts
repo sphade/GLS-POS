@@ -213,25 +213,27 @@ export function resetCollection(c: Collection) {
 
 export type ChangeRow<T> = { id: string; data: T; updatedAt: number; deleted: boolean };
 
-/** Rows changed locally since the last push. */
-export function loadDirty<T>(c: Collection): ChangeRow<T>[] {
-  const db = conn();
+// Implementations take an explicit handle; the exports below bind them to the
+// active store. See `storeScope` at the bottom for why sync needs the former.
+
+function loadDirtyOn<T>(db: SQLite.SQLiteDatabase, c: Collection): ChangeRow<T>[] {
   const rows = db.getAllSync<{ id: string; data: string; updated_at: number; deleted: number }>(
     `SELECT id, data, updated_at, deleted FROM ${c} WHERE dirty = 1`,
   );
   return rows.map((r) => ({ id: r.id, data: JSON.parse(r.data) as T, updatedAt: r.updated_at, deleted: !!r.deleted }));
 }
 
-export function clearDirty(c: Collection, ids: string[]) {
+function clearDirtyOn(db: SQLite.SQLiteDatabase, c: Collection, ids: string[]) {
   if (ids.length === 0) return;
-  const db = conn();
   const placeholders = ids.map(() => "?").join(",");
   db.runSync(`UPDATE ${c} SET dirty = 0 WHERE id IN (${placeholders})`, ...ids);
 }
 
-/** Apply a change pulled from the server (last-write-wins by updatedAt). */
-export function applyRemote<T extends { id: string }>(c: Collection, change: ChangeRow<T>) {
-  const db = conn();
+function applyRemoteOn<T extends { id: string }>(
+  db: SQLite.SQLiteDatabase,
+  c: Collection,
+  change: ChangeRow<T>,
+) {
   const local = db.getFirstSync<{ updated_at: number; dirty: number }>(
     `SELECT updated_at, dirty FROM ${c} WHERE id = ?`,
     change.id,
@@ -249,18 +251,73 @@ export function applyRemote<T extends { id: string }>(c: Collection, change: Cha
   );
 }
 
-export function metaGet(key: string): string | null {
-  const db = conn();
+function metaGetOn(db: SQLite.SQLiteDatabase, key: string): string | null {
   return db.getFirstSync<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key)?.value ?? null;
 }
 
-export function metaSet(key: string, value: string) {
-  const db = conn();
+function metaSetOn(db: SQLite.SQLiteDatabase, key: string, value: string) {
   db.runSync(
     `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     key,
     value,
   );
+}
+
+/** Rows changed locally since the last push. */
+export function loadDirty<T>(c: Collection): ChangeRow<T>[] {
+  return loadDirtyOn<T>(conn(), c);
+}
+
+export function clearDirty(c: Collection, ids: string[]) {
+  clearDirtyOn(conn(), c, ids);
+}
+
+/** Apply a change pulled from the server (last-write-wins by updatedAt). */
+export function applyRemote<T extends { id: string }>(c: Collection, change: ChangeRow<T>) {
+  applyRemoteOn(conn(), c, change);
+}
+
+export function metaGet(key: string): string | null {
+  return metaGetOn(conn(), key);
+}
+
+export function metaSet(key: string, value: string) {
+  metaSetOn(conn(), key, value);
+}
+
+/**
+ * One specific store's database, addressed explicitly.
+ *
+ * Everything else in this module writes through the *active* store handle,
+ * which is correct for UI code: a screen only ever reads the shop it is
+ * showing. Sync is the exception. A request is issued for one store and its
+ * response arrives later — possibly after the user switched shops — so writing
+ * through the active handle put one shop's products, tables and VIP orders into
+ * another shop's file, and pushed the new shop's rows to the old shop's Durable
+ * Object. Taking the store explicitly means a response can only ever land where
+ * it belongs, no matter what happens mid-flight.
+ *
+ * The handle is resolved per operation rather than once up front, so a pull that
+ * yields between chunks still writes every chunk to the same store. `open` is a
+ * cached Map lookup, so this costs nothing.
+ */
+export type StoreScope = {
+  metaGet: (key: string) => string | null;
+  metaSet: (key: string, value: string) => void;
+  loadDirty: <T>(c: Collection) => ChangeRow<T>[];
+  clearDirty: (c: Collection, ids: string[]) => void;
+  applyRemote: <T extends { id: string }>(c: Collection, change: ChangeRow<T>) => void;
+};
+
+export function storeScope(storeId: string): StoreScope {
+  const handle = () => open(storeId);
+  return {
+    metaGet: (key) => metaGetOn(handle(), key),
+    metaSet: (key, value) => metaSetOn(handle(), key, value),
+    loadDirty: <T>(c: Collection) => loadDirtyOn<T>(handle(), c),
+    clearDirty: (c, ids) => clearDirtyOn(handle(), c, ids),
+    applyRemote: (c, change) => applyRemoteOn(handle(), c, change),
+  };
 }
 
 /** Seed a collection once (first launch), writing rows as clean/not-dirty. */
