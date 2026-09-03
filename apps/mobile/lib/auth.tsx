@@ -5,7 +5,7 @@ import { authClient, authCookie } from "./auth-client";
 import { api } from "./api";
 import { setAuditActor } from "./audit";
 import { unregisterPush } from "./push";
-import { metaGet, metaSet } from "./db";
+import { deviceMeta } from "./db";
 import { LOCAL_STORE_ID, LOCAL_STORE_MEMBERSHIP, LOCAL_USER, OFFLINE_MODE } from "./offline";
 
 /**
@@ -84,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
   const [storesStatus, setStoresStatus] = useState<StoresStatus>(OFFLINE_MODE ? "ok" : "pending");
   const [activeStoreId, setActiveStoreId] = useState<string | null>(() =>
-    OFFLINE_MODE ? LOCAL_STORE_ID : metaGet(ACTIVE_STORE_KEY),
+    OFFLINE_MODE ? LOCAL_STORE_ID : deviceMeta.get(ACTIVE_STORE_KEY),
   );
 
   /**
@@ -130,13 +130,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStores(res.data);
         setStoresStatus("ok");
         // Cache for offline fallback
-        metaSet(CACHED_USER_KEY, JSON.stringify(sessionUser));
-        metaSet(CACHED_STORES_KEY, JSON.stringify(res.data));
+        deviceMeta.set(CACHED_USER_KEY, JSON.stringify(sessionUser));
+        deviceMeta.set(CACHED_STORES_KEY, JSON.stringify(res.data));
         // Fall back to the first store when the cached one is gone.
         setActiveStoreId((prev) => {
           const keep = prev && res.data.some((s) => s.id === prev);
           const next = keep ? prev : (res.data[0]?.id ?? null);
-          if (next) metaSet(ACTIVE_STORE_KEY, next);
+          if (next) deviceMeta.set(ACTIVE_STORE_KEY, next);
           return next;
         });
       } else {
@@ -145,8 +145,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch {
       // Offline: restore from cache so the POS stays usable.
-      const cachedUser = metaGet(CACHED_USER_KEY);
-      const cachedStores = metaGet(CACHED_STORES_KEY);
+      const cachedUser = deviceMeta.get(CACHED_USER_KEY);
+      const cachedStores = deviceMeta.get(CACHED_STORES_KEY);
       if (cachedUser) {
         setUser(JSON.parse(cachedUser) as User);
         if (cachedStores) setStores(JSON.parse(cachedStores) as StoreMembership[]);
@@ -236,12 +236,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(null);
         setStores([]);
         setStoresStatus("ok");
-        metaSet(CACHED_USER_KEY, "");
-        metaSet(CACHED_STORES_KEY, "");
+        deviceMeta.set(CACHED_USER_KEY, "");
+        deviceMeta.set(CACHED_STORES_KEY, "");
       },
 
       selectStore: (storeId) => {
-        metaSet(ACTIVE_STORE_KEY, storeId);
+        deviceMeta.set(ACTIVE_STORE_KEY, storeId);
         setActiveStoreId(storeId);
       },
 
@@ -258,7 +258,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
          * and would start ringing up sales against the wrong shop. Done after
          * the refresh so the new store is already in the list.
          */
-        metaSet(ACTIVE_STORE_KEY, res.data.id);
+        deviceMeta.set(ACTIVE_STORE_KEY, res.data.id);
         setActiveStoreId(res.data.id);
         return { ok: true };
       },

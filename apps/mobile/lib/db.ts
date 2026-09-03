@@ -309,6 +309,25 @@ export type StoreScope = {
   applyRemote: <T extends { id: string }>(c: Collection, change: ChangeRow<T>) => void;
 };
 
+/**
+ * Key/value that belongs to the *device*, not to any shop.
+ *
+ * Which shop was last open, and the cached identity used to boot offline, are
+ * not facts about a shop — but they were being written through the active-store
+ * handle, which silently broke them. They landed in whichever shop's file was
+ * open at the time, then got read at app start, before any shop is selected,
+ * from the bootstrap file. Same key, different database, so the value always
+ * came back null and the app fell back to the first shop in the list instead of
+ * the one you were last using.
+ *
+ * Pinned to the bootstrap database, which exists before any store is known and
+ * never changes.
+ */
+export const deviceMeta = {
+  get: (key: string): string | null => metaGetOn(open(BOOTSTRAP), key),
+  set: (key: string, value: string): void => metaSetOn(open(BOOTSTRAP), key, value),
+};
+
 export function storeScope(storeId: string): StoreScope {
   const handle = () => open(storeId);
   return {
