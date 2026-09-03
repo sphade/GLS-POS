@@ -23,6 +23,14 @@ export function BarChart({
   const ticks = [1, 0.75, 0.5, 0.25, 0].map((f) => Math.round(max * f));
   const plotHeight = height - 34; // leave room for rotated x labels
 
+  /**
+   * A dense range — 24 hours, or a month of dates — has far more buckets than
+   * there are readable label slots, so every nth label is drawn instead. The
+   * bars still show every bucket; only the axis text thins out. Exact figures
+   * are in the list under the chart either way.
+   */
+  const labelStride = Math.max(1, Math.ceil(data.length / 8));
+
   return (
     <View style={styles.card}>
       <View style={{ flexDirection: "row", height: plotHeight }}>
@@ -44,13 +52,13 @@ export function BarChart({
             {data.map((d, i) => (
               <View key={i} style={styles.barCol}>
                 <View
-                  style={{
-                    width: 34,
-                    height: Math.max(2, (d.value / max) * (plotHeight - 6)),
-                    backgroundColor: barColor,
-                    borderTopLeftRadius: 2,
-                    borderTopRightRadius: 2,
-                  }}
+                  style={[
+                    styles.bar,
+                    {
+                      height: Math.max(2, (d.value / max) * (plotHeight - 6)),
+                      backgroundColor: barColor,
+                    },
+                  ]}
                 />
               </View>
             ))}
@@ -64,9 +72,11 @@ export function BarChart({
         <View style={styles.xLabels}>
           {data.map((d, i) => (
             <View key={i} style={styles.xLabelCol}>
-              <Text style={styles.xLabel} numberOfLines={1}>
-                {d.label}
-              </Text>
+              {i % labelStride === 0 && (
+                <Text style={styles.xLabel} numberOfLines={1}>
+                  {d.label}
+                </Text>
+              )}
             </View>
           ))}
         </View>
@@ -83,6 +93,19 @@ const styles = StyleSheet.create({
   gridline: { position: "absolute", left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300 },
   bars: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: "100%" },
   barCol: { flex: 1, alignItems: "center", justifyContent: "flex-end" },
+  /**
+   * Sized as a share of its column rather than a fixed width, so the bars thin
+   * out on their own as the bucket count grows. A fixed width overflowed the
+   * column and smeared the bars together once a range had more than a handful
+   * of buckets. Capped so a two-bar chart doesn't render slabs.
+   */
+  bar: {
+    width: "64%",
+    maxWidth: 34,
+    minWidth: 2,
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+  },
   xRow: { flexDirection: "row", marginTop: 6 },
   xLabels: { flex: 1, flexDirection: "row", justifyContent: "space-around" },
   xLabelCol: { flex: 1, alignItems: "center" },

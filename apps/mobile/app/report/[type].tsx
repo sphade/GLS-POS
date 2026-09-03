@@ -414,11 +414,16 @@ export default function ReportDetailScreen() {
                   <Text style={styles.listValue}>{formatPrimary(bucket)}</Text>
                 </View>
                 <Text style={styles.listMeta}>{formatSecondary(bucket)}</Text>
-                <View style={styles.progressTrack}>
-                  <View style={[styles.progressFill, { width: `${pct}%` }]}>
-                    {pct > 20 && <Text style={styles.progressText}>{pct}%</Text>}
+                {/* The percentage sits in its own column rather than inside the
+                    fill. A label inside has to fit, which is why a small value
+                    used to need a 22px blob to sit in — out here every bar can
+                    be thin, and they all end at the same x so their lengths are
+                    actually comparable. */}
+                <View style={styles.barRow}>
+                  <View style={styles.progressTrack}>
+                    {pct > 0 && <View style={[styles.progressFill, { width: `${pct}%` }]} />}
                   </View>
-                  {pct <= 20 && <Text style={styles.progressTextOut}>{pct}%</Text>}
+                  <Text style={styles.progressPct}>{pct}%</Text>
                 </View>
               </View>
             );
@@ -640,23 +645,32 @@ const styles = StyleSheet.create({
   listLabel: { fontSize: 15, color: colors.grey800, fontWeight: "600" },
   listValue: { fontSize: 15, color: colors.grey900, fontWeight: "700" },
   listMeta: { fontSize: 12, color: colors.grey600, marginTop: 3, marginBottom: 8 },
+  barRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   progressTrack: {
-    height: 22,
-    borderRadius: 11,
+    flex: 1,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: colors.grey200,
     overflow: "hidden",
-    justifyContent: "center",
   },
   progressFill: {
-    height: 22,
-    borderRadius: 11,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: colors.primary,
-    alignItems: "center",
-    justifyContent: "center",
-    minWidth: 22,
+    // Enough that a 1% sliver still reads as a deliberate mark rather than
+    // dirt on the screen, small enough that it can't be mistaken for a real
+    // quantity the way the old 22px circle could.
+    minWidth: 6,
   },
-  progressText: { color: colors.white, fontSize: 12, fontWeight: "700" },
-  progressTextOut: { position: "absolute", left: 10, color: colors.primary, fontSize: 12, fontWeight: "700" },
+  progressPct: {
+    width: 34,
+    textAlign: "right",
+    fontSize: 11,
+    fontWeight: "700",
+    color: colors.grey600,
+    // Keeps the digits from shifting the column as values change width.
+    fontVariant: ["tabular-nums"],
+  },
 
   fab: {
     position: "absolute",

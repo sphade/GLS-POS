@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type {
   ApiCategory,
   ApiProduct,
@@ -26,6 +26,26 @@ import migrations from "./migrations/migrations.js";
 /** Public VIP endpoint throttle: at most N orders per table per window. */
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ORDERS = 5;
+
+/**
+ * Collections that record trading activity, as opposed to the ones that
+ * describe the shop. Clearing these hands a store over with no history while
+ * its menu, categories, tables and photos stay exactly as they are.
+ *
+ * `stock_movements` belongs here, and including it is safe: a product's current
+ * stock is materialised onto the product document itself (see
+ * `applyMovementDelta`, which writes the new total back after every movement),
+ * so dropping the log erases the record of how stock reached its current level
+ * without changing what the app reports as being on the shelf.
+ */
+const SALES_COLLECTIONS = [
+  "receipts",
+  "returns",
+  "stock_movements",
+  "web_orders",
+  "audit_log",
+  "held_orders",
+] as const;
 
 /**
  * Device wall clocks are the LWW tiebreaker, so a clock running minutes fast
@@ -1007,6 +1027,103 @@ export class StoreDurableObject extends DurableObject<Env> {
       .groupBy(schema.documents.collection)
       .all();
     return Object.fromEntries(rows.map((r) => [r.collection, r.count]));
+  }
+
+  /**
+   * Every live row in the trading collections, for taking a backup before
+   * `clearSales` destroys them. Read-only.
+   */
+  async exportSales(): Promise<{
+    rows: { collection: string; id: string; data: string; updatedAt: number }[];
+  }> {
+    const rows = this.db
+      .select({
+        collection: schema.documents.collection,
+        id: schema.documents.id,
+        data: schema.documents.data,
+        updatedAt: schema.documents.updatedAt,
+      })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.deleted, false),
+          inArray(schema.documents.collection, [...SALES_COLLECTIONS]),
+        ),
+      )
+      .all();
+    return { rows };
+  }
+
+  /**
+   * Hand this store over with a clean trading history: erase every sale, refund,
+   * VIP order, held ticket, stock movement and audit entry, and keep the whole
+   * catalog. Irreversible — take `exportSales` first.
+   *
+   * Has NO CALLER. Driven once by a temporary operator route that has since been
+   * removed, and kept because "start a fresh set of books" is a plausible
+   * owner-facing feature. Wire it to something owner-only and confirmation-gated.
+   *
+   * Tombstones rather than DELETE. A device only learns of a change by pulling
+   * rows with `server_seq > cursor`, so a hard delete leaves nothing to pull and
+   * every till would keep showing its own local copy of the old sales forever.
+   * Each tombstone takes its own monotonic seq so pull pages in order, and
+   * arrives with `dirty = 0` so no device re-uploads what it just dropped.
+   *
+   * The row's payload is replaced with a bare id. Devices never read the body of
+   * a deleted row — every local query filters on `deleted = 0` — so the sale
+   * details are genuinely gone from the server rather than merely hidden.
+   *
+   * Stock levels survive by design; see SALES_COLLECTIONS for why.
+   */
+  async clearSales(): Promise<{
+    cleared: Record<string, number>;
+    rows: number;
+    productsKept: number;
+  }> {
+    const live = this.db
+      .select({ collection: schema.documents.collection, id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.deleted, false),
+          inArray(schema.documents.collection, [...SALES_COLLECTIONS]),
+        ),
+      )
+      .all();
+
+    const cleared: Record<string, number> = {};
+    let seq = this.currentSeq();
+    const now = Date.now();
+
+    for (const row of live) {
+      seq += 1;
+      this.db
+        .update(schema.documents)
+        .set({
+          deleted: true,
+          data: JSON.stringify({ id: row.id }),
+          updatedAt: now,
+          serverSeq: seq,
+        })
+        .where(
+          and(
+            eq(schema.documents.collection, row.collection),
+            eq(schema.documents.id, row.id),
+          ),
+        )
+        .run();
+      cleared[row.collection] = (cleared[row.collection] ?? 0) + 1;
+    }
+
+    const [products] = this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(schema.documents)
+      .where(
+        and(eq(schema.documents.deleted, false), eq(schema.documents.collection, "products")),
+      )
+      .all();
+
+    return { cleared, rows: live.length, productsKept: Number(products?.n ?? 0) };
   }
 
   /**
