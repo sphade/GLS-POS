@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -65,6 +65,9 @@ export default function ItemEditorScreen() {
     existing?.stockQuantity != null ? String(existing.stockQuantity) : "",
   );
   const [lowAlert, setLowAlert] = useState(existing?.lowStockAt != null ? String(existing.lowStockAt) : "");
+  /** So the whole row can hand focus to its field, not just the input box. */
+  const stockQtyRef = useRef<TextInput>(null);
+  const lowAlertRef = useRef<TextInput>(null);
 
   const [catOpen, setCatOpen] = useState(false);
   const [sellByOpen, setSellByOpen] = useState(false);
@@ -364,9 +367,16 @@ export default function ItemEditorScreen() {
             />
 
             <FeatureCard icon="cube-outline" label="Track stock" on={trackStock} onToggle={setTrackStock}>
-              <View style={styles.stockRow}>
+              {/* Rows are pressable so the label focuses its field — the boxed
+                  input alone is a small target to hit. */}
+              <Pressable
+                style={styles.stockRow}
+                accessible={false}
+                onPress={() => stockQtyRef.current?.focus()}
+              >
                 <Text style={styles.stockLabel}>Quantity in stock</Text>
                 <NumberInput
+                  ref={stockQtyRef}
                   style={styles.stockInput}
                   value={stockQty}
                   onChangeText={edit(setStockQty)}
@@ -376,10 +386,15 @@ export default function ItemEditorScreen() {
                   placeholder="0"
                   placeholderTextColor={colors.hint}
                 />
-              </View>
-              <View style={styles.stockRow}>
+              </Pressable>
+              <Pressable
+                style={styles.stockRow}
+                accessible={false}
+                onPress={() => lowAlertRef.current?.focus()}
+              >
                 <Text style={styles.stockLabel}>Alert when stock at or below</Text>
                 <NumberInput
+                  ref={lowAlertRef}
                   style={styles.stockInput}
                   value={lowAlert}
                   onChangeText={edit(setLowAlert)}
@@ -387,7 +402,7 @@ export default function ItemEditorScreen() {
                   placeholder="—"
                   placeholderTextColor={colors.hint}
                 />
-              </View>
+              </Pressable>
               <Text style={styles.stockHint}>
                 Stock goes down automatically with each sale{isFraction ? ` (per ${measure.unit})` : ""}.
               </Text>

@@ -1,4 +1,4 @@
-﻿import { type ReactNode } from "react";
+﻿import { useRef, type ReactNode } from "react";
 import { Alert, Image, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
@@ -89,8 +89,18 @@ export function FieldCard({
   valid?: boolean;
   showTick?: boolean;
 }) {
+  const inputRef = useRef<TextInput>(null);
+
   return (
-    <View style={styles.card}>
+    /**
+     * The card forwards taps to the field. `fieldInput` has `padding: 0`, so the
+     * input's own hit area is a single line of text — tapping the label, the
+     * tick, or anywhere in the card's 12px padding did nothing, which felt like
+     * the field was refusing to focus. `accessible={false}` keeps the wrapper out
+     * of the accessibility tree so the TextInput stays the announced control
+     * rather than being wrapped in a phantom button.
+     */
+    <Pressable style={styles.card} accessible={false} onPress={() => inputRef.current?.focus()}>
       <View style={styles.fieldRow}>
         {showTick && (
           <Ionicons name="checkmark-circle" size={22} color={valid ? colors.primary : colors.grey400} />
@@ -99,6 +109,7 @@ export function FieldCard({
           <Text style={styles.fieldLabel}>{label}</Text>
           {keyboardType === "numeric" ? (
             <NumberInput
+              ref={inputRef}
               style={styles.fieldInput}
               value={value}
               onChangeText={onChangeText}
@@ -108,6 +119,7 @@ export function FieldCard({
             />
           ) : (
             <TextInput
+              ref={inputRef}
               style={styles.fieldInput}
               value={value}
               onChangeText={onChangeText}
@@ -118,7 +130,7 @@ export function FieldCard({
           )}
         </View>
       </View>
-    </View>
+    </Pressable>
   );
 }
 

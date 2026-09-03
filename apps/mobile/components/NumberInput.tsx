@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import { TextInput, type TextInputProps } from "react-native";
 
 /**
@@ -17,20 +17,19 @@ import { TextInput, type TextInputProps } from "react-native";
  * `selectTextOnFocus` alone is unreliable on Android — it can highlight and then
  * immediately collapse the selection — so the range is also set explicitly for
  * one frame and then released, which hands the caret back to the user.
+ *
+ * Forwards its ref to the underlying TextInput so a wrapper can focus it — see
+ * FieldCard, where tapping anywhere on the card puts the cursor in the field.
  */
-export function NumberInput({
-  value,
-  onChangeText,
-  decimals = true,
-  onFocus,
-  onBlur,
-  ...rest
-}: Omit<TextInputProps, "onChangeText" | "keyboardType" | "value"> & {
-  value: string;
-  onChangeText: (text: string) => void;
-  /** Allow a decimal point. False keeps it to whole numbers. */
-  decimals?: boolean;
-}) {
+export const NumberInput = forwardRef<
+  TextInput,
+  Omit<TextInputProps, "onChangeText" | "keyboardType" | "value"> & {
+    value: string;
+    onChangeText: (text: string) => void;
+    /** Allow a decimal point. False keeps it to whole numbers. */
+    decimals?: boolean;
+  }
+>(function NumberInput({ value, onChangeText, decimals = true, onFocus, onBlur, ...rest }, ref) {
   const [selection, setSelection] = useState<{ start: number; end: number } | undefined>();
   /**
    * Exactly what's been typed, kept only while the field is focused.
@@ -68,6 +67,7 @@ export function NumberInput({
 
   return (
     <TextInput
+      ref={ref}
       {...rest}
       value={shown}
       selectTextOnFocus
@@ -87,7 +87,7 @@ export function NumberInput({
       keyboardType={decimals ? "decimal-pad" : "number-pad"}
     />
   );
-}
+});
 
 /**
  * Strip anything that isn't a number. Without this a stray character silently

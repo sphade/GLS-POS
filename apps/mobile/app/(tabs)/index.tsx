@@ -36,9 +36,19 @@ import { useStore } from "@/lib/store";
 import { ItemImage } from "@/components/ItemImage";
 import { EmptyState } from "@/components/EmptyState";
 import { warmImageCache } from "@/lib/image-store";
+import { metaGet, metaSet } from "@/lib/db";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 const NEW_ITEM_ID = "__new_item__";
+
+/**
+ * Grid-vs-list choice, remembered on the device.
+ *
+ * Lives in the `meta` table rather than component state so it survives leaving
+ * the tab and restarting the app. `meta` is not a synced collection, so this
+ * stays a local display preference and never travels to other tills.
+ */
+const LAYOUT_KEY = "items_layout";
 const GAP = 6;
 const PAD = 6;
 /** Items with no category fall into this trailing group. */
@@ -88,7 +98,9 @@ export default function ItemsScreen() {
   const { store } = useStore();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [query, setQuery] = useState("");
-  const [isGrid, setIsGrid] = useState(true);
+  // Read synchronously on first render (expo-sqlite is sync), so the saved
+  // layout is correct on the very first paint with no flicker from grid to list.
+  const [isGrid, setIsGrid] = useState(() => metaGet(LAYOUT_KEY) !== "list");
   /** Item whose variant sheet is open. The sheet both adds and removes. */
   const [chooser, setChooser] = useState<Item | null>(null);
   /** Which category is being viewed; ALL shows every group. */
@@ -99,6 +111,13 @@ export default function ItemsScreen() {
 
   const cols = isGrid ? (width > 700 ? 5 : 3) : 1;
   const cardWidth = (width - PAD * 2 - GAP * (cols - 1)) / cols;
+
+  /** Persist alongside the state change, so the choice outlives the screen. */
+  const toggleLayout = () => {
+    const next = !isGrid;
+    setIsGrid(next);
+    metaSet(LAYOUT_KEY, next ? "grid" : "list");
+  };
 
   const toggleCollapse = (id: string) => {
     feedbackTap();
@@ -250,7 +269,7 @@ export default function ItemsScreen() {
           title={strings.items}
           showLayoutSwitch
           isGrid={isGrid}
-          onLayoutSwitch={() => setIsGrid((v) => !v)}
+          onLayoutSwitch={toggleLayout}
         />
         <PosSearchBar value={query} onChangeText={setQuery} onScan={() => router.push("/scanner")} />
       </SafeAreaView>
@@ -542,9 +561,10 @@ const ProductCard = memo(function ProductCard({
         <Avatar item={item} size={circle} />
       </View>
 
-      <Text style={styles.title} numberOfLines={1}>
-        {item.name}
-      </Text>
+      {/* Deliberately unclamped: supplier names like "MOBIL SUPER 3000 X1 5W-40
+          GSP 4X5L NG" are unreadable truncated, and the row container stretches
+          its cards to the tallest, so wrapping can't stagger the grid. */}
+      <Text style={styles.title}>{item.name}</Text>
       <Text style={styles.price} numberOfLines={1}>
         {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
       </Text>
@@ -600,7 +620,7 @@ const ProductRow = memo(function ProductRow({
         )}
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={[styles.title, { textAlign: "left", marginTop: 0 }]} numberOfLines={1}>
+        <Text style={[styles.title, { textAlign: "left", marginTop: 0 }]}>
           {item.name}
         </Text>
         <Text style={[styles.price, { textAlign: "left", marginTop: 2 }]}>
@@ -759,7 +779,20 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   qtyOverlayText: { color: colors.white, fontSize: 11, fontWeight: "800" },
-  title: { fontSize: 15, color: colors.grey900, fontWeight: "700", marginTop: 10, textAlign: "center" },
+  /**
+   * Shared by the grid card and the list row. Eased down from 15/700 because the
+   * name now wraps instead of truncating: at the old size and weight a
+   * three-line name dominated the card and read as shouting.
+   */
+  title: {
+    fontSize: 14,
+    color: colors.grey900,
+    fontWeight: "600",
+    // Without this, wrapped lines sit too close to be comfortably scannable.
+    lineHeight: 18,
+    marginTop: 10,
+    textAlign: "center",
+  },
   price: { fontSize: 15, color: colors.primary, fontWeight: "500", marginTop: 6, textAlign: "center" },
 
   newItemCard: { justifyContent: "center" },

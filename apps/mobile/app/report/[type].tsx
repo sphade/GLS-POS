@@ -17,6 +17,7 @@ import {
   type SaleReturn,
 } from "@/lib/returns";
 import { feedbackTap } from "@/lib/feedback";
+import { useAuth } from "@/lib/auth";
 
 const CURRENCY = "NGN";
 
@@ -267,6 +268,7 @@ export default function ReportDetailScreen() {
     /** Set for hand-picked date windows, which have no preset to infer from. */
     granularity?: Granularity;
   }>();
+  const { can } = useAuth();
   const { receipts: allReceipts } = useCart();
   const { returns: allReturns } = useReturns();
 
@@ -364,6 +366,27 @@ export default function ReportDetailScreen() {
         ? `Top ${MAX_ITEM_BARS} of ${buckets.length} items · full list below`
         : "What sold"
       : GRANULARITY_CAPTION[granularity];
+
+  /** Same gate as the overview: the drill-down is reachable by deep link too. */
+  if (!can("reports:view")) {
+    return (
+      <SafeAreaView edges={["top"]} style={styles.root}>
+        <View style={styles.header}>
+          <Pressable onPress={() => router.back()} style={styles.headerBtn} hitSlop={8}>
+            <Ionicons name="close" size={26} color={colors.primary} />
+          </Pressable>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.headerTitle}>REPORTS</Text>
+          </View>
+          <View style={styles.headerBtn} />
+        </View>
+        <View style={styles.denied}>
+          <Ionicons name="lock-closed-outline" size={46} color={colors.grey400} />
+          <Text style={styles.deniedText}>You don&apos;t have permission to view reports.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -581,6 +604,8 @@ function Segmented({
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
+  denied: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 32 },
+  deniedText: { fontSize: 15, color: colors.grey600, textAlign: "center" },
   header: {
     flexDirection: "row",
     alignItems: "center",

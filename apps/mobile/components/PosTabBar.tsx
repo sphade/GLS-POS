@@ -2,10 +2,12 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
+import type { Permission } from "@gls-pos/types";
 import { colors } from "@/constants/theme";
 import { useCartCount } from "@/lib/cart";
 import { quietPull } from "@/lib/sync";
 import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -16,16 +18,27 @@ import { feedbackTap } from "@/lib/feedback";
  */
 type TabMeta = {
   label: string;
+  /**
+   * Hidden unless the signed-in role holds this permission.
+   *
+   * The gate has to live here, not in the navigator. `_layout.tsx` sets
+   * `href: null` for these tabs, but that only suppresses the *default* tab bar
+   * — this component renders straight from `state.routes`, so it saw every route
+   * regardless and cashiers got a Reports tab anyway.
+   */
+  needs?: Permission;
   render: (color: string) => React.ReactNode;
 };
 
 const TABS: Record<string, TabMeta> = {
   reports: {
     label: "Reports",
+    needs: "reports:view",
     render: (c) => <MaterialCommunityIcons name="chart-box" size={24} color={c} />,
   },
   today: {
     label: "Today",
+    needs: "reports:view",
     render: (c) => <MaterialCommunityIcons name="cash-multiple" size={24} color={c} />,
   },
   counter: {
@@ -46,12 +59,14 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const count = useCartCount();
   const { store } = useStore();
+  const { can } = useAuth();
 
   return (
     <View style={[styles.bar, { height: 58 + insets.bottom }]}>
       {state.routes.map((route, index) => {
         const meta = TABS[route.name];
         if (!meta) return null;
+        if (meta.needs && !can(meta.needs)) return null;
 
         const focused = state.index === index;
         const tint = focused ? colors.white : colors.primary;
