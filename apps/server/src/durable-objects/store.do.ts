@@ -1030,6 +1030,68 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   /**
+   * Bulk-insert catalog documents for a brand-new store.
+   *
+   * Exists because standing up a shop from a supplier price list means writing
+   * dozens of products, and the only other route in is a device typing them one
+   * at a time. Documents are stored opaquely, so this takes them as-is and does
+   * not validate their shape — the caller is responsible for sending exactly
+   * what the app expects to read back.
+   *
+   * Skips any id that already exists rather than overwriting, so a retry after a
+   * half-finished run cannot duplicate rows or clobber later edits. Each write
+   * takes its own monotonic seq so devices pull them in order.
+   *
+   * Stock is written straight onto the product documents, which is where the app
+   * reads it from; no opening `stock_movements` are logged, so a new shop starts
+   * with a blank movement history.
+   *
+   * Has NO CALLER. Driven once by a temporary operator route that has since been
+   * removed, and kept because bulk catalog import is an obvious future feature.
+   */
+  async seedCatalog(input: {
+    categories?: { id: string }[];
+    products?: { id: string }[];
+  }): Promise<{ written: Record<string, number>; skipped: number }> {
+    let seq = this.currentSeq();
+    const now = Date.now();
+    const written: Record<string, number> = {};
+    let skipped = 0;
+
+    const write = (collection: string, doc: { id: string }) => {
+      const [existing] = this.db
+        .select({ id: schema.documents.id })
+        .from(schema.documents)
+        .where(
+          and(eq(schema.documents.collection, collection), eq(schema.documents.id, doc.id)),
+        )
+        .all();
+      if (existing) {
+        skipped += 1;
+        return;
+      }
+      seq += 1;
+      this.db
+        .insert(schema.documents)
+        .values({
+          collection,
+          id: doc.id,
+          data: JSON.stringify(doc),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .run();
+      written[collection] = (written[collection] ?? 0) + 1;
+    };
+
+    for (const category of input.categories ?? []) write("categories", category);
+    for (const product of input.products ?? []) write("products", product);
+
+    return { written, skipped };
+  }
+
+  /**
    * Every live row in the trading collections, for taking a backup before
    * `clearSales` destroys them. Read-only.
    */

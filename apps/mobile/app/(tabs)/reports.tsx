@@ -6,6 +6,7 @@ import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { DatePickerSheet } from "@/components/DatePickerSheet";
+import { DateRangeSheet } from "@/components/DateRangeSheet";
 import { EmptyState } from "@/components/EmptyState";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
@@ -134,15 +135,19 @@ export default function ReportsScreen() {
   const [pickerOpen, setPickerOpen] = useState(false);
   /** A hand-picked window. Overrides the preset while it's set. */
   const [custom, setCustom] = useState<{ from: number; to: number } | null>(null);
-  /** Which end of a custom range is being chosen. */
-  const [picking, setPicking] = useState<"from" | "to" | null>(null);
-  const [draftFrom, setDraftFrom] = useState<number | null>(null);
+  /** One calendar, one confirm. The common case: "show me that day". */
+  const [dayPickerOpen, setDayPickerOpen] = useState(false);
+  /** The From/To sheet, for the rarer case of a span. */
+  const [rangeOpen, setRangeOpen] = useState(false);
 
   const range = RANGES[rangeIndex]!;
   const presetBounds = rangeBounds(range);
   const from = custom ? custom.from : presetBounds.from;
   const to = custom ? custom.to : presetBounds.to;
   const rangeLabel = custom ? customLabel(custom.from, custom.to) : dateLabelFor(range);
+  /** Which of the two custom chips should read as active. */
+  const customIsOneDay = !!custom && startOfDay(custom.from) === startOfDay(custom.to - 1);
+  const customIsSpan = !!custom && !customIsOneDay;
 
   const scoped = useMemo(
     () => receipts.filter((r) => r.createdAt >= from && r.createdAt < to),
@@ -228,28 +233,28 @@ export default function ReportsScreen() {
     setRangeIndex((i) => Math.min(RANGES.length - 1, Math.max(0, i + dir)));
   };
 
-  /** Start the two-step from/to flow. */
-  const startCustom = () => {
+  const openDayPicker = () => {
     feedbackTap();
     setPickerOpen(false);
-    setDraftFrom(null);
-    setPicking("from");
+    setDayPickerOpen(true);
   };
 
-  const onPickDate = (date: Date) => {
-    if (picking === "from") {
-      setDraftFrom(startOfDay(date.getTime()));
-      setPicking("to");
-      return;
-    }
-    const start = draftFrom ?? startOfDay(date.getTime());
-    const picked = startOfDay(date.getTime());
-    // Tolerate the two dates being chosen in either order.
-    const lo = Math.min(start, picked);
-    const hi = Math.max(start, picked);
-    setCustom({ from: lo, to: endOfDay(hi) });
-    setPicking(null);
-    setDraftFrom(null);
+  /** A single date resolves to that whole day, applied on the one confirm. */
+  const applySingleDay = (date: Date) => {
+    const day = startOfDay(date.getTime());
+    setCustom({ from: day, to: endOfDay(day) });
+    setDayPickerOpen(false);
+  };
+
+  const openRange = () => {
+    feedbackTap();
+    setPickerOpen(false);
+    setRangeOpen(true);
+  };
+
+  const applyRange = (lo: number, hi: number) => {
+    setCustom({ from: startOfDay(lo), to: endOfDay(hi) });
+    setRangeOpen(false);
   };
 
   /** Open the sales chart for the current range. */
@@ -324,31 +329,55 @@ export default function ReportsScreen() {
               </Pressable>
             );
           })}
+          {/* Two separate jobs, two separate chips. They used to be one, which
+              meant looking at a single day cost two calendar passes and picking
+              the same date twice. */}
           <Pressable
-            style={[styles.preset, styles.presetCustom, !!custom && styles.presetActive]}
-            onPress={startCustom}
+            style={[styles.preset, styles.presetCustom, customIsOneDay && styles.presetActive]}
+            onPress={openDayPicker}
+          >
+            <MaterialCommunityIcons
+              name="calendar-today"
+              size={15}
+              color={customIsOneDay ? colors.white : colors.primary}
+            />
+            <Text style={[styles.presetText, customIsOneDay && { color: colors.white }]}>
+              Pick a day
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.preset, styles.presetCustom, customIsSpan && styles.presetActive]}
+            onPress={openRange}
           >
             <MaterialCommunityIcons
               name="calendar-range"
               size={15}
-              color={custom ? colors.white : colors.primary}
+              color={customIsSpan ? colors.white : colors.primary}
             />
-            <Text style={[styles.presetText, !!custom && { color: colors.white }]}>Pick dates</Text>
+            <Text style={[styles.presetText, customIsSpan && { color: colors.white }]}>
+              Date range
+            </Text>
           </Pressable>
         </View>
       )}
 
       <DatePickerSheet
-        visible={picking !== null}
-        title={picking === "from" ? "From date" : "To date"}
-        value={new Date(picking === "to" ? (draftFrom ?? from) : from)}
+        visible={dayPickerOpen}
+        title="Pick a day"
+        value={new Date(from)}
         maximumDate={new Date()}
-        minimumDate={picking === "to" && draftFrom ? new Date(draftFrom) : undefined}
-        onCancel={() => {
-          setPicking(null);
-          setDraftFrom(null);
-        }}
-        onConfirm={onPickDate}
+        onCancel={() => setDayPickerOpen(false)}
+        onConfirm={applySingleDay}
+      />
+
+      <DateRangeSheet
+        visible={rangeOpen}
+        // `to` is exclusive in state, so step inside it to seed the last real day.
+        initialFrom={startOfDay(from)}
+        initialTo={startOfDay(to - 1)}
+        maximumDate={new Date()}
+        onCancel={() => setRangeOpen(false)}
+        onApply={applyRange}
       />
 
       {!hasData ? (
