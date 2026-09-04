@@ -78,6 +78,16 @@ export type Item = {
   taxRateBps?: number;
   /** Populated in Advance mode. Empty = simple single-price item. */
   variants?: Variant[];
+  /**
+   * Variants are mutually exclusive: pick exactly one, quantity one.
+   *
+   * For goods the options are things you can want several of (two large, one
+   * small), so the picker gives every row a stepper. A service is the opposite —
+   * a car gets an interior wash *or* an exterior wash, and "2 interior washes"
+   * on one vehicle is a mis-tap, not an order. This turns the picker into radio
+   * rows that replace rather than accumulate.
+   */
+  chooseOne?: boolean;
 };
 
 export const hasVariants = (item: Item): boolean => !!item.variants?.length;
@@ -578,6 +588,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
       const quantity = previous[lineId]?.qty ?? 0;
       const stock = selectedVariant ? selectedVariant.stock : effective.stockQuantity;
       if (stock != null && quantity + 1 > stock) return;
+      /**
+       * A choose-one item is one service per sale, so the quantity is capped at
+       * one here rather than in the picker. Every stepper in the app funnels
+       * through `add`, so the Counter can't quietly bump it to two.
+       */
+      if (effective.chooseOne && quantity >= 1) return;
 
       replaceEntries({
         ...previous,

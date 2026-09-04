@@ -5,7 +5,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
-import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, confirmDelete, formStyles } from "@/components/form";
+import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, ToggleRow, confirmDelete, formStyles } from "@/components/form";
 import { VariantEditor, VARIANT_ICONS } from "@/components/VariantEditor";
 import { NumberInput } from "@/components/NumberInput";
 import { swatches, useCatalog } from "@/lib/catalog";
@@ -65,6 +65,8 @@ export default function ItemEditorScreen() {
     existing?.stockQuantity != null ? String(existing.stockQuantity) : "",
   );
   const [lowAlert, setLowAlert] = useState(existing?.lowStockAt != null ? String(existing.lowStockAt) : "");
+  /** Advance mode: are the variants mutually exclusive (a service) or additive? */
+  const [chooseOne, setChooseOne] = useState(!!existing?.chooseOne);
   /** So the whole row can hand focus to its field, not just the input box. */
   const stockQtyRef = useRef<TextInput>(null);
   const lowAlertRef = useRef<TextInput>(null);
@@ -187,6 +189,8 @@ export default function ItemEditorScreen() {
       sellBy,
       measure: isFraction ? measure : undefined,
       variants: savedVariants,
+      // Only meaningful with variants, so it's cleared alongside them.
+      chooseOne: mode === "right" ? chooseOne : undefined,
       stockQuantity: nextStock,
       lowStockAt: mode === "right" ? undefined : simpleLowAt,
       // Photo bytes live in `product_images`, not on the product document.
@@ -461,6 +465,24 @@ export default function ItemEditorScreen() {
               <Text style={styles.addVariantText}>ADD VARIANT</Text>
               <Ionicons name="add" size={22} color={colors.white} />
             </Pressable>
+
+            {/* Services pick one option and are done; goods can want several of
+                each. Off by default so existing items keep their steppers. */}
+            <View style={styles.chooseOneCard}>
+              <ToggleRow
+                label="Pick only one option per sale"
+                value={chooseOne}
+                onValueChange={(v) => {
+                  setTouched(true);
+                  setChooseOne(v);
+                }}
+              />
+              <Text style={styles.stockHint}>
+                {chooseOne
+                  ? "The option list becomes a single choice — tapping one selects it and closes. Use this for services like a car wash."
+                  : "The option list shows a quantity stepper on every row, so a sale can include several options at once."}
+              </Text>
+            </View>
           </>
         )}
       </ScrollView>
@@ -725,6 +747,14 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
     paddingVertical: 6,
+  },
+  chooseOneCard: {
+    backgroundColor: colors.card,
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    marginTop: 8,
+    elevation: 1,
   },
   stockLabel: { flex: 1, fontSize: 15, color: colors.grey800 },
   stockInput: {

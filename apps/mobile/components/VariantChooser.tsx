@@ -33,10 +33,34 @@ export function VariantChooser({
   visible: boolean;
   onClose: () => void;
 }) {
-  const { add, remove } = useCartActions();
+  const { add, remove, getLine } = useCartActions();
 
   const variants = item?.variants ?? [];
   if (!item || variants.length === 0) return null;
+
+  const chooseOne = !!item.chooseOne;
+
+  /**
+   * Radio behaviour: whatever else was picked for this item is dropped, the
+   * tapped option becomes the selection, and the sheet closes. `remove` takes
+   * one unit at a time, so a line is cleared by repeating — normally a single
+   * call, but an item switched to choose-one after a cart was built could carry
+   * more.
+   */
+  const chooseOnly = (variant: Variant) => {
+    for (const other of variants) {
+      if (other.id === variant.id) continue;
+      const otherLine = cartLineKey(item.id, other.id);
+      for (let left = getLine(otherLine)?.qty ?? 0; left > 0; left -= 1) {
+        remove(otherLine);
+      }
+    }
+    // Re-tapping the current selection just confirms it; don't stack a second.
+    const mine = cartLineKey(item.id, variant.id);
+    if ((getLine(mine)?.qty ?? 0) === 0) add(item, variant);
+    feedbackAddItem();
+    onClose();
+  };
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -63,7 +87,9 @@ export function VariantChooser({
               <Text style={styles.itemName} numberOfLines={1}>
                 {item.name}
               </Text>
-              <Text style={styles.itemHint}>Pick the option you're selling</Text>
+              <Text style={styles.itemHint}>
+                {chooseOne ? "Pick one" : "Pick the option you're selling"}
+              </Text>
             </View>
           </View>
 
@@ -73,6 +99,8 @@ export function VariantChooser({
                 key={variant.id}
                 item={item}
                 variant={variant}
+                chooseOne={chooseOne}
+                onChoose={() => chooseOnly(variant)}
                 onAdd={() => add(item, variant)}
                 onRemove={() => remove(cartLineKey(item.id, variant.id))}
               />
@@ -95,11 +123,15 @@ export function VariantChooser({
 const VariantRow = memo(function VariantRow({
   item,
   variant,
+  chooseOne,
+  onChoose,
   onAdd,
   onRemove,
 }: {
   item: Item;
   variant: Variant;
+  chooseOne: boolean;
+  onChoose: () => void;
   onAdd: () => void;
   onRemove: () => void;
 }) {
@@ -107,6 +139,39 @@ const VariantRow = memo(function VariantRow({
   const qty = entry?.qty ?? 0;
   const available = variantAvailable(variant);
   const atMax = variant.stock != null && qty >= variant.stock;
+
+  if (chooseOne) {
+    const selected = qty > 0;
+    return (
+      <Pressable
+        style={[styles.card, !available && styles.cardOut]}
+        disabled={!available}
+        accessibilityRole="radio"
+        accessibilityState={{ selected, disabled: !available }}
+        onPress={onChoose}
+        android_ripple={{ color: "#00000010" }}
+      >
+        <View style={[styles.swatch, { backgroundColor: variant.color || colors.primary }]} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.variantName} numberOfLines={2}>
+            {variant.name}
+          </Text>
+          <Text style={styles.variantPrice}>{formatMoney(variant.price, item.currency)}</Text>
+        </View>
+        {available ? (
+          <Ionicons
+            name={selected ? "radio-button-on" : "radio-button-off"}
+            size={26}
+            color={selected ? colors.primary : colors.grey400}
+          />
+        ) : (
+          <View style={styles.oosTag}>
+            <Text style={styles.oosTagText}>SOLD OUT</Text>
+          </View>
+        )}
+      </Pressable>
+    );
+  }
 
   return (
     <View style={[styles.card, !available && styles.cardOut]}>
