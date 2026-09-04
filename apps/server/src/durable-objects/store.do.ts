@@ -1092,6 +1092,95 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   /**
+   * Current live products, for keeping a copy before `replaceProducts`.
+   *
+   * Returned as a JSON string: the RPC boundary's serializable types reject an
+   * array of index-signature objects, and the documents are opaque here anyway.
+   */
+  async exportProducts(): Promise<{ json: string }> {
+    return { json: JSON.stringify(this.docs<unknown>("products")) };
+  }
+
+  /**
+   * Swap a store's product list wholesale: tombstone every current product,
+   * then insert the supplied ones. Categories and everything else are left
+   * alone.
+   *
+   * Tombstones rather than DELETE, because a device only learns of a change by
+   * pulling rows newer than its cursor — a hard delete leaves nothing to pull
+   * and every till would keep showing the old menu forever. Each write takes its
+   * own monotonic seq so the pull pages in order.
+   *
+   * Ids in `products` that match an existing row are updated in place rather
+   * than tombstoned, so re-running with the same payload is idempotent.
+   */
+  async replaceProducts(input: {
+    products: { id: string }[];
+  }): Promise<{ removed: number; written: number }> {
+    const incoming = new Map(input.products.map((p) => [p.id, p]));
+    let seq = this.currentSeq();
+    const now = Date.now();
+
+    const live = this.db
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "products"),
+          eq(schema.documents.deleted, false),
+        ),
+      )
+      .all();
+
+    let removed = 0;
+    for (const row of live) {
+      if (incoming.has(row.id)) continue;
+      seq += 1;
+      this.db
+        .update(schema.documents)
+        .set({
+          deleted: true,
+          data: JSON.stringify({ id: row.id }),
+          updatedAt: now,
+          serverSeq: seq,
+        })
+        .where(
+          and(eq(schema.documents.collection, "products"), eq(schema.documents.id, row.id)),
+        )
+        .run();
+      removed += 1;
+    }
+
+    let written = 0;
+    for (const product of input.products) {
+      seq += 1;
+      this.db
+        .insert(schema.documents)
+        .values({
+          collection: "products",
+          id: product.id,
+          data: JSON.stringify(product),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .onConflictDoUpdate({
+          target: [schema.documents.collection, schema.documents.id],
+          set: {
+            data: JSON.stringify(product),
+            updatedAt: now,
+            deleted: false,
+            serverSeq: seq,
+          },
+        })
+        .run();
+      written += 1;
+    }
+
+    return { removed, written };
+  }
+
+  /**
    * Every live row in the trading collections, for taking a backup before
    * `clearSales` destroys them. Read-only.
    */
@@ -1195,10 +1284,12 @@ export class StoreDurableObject extends DurableObject<Env> {
    * nothing can route here again, so the storage would otherwise sit orphaned
    * and still be billed.
    *
-   * Currently has NO CALLER. It was driven by a temporary operator route that
-   * has since been removed, and is kept because a proper owner-facing "delete
-   * shop" feature — which the app still lacks — needs exactly this. Wire it to
-   * something owner-only and confirmation-gated, never to a bare route.
+   * Currently has NO CALLER, like `seedCatalog`, `replaceProducts`,
+   * `exportProducts` and `clearSales`. All were driven by a temporary operator
+   * route that has since been removed, and are kept because each is the building
+   * block of a real feature the app still lacks — delete shop, bulk catalog
+   * import, and start-fresh-books. Wire them to owner-only, confirmation-gated
+   * paths, never to a bare route.
    *
    * `deleteAll()` rather than DELETE/DROP because Cloudflare documents that
    * removing rows or dropping tables leaves internal metadata behind, and only
