@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { BarChart, type Bar } from "@/components/BarChart";
 import { EmptyState } from "@/components/EmptyState";
+import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
 import { useCart, type Receipt } from "@/lib/cart";
 import { prorate } from "@/lib/discount-model";
 import {
@@ -72,6 +73,8 @@ function hourRange(hour: number): string {
 type Bucket = {
   /** Stable identity for React keys. */
   id: string;
+  /** Exact product+variant identity when this is an item bucket. */
+  itemKey?: string;
   /** Chronological position within the range. Unused when grouping by item. */
   order: number;
   /** Short label for the chart axis. */
@@ -151,6 +154,11 @@ function bucketizeByTime(
 /** Trim a menu name down to something that fits under a chart bar. */
 const shortName = (name: string) => (name.length > 11 ? `${name.slice(0, 10)}…` : name);
 
+/** The report and receipt drill-down must agree on exact variant identity. */
+function receiptItemKey(line: { productId?: string; variantId?: string; name: string }): string {
+  return line.productId ? `${line.productId}:${line.variantId ?? ""}` : `name:${line.name}`;
+}
+
 /**
  * Group by what was actually sold.
  *
@@ -167,6 +175,7 @@ function bucketizeByItem(receipts: Receipt[], returns: SaleReturn[]): Bucket[] {
     if (!bucket) {
       bucket = {
         id,
+        itemKey: id,
         order: 0,
         label: shortName(name),
         longLabel: name,
@@ -183,9 +192,7 @@ function bucketizeByItem(receipts: Receipt[], returns: SaleReturn[]): Bucket[] {
     const nets = receipt.lines.map(lineNetOf);
     const taxShares = prorate(receiptTaxOf(receipt), nets);
     receipt.lines.forEach((line, index) => {
-      const id = line.productId
-        ? `${line.productId}:${line.variantId ?? ""}`
-        : `name:${line.name}`;
+      const id = receiptItemKey(line);
       const bucket = touch(id, line.name);
       bucket.amount += (nets[index] ?? 0) + (taxShares[index] ?? 0);
       bucket.items += line.qty;
@@ -203,9 +210,7 @@ function bucketizeByItem(receipts: Receipt[], returns: SaleReturn[]): Bucket[] {
     );
     const taxShares = prorate(refundedTax, nets);
     ret.lines.forEach((line, index) => {
-      const id = line.productId
-        ? `${line.productId}:${line.variantId ?? ""}`
-        : `name:${line.name}`;
+      const id = receiptItemKey(line);
       const bucket = touch(id, line.name);
       bucket.amount -= (nets[index] ?? 0) + (taxShares[index] ?? 0);
       bucket.items -= line.qty;
@@ -310,6 +315,7 @@ export default function ReportDetailScreen() {
   const [sortField, setSortField] = useState<SortField>(defaultSortFor(initialView).field);
   const [sortDir, setSortDir] = useState<SortDir>(defaultSortFor(initialView).dir);
   const [sortOpen, setSortOpen] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<Bucket | null>(null);
 
   const switchView = (next: Breakdown) => {
     if (next === activeView) return;
@@ -331,6 +337,17 @@ export default function ReportDetailScreen() {
       ),
     [activeView, receipts, returns, granularity, sortField, sortDir],
   );
+
+  /**
+   * Receipt documents are already cached offline. Match the selected product
+   * exactly inside the active report window; `some` keeps one result per sale.
+   */
+  const selectedReceipts = useMemo(() => {
+    if (!selectedItem?.itemKey) return [];
+    return receipts.filter((receipt) =>
+      receipt.lines.some((line) => receiptItemKey(line) === selectedItem.itemKey),
+    );
+  }, [receipts, selectedItem]);
 
   const totals = useMemo(
     () =>
@@ -354,10 +371,22 @@ export default function ReportDetailScreen() {
       ? `${formatMoney(b.amount, CURRENCY)} · ${b.items} item${b.items === 1 ? "" : "s"}`
       : `${b.items} item${b.items === 1 ? "" : "s"} · ${b.count} sale${b.count === 1 ? "" : "s"}`;
 
+  const openItemReceipts = (bucket: Bucket) => {
+    if (!bucket.itemKey) return;
+    feedbackTap();
+    setSelectedItem(bucket);
+  };
+
+  const openReceipt = (receiptId: string) => {
+    feedbackTap();
+    setSelectedItem(null);
+    router.push({ pathname: "/receipt/[id]", params: { id: receiptId } });
+  };
+
   // A long menu would squeeze the bars into unreadable slivers, so the chart
   // shows the leading few while the list below stays complete.
   const charted = activeView === "item" ? buckets.slice(0, MAX_ITEM_BARS) : buckets;
-  const chartData: Bar[] = charted.map((b) => ({ label: b.label, value: primaryOf(b) }));
+  const chartData: Bar[] = charted.map((b) => ({ id: b.id, label: b.label, value: primaryOf(b) }));
   const max = Math.max(...buckets.map((b) => Math.abs(primaryOf(b))), 1);
   const subtitle = (label ?? "All time").toUpperCase();
   const caption =
@@ -426,12 +455,40 @@ export default function ReportDetailScreen() {
             <Text style={styles.caption}>{caption}</Text>
           </View>
 
-          <BarChart data={chartData} formatValue={formatAxis} />
+          <BarChart
+            data={chartData}
+            formatValue={formatAxis}
+            onBarPress={
+              activeView === "item"
+                ? (bar) => {
+                    const bucket = charted.find((candidate) => candidate.id === bar.id);
+                    if (bucket) openItemReceipts(bucket);
+                  }
+                : undefined
+            }
+          />
 
           {buckets.map((bucket) => {
             const pct = Math.round((Math.max(0, primaryOf(bucket)) / max) * 100);
             return (
-              <View key={bucket.id} style={styles.listCard}>
+              <Pressable
+                key={bucket.id}
+                style={({ pressed }) => [
+                  styles.listCard,
+                  activeView === "item" && pressed && styles.listCardPressed,
+                ]}
+                disabled={activeView !== "item"}
+                onPress={() => openItemReceipts(bucket)}
+                accessibilityRole={activeView === "item" ? "button" : undefined}
+                accessibilityLabel={
+                  activeView === "item"
+                    ? `${bucket.longLabel}, ${formatPrimary(bucket)}`
+                    : undefined
+                }
+                accessibilityHint={
+                  activeView === "item" ? "Shows receipts containing this item." : undefined
+                }
+              >
                 <View style={styles.listTop}>
                   <Text style={styles.listLabel}>{bucket.longLabel}</Text>
                   <Text style={styles.listValue}>{formatPrimary(bucket)}</Text>
@@ -448,7 +505,7 @@ export default function ReportDetailScreen() {
                   </View>
                   <Text style={styles.progressPct}>{pct}%</Text>
                 </View>
-              </View>
+              </Pressable>
             );
           })}
         </ScrollView>
@@ -465,6 +522,64 @@ export default function ReportDetailScreen() {
           <MaterialCommunityIcons name="sort" size={24} color={colors.white} />
         </Pressable>
       )}
+
+      <Modal
+        visible={selectedItem !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSelectedItem(null)}
+      >
+        <Pressable style={styles.backdrop} onPress={() => setSelectedItem(null)}>
+          <Pressable style={styles.receiptSheet} onPress={(event) => event.stopPropagation()}>
+            <View style={styles.sheetHeader}>
+              <Pressable onPress={() => setSelectedItem(null)} hitSlop={8}>
+                <Ionicons name="close" size={24} color={colors.white} />
+              </Pressable>
+              <View style={styles.receiptSheetTitleWrap}>
+                <Text style={styles.receiptSheetTitle} numberOfLines={1}>
+                  {selectedItem?.longLabel.toUpperCase()}
+                </Text>
+                <Text style={styles.receiptSheetSubtitle}>{subtitle}</Text>
+              </View>
+              <View style={styles.sheetHeaderSpacer} />
+            </View>
+            <View style={styles.receiptSheetSummary}>
+              <Text style={styles.receiptSheetCount}>
+                {selectedReceipts.length} receipt{selectedReceipts.length === 1 ? "" : "s"}
+              </Text>
+              <Text style={styles.receiptSheetHint}>Tap a receipt to open full details</Text>
+            </View>
+            <FlatList
+              data={selectedReceipts}
+              keyExtractor={(receipt) => receipt.id}
+              contentContainerStyle={[
+                styles.receiptList,
+                selectedReceipts.length === 0 && styles.receiptListEmpty,
+              ]}
+              ListEmptyComponent={
+                <View style={styles.receiptEmpty}>
+                  <MaterialCommunityIcons
+                    name="text-box-outline"
+                    size={42}
+                    color={colors.grey400}
+                  />
+                  <Text style={styles.receiptEmptyText}>
+                    No sale containing this item is inside this period. This item may only have
+                    return activity here.
+                  </Text>
+                </View>
+              }
+              renderItem={({ item }) => (
+                <ReceiptDisclosureRow
+                  receipt={item}
+                  behavior="navigate"
+                  onPress={() => openReceipt(item.id)}
+                />
+              )}
+            />
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal visible={sortOpen} transparent animationType="slide" onRequestClose={() => setSortOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setSortOpen(false)}>
@@ -666,6 +781,7 @@ const styles = StyleSheet.create({
     padding: 12,
     elevation: 1,
   },
+  listCardPressed: { opacity: 0.72 },
   listTop: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
   listLabel: { fontSize: 15, color: colors.grey800, fontWeight: "600" },
   listValue: { fontSize: 15, color: colors.grey900, fontWeight: "700" },
@@ -711,6 +827,32 @@ const styles = StyleSheet.create({
   },
 
   backdrop: { flex: 1, backgroundColor: "#00000066", justifyContent: "flex-end" },
+  receiptSheet: {
+    minHeight: 330,
+    maxHeight: "86%",
+    backgroundColor: colors.grey200,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    overflow: "hidden",
+  },
+  receiptSheetTitleWrap: { flex: 1, alignItems: "center", paddingHorizontal: 8 },
+  receiptSheetTitle: { color: colors.white, fontSize: 17, fontWeight: "800", letterSpacing: 0.4 },
+  receiptSheetSubtitle: { color: "#FFFFFFCC", fontSize: 11, fontWeight: "700", marginTop: 1 },
+  sheetHeaderSpacer: { width: 24 },
+  receiptSheetSummary: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 12,
+  },
+  receiptSheetCount: { fontSize: 13, fontWeight: "800", color: colors.grey800 },
+  receiptSheetHint: { flex: 1, fontSize: 11, color: colors.grey600, textAlign: "right" },
+  receiptList: { paddingBottom: 16 },
+  receiptListEmpty: { flexGrow: 1, justifyContent: "center" },
+  receiptEmpty: { alignItems: "center", padding: 28, gap: 10 },
+  receiptEmptyText: { fontSize: 13, color: colors.grey600, textAlign: "center", lineHeight: 19 },
   sheet: { backgroundColor: colors.grey200, borderTopLeftRadius: 4, borderTopRightRadius: 4, paddingBottom: 24 },
   sheetHeader: {
     flexDirection: "row",

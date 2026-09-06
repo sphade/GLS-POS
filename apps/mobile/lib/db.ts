@@ -4,7 +4,7 @@ import * as SQLite from "expo-sqlite";
  * On-device SQLite — the offline-first source of truth.
  *
  * Each entity is stored as a JSON document keyed by id, alongside sync columns:
- *  - updated_at : last local change (ms) — used for last-write-wins merging
+ *  - updated_at : monotonic per-row revision seeded from wall-clock ms
  *  - deleted    : tombstone (1) so deletes propagate during sync; reads skip it
  *  - dirty      : 1 = changed locally and not yet pushed to the server
  *
@@ -174,7 +174,10 @@ export function put<T extends { id: string }>(c: Collection, item: T, dirty = tr
   db.runSync(
     `INSERT INTO ${c} (id, data, updated_at, deleted, dirty) VALUES (?, ?, ?, 0, ?)
      ON CONFLICT(id) DO UPDATE SET
-       data = excluded.data, updated_at = excluded.updated_at, deleted = 0, dirty = excluded.dirty`,
+       data = excluded.data,
+       updated_at = MAX(excluded.updated_at, updated_at + 1),
+       deleted = 0,
+       dirty = excluded.dirty`,
     item.id,
     JSON.stringify(item),
     Date.now(),
@@ -186,7 +189,13 @@ export function put<T extends { id: string }>(c: Collection, item: T, dirty = tr
 /** Soft-delete (tombstone) so the deletion can sync. */
 export function softDelete(c: Collection, id: string) {
   const db = conn();
-  db.runSync(`UPDATE ${c} SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?`, Date.now(), id);
+  db.runSync(
+    `UPDATE ${c}
+     SET deleted = 1, dirty = 1, updated_at = MAX(?, updated_at + 1)
+     WHERE id = ?`,
+    Date.now(),
+    id,
+  );
   notifyLocalWrite();
 }
 
@@ -212,6 +221,7 @@ export function resetCollection(c: Collection) {
 // --- sync-facing helpers (used in Phase B2) --------------------------------
 
 export type ChangeRow<T> = { id: string; data: T; updatedAt: number; deleted: boolean };
+export type DirtyRevision = Pick<ChangeRow<unknown>, "id" | "updatedAt">;
 
 // Implementations take an explicit handle; the exports below bind them to the
 // active store. See `storeScope` at the bottom for why sync needs the former.
@@ -223,10 +233,19 @@ function loadDirtyOn<T>(db: SQLite.SQLiteDatabase, c: Collection): ChangeRow<T>[
   return rows.map((r) => ({ id: r.id, data: JSON.parse(r.data) as T, updatedAt: r.updated_at, deleted: !!r.deleted }));
 }
 
-function clearDirtyOn(db: SQLite.SQLiteDatabase, c: Collection, ids: string[]) {
-  if (ids.length === 0) return;
-  const placeholders = ids.map(() => "?").join(",");
-  db.runSync(`UPDATE ${c} SET dirty = 0 WHERE id IN (${placeholders})`, ...ids);
+/** Mark only the exact revisions accepted by the server as clean. */
+function clearDirtyOn(
+  db: SQLite.SQLiteDatabase,
+  c: Collection,
+  revisions: readonly DirtyRevision[],
+) {
+  for (const revision of revisions) {
+    db.runSync(
+      `UPDATE ${c} SET dirty = 0 WHERE id = ? AND updated_at = ? AND dirty = 1`,
+      revision.id,
+      revision.updatedAt,
+    );
+  }
 }
 
 function applyRemoteOn<T extends { id: string }>(
@@ -268,8 +287,8 @@ export function loadDirty<T>(c: Collection): ChangeRow<T>[] {
   return loadDirtyOn<T>(conn(), c);
 }
 
-export function clearDirty(c: Collection, ids: string[]) {
-  clearDirtyOn(conn(), c, ids);
+export function clearDirty(c: Collection, revisions: readonly DirtyRevision[]) {
+  clearDirtyOn(conn(), c, revisions);
 }
 
 /** Apply a change pulled from the server (last-write-wins by updatedAt). */
@@ -305,7 +324,7 @@ export type StoreScope = {
   metaGet: (key: string) => string | null;
   metaSet: (key: string, value: string) => void;
   loadDirty: <T>(c: Collection) => ChangeRow<T>[];
-  clearDirty: (c: Collection, ids: string[]) => void;
+  clearDirty: (c: Collection, revisions: readonly DirtyRevision[]) => void;
   applyRemote: <T extends { id: string }>(c: Collection, change: ChangeRow<T>) => void;
 };
 
@@ -334,7 +353,7 @@ export function storeScope(storeId: string): StoreScope {
     metaGet: (key) => metaGetOn(handle(), key),
     metaSet: (key, value) => metaSetOn(handle(), key, value),
     loadDirty: <T>(c: Collection) => loadDirtyOn<T>(handle(), c),
-    clearDirty: (c, ids) => clearDirtyOn(handle(), c, ids),
+    clearDirty: (c, revisions) => clearDirtyOn(handle(), c, revisions),
     applyRemote: (c, change) => applyRemoteOn(handle(), c, change),
   };
 }

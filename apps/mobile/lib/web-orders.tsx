@@ -33,7 +33,7 @@ type WebOrdersState = {
   setStatus: (id: string, status: WebOrderStatus) => void;
   /** Link a web order to the receipt raised for it. */
   attachReceipt: (id: string, receiptId: string) => void;
-  /** Pull server orders now, then reload local state. */
+  /** Pull server orders now; collection-scoped sync notification reloads rows. */
   reload: () => void;
   /** Oldest unacknowledged arrival is shown first; later orders queue behind it. */
   arrival: WebOrder | null;
@@ -83,12 +83,18 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
     setOrders(fresh);
   }, []);
 
-  /** The screen refresh button now performs a real server pull. */
+  /** The screen refresh button performs a real server pull. */
   const reload = useCallback(() => {
-    void pullNow(store.id).then(() => refresh());
-  }, [store.id, refresh]);
+    void pullNow(store.id);
+  }, [store.id]);
 
-  useEffect(() => onSynced(refresh), [refresh]);
+  useEffect(
+    () =>
+      onSynced(({ pulledCollections }) => {
+        if (pulledCollections.has("web_orders")) refresh();
+      }),
+    [refresh],
+  );
 
   /**
    * Repair older devices once by replaying server history, then pull inbound
@@ -107,8 +113,6 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       if (result >= 0 && needsBackfill) {
         metaSet(repairKey, "1");
         hydrateSilently();
-      } else {
-        refresh();
       }
     })();
 
@@ -123,7 +127,7 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [store.id, refresh, hydrateSilently]);
+  }, [store.id, hydrateSilently]);
 
   /**
    * A push notification arriving while the app is backgrounded doesn't run our
@@ -132,16 +136,17 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!SYNC_ENABLED) return;
 
-    const pullThenRefresh = () => {
-      void syncNow(store.id).then(() => refresh());
+    const pullLatest = () => {
+      // Collection-scoped onSynced handles the local refresh if rows arrive.
+      void syncNow(store.id);
     };
-    const received = Notifications.addNotificationReceivedListener(pullThenRefresh);
-    const tapped = Notifications.addNotificationResponseReceivedListener(pullThenRefresh);
+    const received = Notifications.addNotificationReceivedListener(pullLatest);
+    const tapped = Notifications.addNotificationResponseReceivedListener(pullLatest);
     return () => {
       received.remove();
       tapped.remove();
     };
-  }, [refresh, store.id]);
+  }, [store.id]);
 
   const value = useMemo<WebOrdersState>(() => {
     const byNewest = [...orders].sort((a, b) => b.createdAt - a.createdAt);
@@ -167,7 +172,7 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       arrival: arrivals[0] ?? null,
       dismissArrival: () => setArrivals((current) => current.slice(1)),
     };
-  }, [orders, arrivals, refresh, reload]);
+  }, [orders, arrivals, reload]);
 
   return <WebOrdersContext.Provider value={value}>{children}</WebOrdersContext.Provider>;
 }

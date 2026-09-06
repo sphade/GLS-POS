@@ -30,7 +30,7 @@ import { discountAmount, discountLabel } from "@/lib/discount-model";
 import { useAuth } from "@/lib/auth";
 import { useServerRefresh } from "@/lib/sync";
 import { useStore } from "@/lib/store";
-import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
+import { feedbackAddItem, feedbackTap } from "@/lib/feedback";
 
 type EditingBill = { id: string; label: string };
 
@@ -219,7 +219,7 @@ function ActiveCounter({
 }) {
   const { can } = useAuth();
   const canSell = can("sale:create");
-  /** Owner/manager only — a cashier can sell but never reprice. */
+  /** Only owners and managers may discount the bill. */
   const canDiscount = can("discount:apply");
 
   return (
@@ -238,8 +238,8 @@ function ActiveCounter({
         )}
       />
 
-      {/* Money is hidden from roles without selling rights (kitchen), matching
-          how the Reports/Today tabs are hidden without reports:view. */}
+      {/* Counter totals require selling access. Reports and receipt history use
+          their own, stricter permissions. */}
       {canSell && <CounterTotals canDiscount={canDiscount} />}
       {canSell && <CounterActions editing={editing} onEditingChange={onEditingChange} />}
     </>

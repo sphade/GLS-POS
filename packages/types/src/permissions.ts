@@ -4,7 +4,13 @@
  * the same matrix to hide what a user can't do, so both stay in step.
  */
 
-export type StoreRole = "owner" | "manager" | "cashier" | "waiter" | "kitchen";
+export type StoreRole =
+  | "owner"
+  | "manager"
+  | "supervisor"
+  | "cashier"
+  | "waiter"
+  | "kitchen";
 
 /** Every gated capability in the app. */
 export type Permission =
@@ -18,7 +24,16 @@ export type Permission =
   | "catalog:write"
   | "inventory:adjust"
   // Back office
+  /** Aggregated business figures: the Reports tab and its drill-down charts. */
   | "reports:view"
+  /**
+   * The day's individual sales — the Today/Receipts list.
+   *
+   * Separate from `reports:view` on purpose: a supervisor running the floor
+   * needs to look up what was sold and reprint a receipt without being shown
+   * the business's aggregate takings and profit.
+   */
+  | "receipts:view"
   | "expenses:manage"
   | "customers:manage"
   // Administration
@@ -43,6 +58,7 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "catalog:write",
     "inventory:adjust",
     "reports:view",
+    "receipts:view",
     "expenses:manage",
     "customers:manage",
     "staff:manage",
@@ -51,6 +67,8 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "audit:view",
     "kitchen:view",
   ],
+  // Runs the floor and catalog and can see aggregate reports, but cannot manage
+  // staff roles or business settings.
   manager: [
     "sale:create",
     "sale:refund",
@@ -60,6 +78,22 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "catalog:write",
     "inventory:adjust",
     "reports:view",
+    "receipts:view",
+    "expenses:manage",
+    "customers:manage",
+    "tables:manage",
+    "audit:view",
+    "kitchen:view",
+  ],
+  // Manager operational access without aggregate reports, refunds, or
+  // discounts. Catalog management and individual receipt lookup remain.
+  supervisor: [
+    "sale:create",
+    "price:override",
+    "catalog:read",
+    "catalog:write",
+    "inventory:adjust",
+    "receipts:view",
     "expenses:manage",
     "customers:manage",
     "tables:manage",
@@ -78,6 +112,7 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
 export const ROLE_LABELS: Record<StoreRole, string> = {
   owner: "Owner",
   manager: "Manager",
+  supervisor: "Supervisor",
   cashier: "Cashier",
   waiter: "Waiter",
   kitchen: "Kitchen",

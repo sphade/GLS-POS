@@ -12,7 +12,12 @@
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
 import { loadAll, metaGet, metaSet, put as dbPut, softDelete } from "./db";
-import { computeTotals, type Discount, type PricedLine } from "./discount-model";
+import {
+  computeTotals,
+  type Discount,
+  type PricedLine,
+  type Totals,
+} from "./discount-model";
 import { logAudit } from "./audit";
 import { onSynced } from "./sync";
 
@@ -226,7 +231,7 @@ type CartState = {
   qtyOf: (productId: string) => number;
   clear: () => void;
 
-  /** Discounts (owner/manager only — the UI gates on `discount:apply`). */
+  /** Discounts (owner/manager only — gated on `discount:apply`). */
   orderDiscount: Discount | null;
   setLineDiscount: (lineId: string, discount: Discount | null) => void;
   setOrderDiscount: (discount: Discount | null) => void;
@@ -331,16 +336,16 @@ function pricedLinesOf(entries: Record<string, CartEntry>): PricedLine[] {
   }));
 }
 
-/**
- * Price the cart. Discounts come off first and tax is charged on what's left,
- * so `subtotal` is the discounted pre-tax figure — which is what `total`,
- * receipts and the Charge button have always meant.
- */
-function calculateCartSummary(
+/** Price the cart once; the detailed result also feeds receipt line snapshots. */
+function cartTotalsOf(
   entries: Record<string, CartEntry>,
   orderDiscount: Discount | null,
-): CartSummary {
-  const totals = computeTotals(pricedLinesOf(entries), orderDiscount);
+): Totals {
+  return computeTotals(pricedLinesOf(entries), orderDiscount);
+}
+
+/** The compact immutable snapshot read by hot-path total subscribers. */
+function summaryOf(totals: Totals): CartSummary {
   return {
     count: totals.count,
     gross: totals.gross,
@@ -351,6 +356,15 @@ function calculateCartSummary(
     taxTotal: totals.taxTotal,
     total: totals.total,
   };
+}
+
+/** Product quantities cached for O(1) card reads instead of scanning the bill. */
+function productQuantitiesOf(entries: Record<string, CartEntry>): Map<string, number> {
+  const quantities = new Map<string, number>();
+  for (const entry of Object.values(entries)) {
+    quantities.set(entry.item.id, (quantities.get(entry.item.id) ?? 0) + entry.qty);
+  }
+  return quantities;
 }
 
 function sameLineIds(previous: readonly string[], next: readonly string[]): boolean {
@@ -415,7 +429,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const entriesRef = useRef(entries);
   const orderDiscountRef = useRef<Discount | null>(orderDiscount);
   const lineIdsRef = useRef<readonly string[]>(Object.keys(entries));
-  const summaryRef = useRef<CartSummary>(calculateCartSummary(entries, orderDiscount));
+  /**
+   * One authoritative pricing result per mutation. The old path priced here for
+   * fast subscribers, then priced the same bill again when CartContext rendered.
+   */
+  const totalsRef = useRef<Totals>(cartTotalsOf(entries, orderDiscount));
+  const summaryRef = useRef<CartSummary>(summaryOf(totalsRef.current));
+  /** O(1) quantity snapshots for product cards and section checkboxes. */
+  const productQtyRef = useRef(productQuantitiesOf(entries));
   const productListeners = useRef(new Map<string, Set<() => void>>());
   const lineListeners = useRef(new Map<string, Set<() => void>>());
   const countListeners = useRef(new Set<() => void>());
@@ -425,11 +446,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const catalogRef = useRef(new Map<string, Item>());
 
   const getQtyOf = useCallback(
-    (productId: string) =>
-      Object.values(entriesRef.current).reduce(
-        (sum, entry) => (entry.item.id === productId ? sum + entry.qty : sum),
-        0,
-      ),
+    (productId: string) => productQtyRef.current.get(productId) ?? 0,
     [],
   );
   const getCount = useCallback(() => summaryRef.current.count, []);
@@ -476,24 +493,21 @@ export function CartProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const notifyChangedEntries = useCallback(
-    (previous: Record<string, CartEntry>, next: Record<string, CartEntry>) => {
-      const previousQty = new Map<string, number>();
-      const nextQty = new Map<string, number>();
-
-      for (const entry of Object.values(previous)) {
-        previousQty.set(entry.item.id, (previousQty.get(entry.item.id) ?? 0) + entry.qty);
-      }
-      for (const entry of Object.values(next)) {
-        nextQty.set(entry.item.id, (nextQty.get(entry.item.id) ?? 0) + entry.qty);
-      }
-
+    (
+      previous: Record<string, CartEntry>,
+      next: Record<string, CartEntry>,
+      previousQty: ReadonlyMap<string, number>,
+      nextQty: ReadonlyMap<string, number>,
+      previousLineIds: readonly string[],
+      nextLineIds: readonly string[],
+    ) => {
       const productIds = new Set([...previousQty.keys(), ...nextQty.keys()]);
       for (const productId of productIds) {
         if ((previousQty.get(productId) ?? 0) === (nextQty.get(productId) ?? 0)) continue;
         productListeners.current.get(productId)?.forEach((listener) => listener());
       }
 
-      const lineIds = new Set([...Object.keys(previous), ...Object.keys(next)]);
+      const lineIds = new Set([...previousLineIds, ...nextLineIds]);
       for (const lineId of lineIds) {
         if (previous[lineId] === next[lineId]) continue;
         lineListeners.current.get(lineId)?.forEach((listener) => listener());
@@ -513,21 +527,39 @@ export function CartProvider({ children }: { children: ReactNode }) {
       const previousOrderDiscount = orderDiscountRef.current;
       if (next === previous && nextOrderDiscount === previousOrderDiscount) return;
 
+      const entriesChanged = next !== previous;
       const previousLineIds = lineIdsRef.current;
-      const nextLineIds = Object.keys(next);
-      const lineIdsChanged = !sameLineIds(previousLineIds, nextLineIds);
+      const nextLineIds = entriesChanged ? Object.keys(next) : previousLineIds;
+      const lineIdsChanged = entriesChanged && !sameLineIds(previousLineIds, nextLineIds);
       const previousSummary = summaryRef.current;
-      const nextSummary = calculateCartSummary(next, nextOrderDiscount);
+      // Price exactly once. CartContext reuses this detailed result below.
+      const nextTotals = cartTotalsOf(next, nextOrderDiscount);
+      const nextSummary = summaryOf(nextTotals);
       const summaryChanged = summaryDiffers(previousSummary, nextSummary);
+      const previousProductQty = productQtyRef.current;
+      const nextProductQty = entriesChanged
+        ? productQuantitiesOf(next)
+        : previousProductQty;
 
       entriesRef.current = next;
       orderDiscountRef.current = nextOrderDiscount;
+      totalsRef.current = nextTotals;
+      productQtyRef.current = nextProductQty;
       if (lineIdsChanged) lineIdsRef.current = nextLineIds;
       if (summaryChanged) summaryRef.current = nextSummary;
-      if (next !== previous) setEntries(next);
+      if (entriesChanged) setEntries(next);
       if (nextOrderDiscount !== previousOrderDiscount) setOrderDiscountState(nextOrderDiscount);
 
-      notifyChangedEntries(previous, next);
+      if (entriesChanged) {
+        notifyChangedEntries(
+          previous,
+          next,
+          previousProductQty,
+          nextProductQty,
+          previousLineIds,
+          nextLineIds,
+        );
+      }
       if (lineIdsChanged) lineIdsListeners.current.forEach((listener) => listener());
       if (previousSummary.count !== nextSummary.count) {
         countListeners.current.forEach((listener) => listener());
@@ -779,20 +811,26 @@ export function CartProvider({ children }: { children: ReactNode }) {
     heldOrdersRef.current = heldOrders;
   }, [heldOrders]);
 
-  // Open bills can be created on another till, so refresh after each sync.
+  // Open bills and receipts can arrive from another till. Reload only the
+  // collection the server actually changed; unrelated catalog/order syncs stay
+  // out of the cart provider and cannot wake every broad CartContext consumer.
   useEffect(() => {
-    return onSynced(() => {
-      setHeldOrders(loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt));
-      setReceipts(loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt));
+    return onSynced(({ pulledCollections }) => {
+      if (pulledCollections.has("held_orders")) {
+        setHeldOrders(loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt));
+      }
+      if (pulledCollections.has("receipts")) {
+        setReceipts(loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt));
+      }
     });
   }, []);
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
     const priceOf = unitPriceOf;
-    // Price the bill once: the aggregate feeds the totals, and the per-line
-    // breakdown lets a receipt record exactly what each line paid.
-    const totals = computeTotals(pricedLinesOf(entries), orderDiscount);
+    // `publish` already priced this exact entries/discount snapshot before it
+    // scheduled the render. Reuse it instead of doing the whole bill twice.
+    const totals = totalsRef.current;
     const { count, subtotal, taxTotal, total, discountTotal } = totals;
     const breakdown = new Map(totals.lines.map((line) => [line.id, line]));
     return {

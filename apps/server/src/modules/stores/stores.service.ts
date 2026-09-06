@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
 import { createDb, schema } from "../../db/index.js";
 import { newId } from "../../lib/id.js";
@@ -188,6 +188,108 @@ export async function setMemberRole(
     .limit(1);
   if (storeRow?.ownerId === target.id && role !== "owner") {
     throw HttpError.badRequest("The store owner's role cannot be changed", "cannot_demote_owner");
+  }
+
+  const existing = await memberRole(env, target.id, storeId);
+  if (existing) {
+    await db
+      .update(schema.member)
+      .set({ role })
+      .where(and(eq(schema.member.userId, target.id), eq(schema.member.storeId, storeId)));
+  } else {
+    await db.insert(schema.member).values({
+      id: newId("mbr"),
+      userId: target.id,
+      storeId,
+      role,
+      createdAt: new Date(),
+    });
+  }
+
+  return { userId: target.id, role };
+}
+
+/**
+ * People the caller could add to this store: everyone who already works in one
+ * of the *other* shops the caller owns, minus whoever is already here.
+ *
+ * Deliberately not a global user search. Matching against every account on the
+ * platform would let any owner discover and attach users belonging to unrelated
+ * businesses; "already in a shop I own" is both the useful set and the safe one.
+ */
+export async function listAttachableStaff(
+  env: Env,
+  callerUserId: string,
+  storeId: string,
+): Promise<{ userId: string; name: string; username: string | null; shops: number }[]> {
+  const db = createDb(env.DB);
+
+  const owned = await db
+    .select({ storeId: schema.member.storeId })
+    .from(schema.member)
+    .where(and(eq(schema.member.userId, callerUserId), eq(schema.member.role, "owner")));
+
+  const ownedIds = owned.map((o) => o.storeId).filter((id) => id !== storeId);
+  if (ownedIds.length === 0) return [];
+
+  const rows = await db
+    .select({
+      userId: schema.member.userId,
+      name: schema.user.name,
+      username: schema.user.displayUsername,
+      storeId: schema.member.storeId,
+    })
+    .from(schema.member)
+    .innerJoin(schema.user, eq(schema.member.userId, schema.user.id))
+    .where(inArray(schema.member.storeId, ownedIds));
+
+  const alreadyHere = new Set(
+    (
+      await db
+        .select({ userId: schema.member.userId })
+        .from(schema.member)
+        .where(eq(schema.member.storeId, storeId))
+    ).map((m) => m.userId),
+  );
+
+  // One row per person, with a count of how many of your shops they're in — the
+  // same user appears once per shop in the join above.
+  const byUser = new Map<string, { userId: string; name: string; username: string | null; shops: number }>();
+  for (const r of rows) {
+    if (alreadyHere.has(r.userId)) continue;
+    const seen = byUser.get(r.userId);
+    if (seen) seen.shops += 1;
+    else byUser.set(r.userId, { userId: r.userId, name: r.name, username: r.username, shops: 1 });
+  }
+
+  return [...byUser.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Attach an existing account to this store with a role, matched by username.
+ *
+ * Roles are per store, so the same person can be a manager in one shop and a
+ * cashier in another. Re-attaching someone already here just updates their role.
+ */
+export async function attachMemberByUsername(
+  env: Env,
+  storeId: string,
+  username: string,
+  role: StoreRole,
+): Promise<{ userId: string; role: StoreRole }> {
+  const db = createDb(env.DB);
+  const handle = username.trim().toLowerCase();
+
+  const [target] = await db
+    .select({ id: schema.user.id })
+    .from(schema.user)
+    .where(eq(schema.user.username, handle))
+    .limit(1);
+  if (!target) {
+    throw HttpError.notFound(
+      `No account with the username "${handle}".`,
+      "user_not_found",
+    );
   }
 
   const existing = await memberRole(env, target.id, storeId);

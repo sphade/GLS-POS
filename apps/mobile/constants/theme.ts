@@ -49,6 +49,17 @@ export const layout = {
   gridCols: 3,
 };
 
+/**
+ * How long a press must be held before it counts as "remove one unit".
+ *
+ * The wait is inherent — the gesture is defined by its duration — so it should
+ * be only as long as it needs to be. The old 250ms read as "the app didn't hear
+ * me" on slow hardware, while a deliberate tap lifts well inside 100ms; 180ms
+ * still can't be triggered by accident but answers noticeably sooner. Shared, so
+ * the item grid and the order screen agree on the feel.
+ */
+export const LONG_PRESS_MS = 180;
+
 /** Exact labels from strings.xml. */
 export const strings = {
   reports: "Reports",

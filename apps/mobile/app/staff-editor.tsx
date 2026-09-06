@@ -8,12 +8,36 @@ import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
-const ROLES = ["Owner", "Manager", "Cashier", "Waiter", "Kitchen"];
+const ROLES = ["Owner", "Manager", "Supervisor", "Cashier", "Waiter", "Kitchen"];
 
 /** Permissions shown per role — mirrors the staff permission matrix. */
 const PERMISSIONS: Record<string, string[]> = {
   Owner: ["Everything"],
-  Manager: ["Sell", "Refunds", "Discounts", "Reports", "Inventory", "Staff"],
+  Manager: [
+    "Sell",
+    "Refunds",
+    "Discounts",
+    "Reports",
+    "Receipts",
+    "Menu",
+    "Inventory",
+    "Expenses",
+    "Customers",
+    "Tables",
+    "Activity",
+    "Kitchen",
+  ],
+  Supervisor: [
+    "Sell",
+    "Receipts",
+    "Menu",
+    "Inventory",
+    "Expenses",
+    "Customers",
+    "Tables",
+    "Activity",
+    "Kitchen",
+  ],
   // No discounts and no refunds: both reprice or reverse money, and both are
   // enforced server-side, so promising them here would be a lie.
   Cashier: ["Sell", "Customers", "Tables"],

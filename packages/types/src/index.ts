@@ -142,7 +142,7 @@ export interface Order {
 // People
 // ---------------------------------------------------------------------------
 
-export type StaffRole = "owner" | "manager" | "cashier";
+export type StaffRole = "owner" | "manager" | "supervisor" | "cashier";
 
 export interface Staff {
   id: ID;

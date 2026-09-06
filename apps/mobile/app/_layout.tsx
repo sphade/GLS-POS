@@ -182,10 +182,17 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** Every route in the app. Declared once so navigation always has a host. */
+/**
+ * Every route in the app. Declared once so navigation always has a host.
+ *
+ * `freezeOnBlur` suspends screens that aren't on top, so the tab underneath an
+ * open modal stops re-rendering (and re-running its subscriptions) while it
+ * can't be seen. With ~30 modal routes sitting over a live item grid that's a
+ * lot of wasted work on slow hardware, and nothing visual changes.
+ */
 function RootStack() {
   return (
-    <Stack screenOptions={{ headerShown: false }}>
+    <Stack screenOptions={{ headerShown: false, freezeOnBlur: true }}>
       <Stack.Screen name="(tabs)" />
 
       {/* Auth */}

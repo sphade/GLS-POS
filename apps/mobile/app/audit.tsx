@@ -32,9 +32,9 @@ function timeLabel(at: number): string {
 }
 
 /**
- * Activity log: who did what, when. Owner/manager only (also hidden from the
- * drawer for other roles). Reads the synced, append-only `audit_log`, newest
- * first, revealing 100 rows at a time.
+ * Activity log: owner/manager/supervisor only (also hidden from the drawer for
+ * other roles). Reads the synced, append-only `audit_log`, newest first,
+ * revealing 100 rows at a time.
  */
 export default function AuditScreen() {
   const router = useRouter();
@@ -48,8 +48,16 @@ export default function AuditScreen() {
     if (allowed) setEntries(loadAuditLog());
   }, [allowed]);
 
-  // Refresh when a sync lands new entries from other tills.
-  useEffect(() => (allowed ? onSynced(refresh) : undefined), [allowed, refresh]);
+  // Refresh only when this device actually receives audit rows.
+  useEffect(
+    () =>
+      allowed
+        ? onSynced(({ pulledCollections }) => {
+            if (pulledCollections.has("audit_log")) refresh();
+          })
+        : undefined,
+    [allowed, refresh],
+  );
 
   const visible = useMemo(() => entries.slice(0, limit), [entries, limit]);
   const hasMore = entries.length > limit;
@@ -59,7 +67,7 @@ export default function AuditScreen() {
       <SafeAreaView edges={["top"]} style={styles.root}>
         <Header onBack={() => router.back()} />
         <View style={styles.emptyWrap}>
-          <EmptyState text="Only owners and managers can view activity" size={120} />
+          <EmptyState text="Only owners, managers, and supervisors can view activity" size={120} />
         </View>
       </SafeAreaView>
     );

@@ -7,7 +7,7 @@ import { ALL_ROLES, ROLE_LABELS, ROLE_PERMISSIONS, type StoreRole } from "@gls-p
 import { colors } from "@/constants/theme";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
-import { api, type StoreMember } from "@/lib/api";
+import { api, type AttachableStaff, type StoreMember } from "@/lib/api";
 import { feedbackError, feedbackTap } from "@/lib/feedback";
 import { CredentialsSheet, type Credentials } from "@/components/CredentialsSheet";
 
@@ -28,6 +28,9 @@ export default function StaffScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
+  /** People already working in the owner's other shops. */
+  const [attachable, setAttachable] = useState<AttachableStaff[]>([]);
+  const [addExistingOpen, setAddExistingOpen] = useState(false);
   const [resetting, setResetting] = useState<StoreMember | null>(null);
   /** Credentials to hand over, shown once after create or reset. */
   const [handover, setHandover] = useState<Credentials | null>(null);
@@ -39,6 +42,12 @@ export default function StaffScreen() {
     const res = await api.listMembers(store.id);
     if (res.ok) setMembers(res.data);
     else setError(res.error.message);
+
+    // Best-effort: the roster is what matters, so a failure here just hides the
+    // reuse banner rather than erroring the screen.
+    const reusable = await api.listAttachableStaff(store.id);
+    setAttachable(reusable.ok ? reusable.data : []);
+
     setLoading(false);
   }, [store.id]);
 
@@ -121,6 +130,29 @@ export default function StaffScreen() {
           </View>
         )}
 
+        {/* Only shown when there's actually someone to reuse, so a single-shop
+            owner never sees an option that would lead nowhere. */}
+        {!loading && isOwner && attachable.length > 0 && (
+          <Pressable
+            style={styles.reuseBanner}
+            onPress={() => {
+              feedbackTap();
+              setAddExistingOpen(true);
+            }}
+            android_ripple={{ color: "#00000010" }}
+          >
+            <Ionicons name="people-outline" size={22} color={colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.reuseTitle}>Add someone from your other shops</Text>
+              <Text style={styles.reuseSub}>
+                {attachable.length} {attachable.length === 1 ? "person already has" : "people already have"} an
+                account — they keep the same login
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={colors.primary} />
+          </Pressable>
+        )}
+
         {!loading &&
           members.map((m) => {
             const isMe = m.userId === user?.id;
@@ -198,6 +230,18 @@ export default function StaffScreen() {
         }}
       />
 
+      <AddExistingSheet
+        visible={addExistingOpen}
+        people={attachable}
+        storeId={store.id}
+        storeName={store.name}
+        onClose={() => setAddExistingOpen(false)}
+        onAdded={() => {
+          setAddExistingOpen(false);
+          void load();
+        }}
+      />
+
       <ResetPasswordSheet
         member={resetting}
         storeId={store.id}
@@ -237,6 +281,8 @@ function roleColor(role: StoreRole): string {
       return colors.primary;
     case "manager":
       return "#6A1B9A";
+    case "supervisor":
+      return "#00838F";
     case "cashier":
       return "#0277BD";
     case "waiter":
@@ -516,7 +562,9 @@ function ResetPasswordSheet({
 function describeRole(role: StoreRole): string {
   switch (role) {
     case "manager":
-      return "Everything except changing roles";
+      return "Run operations, manage the catalog, and view reports";
+    case "supervisor":
+      return "Manage operations and catalog. No reports, refunds, or discounts";
     case "cashier":
       return "Sell and take payment. No reports or menu edits";
     case "waiter":
@@ -526,6 +574,107 @@ function describeRole(role: StoreRole): string {
     default:
       return "Full access";
   }
+}
+
+/**
+ * Pick someone who already works in another of the owner's shops and give them
+ * a role here.
+ *
+ * No password field and no new account: the same login now opens both shops via
+ * the shop switcher. Roles are per shop, so the role is asked for every time
+ * rather than carried over from wherever else they work.
+ */
+function AddExistingSheet({
+  visible,
+  people,
+  storeId,
+  storeName,
+  onClose,
+  onAdded,
+}: {
+  visible: boolean;
+  people: AttachableStaff[];
+  storeId: string;
+  storeName: string;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const pick = (person: AttachableStaff) => {
+    const handle = person.username;
+    if (!handle) {
+      feedbackError();
+      Alert.alert(
+        "Cannot add this way",
+        `${person.name} has no username, so they can't be matched. Create an account for them instead.`,
+      );
+      return;
+    }
+    feedbackTap();
+    Alert.alert(`Add ${person.name}`, `Their role at ${storeName}`, [
+      ...ALL_ROLES.map((r) => ({
+        text: ROLE_LABELS[r],
+        onPress: async () => {
+          setBusy(person.userId);
+          const res = await api.attachStaff(storeId, handle, r);
+          setBusy(null);
+          if (!res.ok) {
+            feedbackError();
+            Alert.alert("Could not add", res.error.message);
+            return;
+          }
+          onAdded();
+        },
+      })),
+      { text: "Cancel", style: "cancel" as const },
+    ]);
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.backdrop} onPress={onClose}>
+        <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>ADD FROM YOUR OTHER SHOPS</Text>
+            <Pressable onPress={onClose} hitSlop={8}>
+              <Ionicons name="close" size={24} color={colors.white} />
+            </Pressable>
+          </View>
+
+          <ScrollView style={{ maxHeight: 420 }}>
+            {people.map((p) => (
+              <Pressable
+                key={p.userId}
+                style={styles.personRow}
+                onPress={() => pick(p)}
+                disabled={busy !== null}
+                android_ripple={{ color: "#00000010" }}
+              >
+                <View style={[styles.avatar, { backgroundColor: colors.primary }]}>
+                  <Text style={styles.avatarText}>{p.name.charAt(0).toUpperCase()}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.personName} numberOfLines={1}>
+                    {p.name}
+                  </Text>
+                  <Text style={styles.personMeta} numberOfLines={1}>
+                    {p.username ? `@${p.username}` : "no username"} ·{" "}
+                    {p.shops === 1 ? "1 other shop" : `${p.shops} other shops`}
+                  </Text>
+                </View>
+                {busy === p.userId ? (
+                  <ActivityIndicator color={colors.primary} />
+                ) : (
+                  <Ionicons name="add-circle-outline" size={24} color={colors.primary} />
+                )}
+              </Pressable>
+            ))}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -597,6 +746,33 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   fabText: { color: colors.white, fontSize: 15, fontWeight: "800", letterSpacing: 0.5 },
+
+  reuseBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: colors.card,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.primary,
+    marginHorizontal: 10,
+    marginTop: 10,
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    elevation: 1,
+  },
+  reuseTitle: { fontSize: 15, fontWeight: "700", color: colors.grey900 },
+  reuseSub: { fontSize: 12, color: colors.grey600, marginTop: 3 },
+
+  personRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+  },
+  personName: { fontSize: 16, fontWeight: "600", color: colors.grey900 },
+  personMeta: { fontSize: 12, color: colors.grey600, marginTop: 2 },
 
   backdrop: { flex: 1, backgroundColor: "#00000066", justifyContent: "flex-end" },
   sheet: { backgroundColor: colors.white, borderTopLeftRadius: 6, borderTopRightRadius: 6, paddingBottom: 20 },

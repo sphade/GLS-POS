@@ -68,9 +68,15 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
     newestFirst(loadAll<SaleReturn>("returns")),
   );
 
-  // A return can be raised on another till, so refresh after each sync.
+  // A return can be raised on another till. Ignore every sync event that did
+  // not actually apply a return row on this device.
   useEffect(
-    () => onSynced(() => setReturns(newestFirst(loadAll<SaleReturn>("returns")))),
+    () =>
+      onSynced(({ pulledCollections }) => {
+        if (pulledCollections.has("returns")) {
+          setReturns(newestFirst(loadAll<SaleReturn>("returns")));
+        }
+      }),
     [],
   );
 

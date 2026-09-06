@@ -34,7 +34,21 @@ export type UpdateStoreInput = z.infer<typeof updateStoreSchema>;
 /** Grant or change a member's role by email. */
 export const setRoleSchema = z.object({
   email: z.string().email(),
-  role: z.enum(["owner", "manager", "cashier", "waiter", "kitchen"]),
+  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen"]),
 });
 
 export type SetRoleInput = z.infer<typeof setRoleSchema>;
+
+/**
+ * Attach someone who already has an account to this store, by username.
+ *
+ * Username rather than email because staff sign in with a handle and their
+ * email is a synthesised internal value (`<username>@staff.gls.local`) that no
+ * owner should have to know.
+ */
+export const attachMemberSchema = z.object({
+  username: z.string().min(3).max(32),
+  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen"]),
+});
+
+export type AttachMemberInput = z.infer<typeof attachMemberSchema>;

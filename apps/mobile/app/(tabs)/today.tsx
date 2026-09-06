@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AppState,
   FlatList,
   Pressable,
   RefreshControl,
@@ -15,7 +14,8 @@ import { useRouter, type Href } from "expo-router";
 import type { WebOrder } from "@gls-pos/types";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { EmptyState } from "@/components/EmptyState";
-import { useCart, type Receipt } from "@/lib/cart";
+import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
+import { useCart } from "@/lib/cart";
 import {
   isVoidReturn,
   refundedTotalOf,
@@ -25,26 +25,23 @@ import {
 } from "@/lib/returns";
 import { useWebOrders } from "@/lib/web-orders";
 import { useStore } from "@/lib/store";
+import { useAuth } from "@/lib/auth";
 import { loadDirtyIds } from "@/lib/db";
 import { onSynced, syncNowDetailed, useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
-
-const modeIcon = (mode: string) => {
-  if (mode.includes("Card")) return "credit-card-outline" as const;
-  if (mode.includes("UPI")) return "cellphone" as const;
-  if (mode === "Credit") return "account-clock-outline" as const;
-  return "cash" as const;
-};
 
 export default function TodayScreen() {
   const router = useRouter();
   const { receipts } = useCart();
   const { returns: allReturns } = useReturns();
   const { orders } = useWebOrders();
+  const { can } = useAuth();
   const { store } = useStore();
   const [tab, setTab] = useState<"pos" | "online">("pos");
   const [syncing, setSyncing] = useState(false);
   const [query, setQuery] = useState("");
+  /** Only one receipt is open at a time, keeping a long day easy to scan. */
+  const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
 
   /**
    * Receipt upload state comes from SQLite's dirty column — the same source the
@@ -106,21 +103,30 @@ export default function TodayScreen() {
       [o.code, o.tableName, o.guestName ?? ""].some((f) => f.toLowerCase().includes(q)),
     );
   }, [orders, q]);
-  const refreshPending = () => {
+  const refreshPending = useCallback(() => {
     const ids = loadDirtyIds("receipts");
     setPendingIds(ids);
     if (ids.length === 0) setSyncError(null);
-  };
-
-  useEffect(() => onSynced(refreshPending), []);
-  useEffect(() => {
-    // Foreground-only, like every other poll in the app.
-    const t = setInterval(() => {
-      if (AppState.currentState !== "active") return;
-      refreshPending();
-    }, 4000);
-    return () => clearInterval(t);
   }, []);
+
+  // A local sale updates `receipts` immediately even while offline. Mirror its
+  // dirty edge at the same time so Today never labels an unsent sale as synced.
+  useEffect(() => {
+    refreshPending();
+  }, [receipts, refreshPending]);
+
+  useEffect(
+    () =>
+      onSynced(({ pulledCollections, uploadedCollections }) => {
+        if (
+          pulledCollections.has("receipts") ||
+          uploadedCollections.has("receipts")
+        ) {
+          refreshPending();
+        }
+      }),
+    [refreshPending],
+  );
 
   const pushNow = async () => {
     if (syncing) return;
@@ -148,6 +154,25 @@ export default function TodayScreen() {
       setSyncing(false);
     }
   };
+
+  /**
+   * Hiding the tab isn't enough — the route still exists and is reachable by a
+   * deep link or a stray push. The server enforces the same matrix; this is the
+   * UI half.
+   */
+  if (!can("receipts:view")) {
+    return (
+      <SafeAreaView edges={["top"]} style={styles.root}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Receipts</Text>
+        </View>
+        <View style={styles.denied}>
+          <Ionicons name="lock-closed-outline" size={46} color={colors.grey400} />
+          <Text style={styles.deniedText}>You don&apos;t have permission to view receipts.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -241,11 +266,20 @@ export default function TodayScreen() {
             </View>
           }
           renderItem={({ item }) => (
-            <ReceiptRow
+            <ReceiptDisclosureRow
               receipt={item}
               awaitingUpload={pendingSet.has(item.id)}
               returned={returnInfo.get(item.id)}
-              onPress={() => router.push({ pathname: "/receipt/[id]", params: { id: item.id } })}
+              behavior="expand"
+              expanded={expandedReceiptId === item.id}
+              onPress={() => {
+                feedbackTap();
+                setExpandedReceiptId((current) => (current === item.id ? null : item.id));
+              }}
+              onLongPress={() => {
+                feedbackTap();
+                router.push({ pathname: "/receipt/[id]", params: { id: item.id } });
+              }}
             />
           )}
         />
@@ -274,59 +308,6 @@ export default function TodayScreen() {
         />
       )}
     </SafeAreaView>
-  );
-}
-
-function ReceiptRow({
-  receipt,
-  awaitingUpload,
-  returned,
-  onPress,
-}: {
-  receipt: Receipt;
-  awaitingUpload: boolean;
-  returned?: { refunded: number; state: ReturnState };
-  onPress: () => void;
-}) {
-  const time = new Date(receipt.createdAt);
-  return (
-    <Pressable style={styles.rcptCard} onPress={onPress} android_ripple={{ color: "#00000010" }}>
-      <MaterialCommunityIcons name={modeIcon(receipt.mode)} size={28} color={colors.grey700} style={{ margin: 10 }} />
-      <View style={{ flex: 1, paddingVertical: 6 }}>
-        <View style={styles.rcptTopRow}>
-          <Text style={styles.rcptNumber}>{receipt.number}</Text>
-          {awaitingUpload && <Ionicons name="sync" size={15} color={colors.red500} style={{ marginLeft: 4 }} />}
-          {returned && (
-            <View style={styles.returnChip}>
-              <Text style={styles.returnChipText}>
-                {returned.state === "full" ? "RETURNED" : "PART. RETURNED"}
-              </Text>
-            </View>
-          )}
-        </View>
-        <Text style={styles.rcptName}>
-          {receipt.customerName ?? strings.guest} {strings.by} {receipt.mode}
-        </Text>
-        <Text style={styles.rcptMeta}>
-          {receipt.itemCount} Items · {time.toLocaleDateString()} - {time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-        </Text>
-      </View>
-      <View style={{ alignItems: "flex-end" }}>
-        <Text
-          style={[
-            styles.rcptTotal,
-            returned?.state === "full" && styles.rcptTotalVoided,
-          ]}
-        >
-          {formatMoney(receipt.total, receipt.currency)}
-        </Text>
-        {returned && returned.refunded > 0 && (
-          <Text style={styles.rcptRefunded}>
-            -{formatMoney(returned.refunded, receipt.currency)}
-          </Text>
-        )}
-      </View>
-    </Pressable>
   );
 }
 
@@ -370,6 +351,8 @@ function WebOrderRow({ order, onPress }: { order: WebOrder; onPress: () => void 
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
+  denied: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 32 },
+  deniedText: { fontSize: 15, color: colors.grey600, textAlign: "center" },
   statusPill: { marginLeft: 8, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 2 },
   statusPillText: { color: colors.white, fontSize: 9, fontWeight: "800", letterSpacing: 0.4 },
   header: { backgroundColor: colors.primary, paddingHorizontal: 16, paddingVertical: 14 },

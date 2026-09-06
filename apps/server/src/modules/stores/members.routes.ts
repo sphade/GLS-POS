@@ -5,9 +5,15 @@ import { ok } from "../../lib/response.js";
 import { validate } from "../../lib/validator.js";
 import { HttpError } from "../../lib/http-error.js";
 import { requirePermission } from "../../middleware/store.js";
-import { listMembers, removeMember, setMemberRole } from "./stores.service.js";
+import {
+  attachMemberByUsername,
+  listAttachableStaff,
+  listMembers,
+  removeMember,
+  setMemberRole,
+} from "./stores.service.js";
 import { createStaffAccount, setStaffPassword, usernameFromName } from "./staff.service.js";
-import { setRoleSchema } from "./stores.schema.js";
+import { attachMemberSchema, setRoleSchema } from "./stores.schema.js";
 
 /**
  * Staff/access management for the current store (resolved by `withStore`).
@@ -25,7 +31,7 @@ const createStaffSchema = z.object({
     .regex(/^[a-zA-Z0-9._-]+$/, "letters, numbers, dot, underscore or dash only")
     .optional(),
   password: z.string().min(6, "use at least 6 characters"),
-  role: z.enum(["owner", "manager", "cashier", "waiter", "kitchen"]),
+  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen"]),
 });
 
 const resetPasswordSchema = z.object({ password: z.string().min(6) });
@@ -79,8 +85,41 @@ export const members = new Hono<AppEnv>()
       return ok(c, { updated: true });
     },
   )
+  /**
+   * People already working in the caller's other shops, for the "add existing
+   * staff" picker. Scoped to shops the caller owns — never a global user search.
+   */
+  .get("/attachable", requirePermission("staff:manage"), async (c) => {
+    // withStore can't have resolved a role without a session, but the context
+    // type keeps `user` nullable, so narrow it here rather than asserting.
+    const user = c.get("user");
+    if (!user) throw HttpError.unauthorized();
+    return ok(c, await listAttachableStaff(c.env, user.id, c.get("storeId")));
+  })
+
+  /**
+   * Attach an existing account to this store by username, so one person can work
+   * in several shops on a single login instead of needing an account per shop.
+   */
+  .post(
+    "/attach",
+    requirePermission("staff:manage"),
+    validate("json", attachMemberSchema),
+    async (c) => {
+      const { username, role } = c.req.valid("json");
+      if (role === "owner" && c.get("role") !== "owner") {
+        throw HttpError.forbidden("Only the owner can grant owner access", "owner_only");
+      }
+      return ok(c, await attachMemberByUsername(c.env, c.get("storeId"), username, role));
+    },
+  )
+
   .post("/", requirePermission("staff:manage"), validate("json", setRoleSchema), async (c) => {
     const { email, role } = c.req.valid("json");
+    // Mirrors the guard on /staff and /attach: minting an owner is owner-only.
+    if (role === "owner" && c.get("role") !== "owner") {
+      throw HttpError.forbidden("Only the owner can grant owner access", "owner_only");
+    }
     return ok(c, await setMemberRole(c.env, c.get("storeId"), email, role));
   })
   .delete("/:userId", requirePermission("staff:manage"), async (c) => {

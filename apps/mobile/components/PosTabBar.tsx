@@ -1,4 +1,4 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { InteractionManager, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
@@ -38,7 +38,9 @@ const TABS: Record<string, TabMeta> = {
   },
   today: {
     label: "Today",
-    needs: "reports:view",
+    // Individual receipts are also available to supervisors, while aggregate
+    // Reports stays limited to owners and managers.
+    needs: "receipts:view",
     render: (c) => <MaterialCommunityIcons name="cash-multiple" size={24} color={c} />,
   },
   counter: {
@@ -55,9 +57,25 @@ const TABS: Record<string, TabMeta> = {
   },
 };
 
+/**
+ * The cart count, isolated in its own component.
+ *
+ * The bar is mounted on every screen, so subscribing to the count up in
+ * `PosTabBar` meant all five tabs re-rendered on every item added — work on the
+ * exact path that has to feel instant. Only this badge cares about the number.
+ */
+function CounterBadge() {
+  const count = useCartCount();
+  if (count === 0) return null;
+  return (
+    <View style={styles.badge}>
+      <Text style={styles.badgeText}>{String(count)}</Text>
+    </View>
+  );
+}
+
 export function PosTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
-  const count = useCartCount();
   const { store } = useStore();
   const { can } = useAuth();
 
@@ -70,7 +88,6 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
 
         const focused = state.index === index;
         const tint = focused ? colors.white : colors.primary;
-        const badge = route.name === "counter" && count > 0 ? count : undefined;
 
         return (
           <Pressable
@@ -81,9 +98,6 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
             android_ripple={{ color: focused ? "#FFFFFF22" : "#5AA02C22", borderless: false }}
             onPress={() => {
               feedbackTap();
-              // Every tab switch quietly checks the server for deltas from
-              // other devices — local data renders instantly either way.
-              quietPull(store.id);
               const event = navigation.emit({
                 type: "tabPress",
                 target: route.key,
@@ -92,6 +106,12 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
               if (!focused && !event.defaultPrevented) {
                 navigation.navigate(route.name as never);
               }
+              // Every tab switch quietly checks the server for deltas from other
+              // devices — local data renders instantly either way. Deferred
+              // until after the switch has actually happened: starting a sync
+              // job flips the status bar's state, and doing that *before*
+              // navigating put a re-render in front of the transition.
+              InteractionManager.runAfterInteractions(() => quietPull(store.id));
             }}
             style={[
               styles.tab,
@@ -100,11 +120,7 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
           >
             <View style={styles.iconWrap}>
               {meta.render(tint)}
-              {badge != null && (
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{String(badge)}</Text>
-                </View>
-              )}
+              {route.name === "counter" && <CounterBadge />}
             </View>
             <Text style={[styles.label, { color: tint }]} numberOfLines={1}>
               {meta.label}

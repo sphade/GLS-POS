@@ -80,7 +80,11 @@ export type SyncAttemptResult =
 const MAX_PUSH_BYTES = 512 * 1024;
 const MAX_PUSH_ROWS = 200;
 
-type PushBatch = { changes: SyncChange[]; idsByCollection: Record<string, string[]> };
+type DirtyRevision = Pick<SyncChange, "id" | "updatedAt">;
+type PushBatch = {
+  changes: SyncChange[];
+  revisionsByCollection: Record<string, DirtyRevision[]>;
+};
 
 /**
  * Split changes into batches that respect the upload budget. A single row over
@@ -88,13 +92,13 @@ type PushBatch = { changes: SyncChange[]; idsByCollection: Record<string, string
  */
 function batchChanges(changes: SyncChange[]): PushBatch[] {
   const batches: PushBatch[] = [];
-  let current: PushBatch = { changes: [], idsByCollection: {} };
+  let current: PushBatch = { changes: [], revisionsByCollection: {} };
   let bytes = 0;
 
   const flush = () => {
     if (current.changes.length === 0) return;
     batches.push(current);
-    current = { changes: [], idsByCollection: {} };
+    current = { changes: [], revisionsByCollection: {} };
     bytes = 0;
   };
 
@@ -104,7 +108,10 @@ function batchChanges(changes: SyncChange[]): PushBatch[] {
       flush();
     }
     current.changes.push(change);
-    (current.idsByCollection[change.collection] ??= []).push(change.id);
+    (current.revisionsByCollection[change.collection] ??= []).push({
+      id: change.id,
+      updatedAt: change.updatedAt,
+    });
     bytes += size;
   }
   flush();
@@ -145,22 +152,32 @@ function collectDirty(
 }
 
 /**
- * Listeners notified after a sync applies remote changes, so features can react
- * the instant data lands instead of polling their own timers.
+ * What one successful sync cycle changed locally.
+ *
+ * `pulledCollections` contain server rows applied to this device and therefore
+ * may require data providers to reload. `uploadedCollections` only had their
+ * dirty flags cleared after a successful push; local React state already holds
+ * their data, but upload-status UI (for example Today) needs to refresh.
  */
-type SyncListener = (appliedCount: number) => void;
+export type SyncEvent = {
+  appliedCount: number;
+  pulledCollections: ReadonlySet<SyncCollection>;
+  uploadedCollections: ReadonlySet<SyncCollection>;
+};
+
+type SyncListener = (event: SyncEvent) => void;
 const listeners = new Set<SyncListener>();
 
-/** Subscribe to sync completions. Returns an unsubscribe function. */
+/** Subscribe to meaningful sync completions. Returns an unsubscribe function. */
 export function onSynced(fn: SyncListener): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
 
-function emitSynced(count: number) {
+function emitSynced(event: SyncEvent) {
   listeners.forEach((fn) => {
     try {
-      fn(count);
+      fn(event);
     } catch {
       // A bad listener must never break syncing.
     }
@@ -201,9 +218,15 @@ export function getSyncActivity(): SyncActivity {
  * yields between batches so touches and frames stay responsive throughout.
  */
 const APPLY_CHUNK = 40;
+const EMPTY_SYNC_COLLECTIONS: ReadonlySet<SyncCollection> = new Set<SyncCollection>();
 
-/** Apply a server pull in chunks, then notify every local data provider. */
-async function applyPulled(storeId: string, data: SyncPullResponse, notify = true): Promise<number> {
+/** Apply a server pull in chunks, then notify only the affected providers. */
+async function applyPulled(
+  storeId: string,
+  data: SyncPullResponse,
+  notify = true,
+  uploadedCollections: ReadonlySet<SyncCollection> = EMPTY_SYNC_COLLECTIONS,
+): Promise<number> {
   // Era guard: if the store's head sequence is BEHIND our bookmark, its oplog
   // was rebuilt at some point (e.g. a Durable Object storage reset). Our cursor
   // would point past its history forever, making every future pull silently
@@ -217,17 +240,20 @@ async function applyPulled(storeId: string, data: SyncPullResponse, notify = tru
   }
 
   let applied = 0;
+  const pulledCollections = new Set<SyncCollection>();
 
   for (let start = 0; start < data.changes.length; start += APPLY_CHUNK) {
     const batch = data.changes.slice(start, start + APPLY_CHUNK);
     for (const change of batch) {
+      const collection = change.collection as SyncCollection;
       const row: ChangeRow<{ id: string }> = {
         id: change.id,
         data: change.data as { id: string },
         updatedAt: change.updatedAt,
         deleted: change.deleted,
       };
-      db.applyRemote(change.collection as SyncCollection, row);
+      db.applyRemote(collection, row);
+      pulledCollections.add(collection);
     }
     applied += batch.length;
     if (start + APPLY_CHUNK < data.changes.length) {
@@ -239,7 +265,9 @@ async function applyPulled(storeId: string, data: SyncPullResponse, notify = tru
   // simply refetches the tail instead of losing it. Re-applying rows is safe —
   // every write is an idempotent upsert guarded by last-write-wins.
   db.metaSet(cursorKey(storeId), String(data.cursor));
-  if (notify && applied > 0) emitSynced(applied);
+  if (notify && (applied > 0 || uploadedCollections.size > 0)) {
+    emitSynced({ appliedCount: applied, pulledCollections, uploadedCollections });
+  }
   return applied;
 }
 
@@ -330,13 +358,28 @@ async function performPull(
  * WebSocket nudge could open a second round-trip mid-poll. One lane means at
  * most a single request in flight per device, which is what keeps the UI calm.
  */
-const jobQueue: { key: string; run: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (reason?: unknown) => void }[] = [];
+const jobQueue: {
+  key: string;
+  run: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+}[] = [];
+/** One promise per queued key; repeated triggers share it. */
 const queuedJobs = new Map<string, Promise<unknown>>();
+/** Running keys are separate so one fresh trailing job can survive per key. */
+const runningJobKeys = new Set<string>();
 let jobRunning = false;
 
 function enqueueJob<T>(key: string, run: () => Promise<T>): Promise<T> {
-  const existing = queuedJobs.get(key);
-  if (existing) return existing as Promise<T>;
+  const queued = queuedJobs.get(key);
+  if (queued) return queued as Promise<T>;
+
+  // If this key is currently running, deliberately enqueue exactly one trailing
+  // cycle. The active job may already have snapshotted dirty rows or the server
+  // cursor; swallowing a later write/nudge into its old promise would leave that
+  // change waiting for the next 20-second safety poll. `queuedJobs` coalesces all
+  // further triggers into this one trailing cycle.
+  const isTrailing = runningJobKeys.has(key);
 
   let resolve!: (value: unknown) => void;
   let reject!: (reason?: unknown) => void;
@@ -347,6 +390,10 @@ function enqueueJob<T>(key: string, run: () => Promise<T>): Promise<T> {
   queuedJobs.set(key, promise);
   jobQueue.push({ key, run: run as () => Promise<unknown>, resolve, reject });
 
+  // A running key guarantees the serialized runner is already alive; the
+  // newly queued trailing job will be picked up by its next loop iteration.
+  if (isTrailing) return promise as Promise<T>;
+
   if (!jobRunning) {
     jobRunning = true;
     setActivity({ busy: true });
@@ -354,11 +401,16 @@ function enqueueJob<T>(key: string, run: () => Promise<T>): Promise<T> {
       for (;;) {
         const job = jobQueue.shift();
         if (!job) break;
+        // It is no longer queued. A same-key trigger during `run` may now create
+        // one trailing job, while additional triggers share that queued promise.
         queuedJobs.delete(job.key);
+        runningJobKeys.add(job.key);
         try {
           job.resolve(await job.run());
         } catch (error) {
           job.reject(error);
+        } finally {
+          runningJobKeys.delete(job.key);
         }
       }
       jobRunning = false;
@@ -424,7 +476,7 @@ async function performSync(
     // One request per batch. The last one always runs even with nothing dirty,
     // so a sync with no local edits still pulls server changes.
     const batches = batchChanges(changes);
-    const queue: PushBatch[] = batches.length > 0 ? batches : [{ changes: [], idsByCollection: {} }];
+    const queue: PushBatch[] = batches.length > 0 ? batches : [{ changes: [], revisionsByCollection: {} }];
 
     let applied = 0;
     for (const batch of queue) {
@@ -444,13 +496,13 @@ async function performSync(
   }
 }
 
-/** Push one batch, clear its dirty rows on success, and apply what came back. */
+/** Push one batch, acknowledge its exact revisions, and apply what came back. */
 async function pushBatch(
   storeId: string,
   cookie: string,
   batch: PushBatch,
 ): Promise<SyncAttemptResult> {
-  const { changes, idsByCollection } = batch;
+  const { changes, revisionsByCollection } = batch;
   const db = storeScope(storeId);
   try {
     // Re-read per batch: an earlier batch advances the cursor.
@@ -498,11 +550,17 @@ async function pushBatch(
       };
     }
 
-    for (const [collection, ids] of Object.entries(idsByCollection)) {
-      db.clearDirty(collection as SyncCollection, ids);
+    for (const [collection, revisions] of Object.entries(revisionsByCollection)) {
+      db.clearDirty(collection as SyncCollection, revisions);
     }
 
-    return { ok: true, appliedCount: await applyPulled(storeId, body.data) };
+    const uploadedCollections = new Set<SyncCollection>(
+      Object.keys(revisionsByCollection) as SyncCollection[],
+    );
+    return {
+      ok: true,
+      appliedCount: await applyPulled(storeId, body.data, true, uploadedCollections),
+    };
   } catch (e) {
     const error = e as Error;
     const timedOut = error.name === "AbortError";

@@ -1,7 +1,7 @@
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { colors } from "@/constants/theme";
 
-export type Bar = { label: string; value: number };
+export type Bar = { id?: string; label: string; value: number };
 
 /**
  * Lightweight bars-from-Views chart (no chart lib needed). Renders a 0-based
@@ -13,11 +13,14 @@ export function BarChart({
   formatValue,
   height = 190,
   barColor = colors.primary,
+  onBarPress,
 }: {
   data: Bar[];
   formatValue: (n: number) => string;
   height?: number;
   barColor?: string;
+  /** Optional because time-based and future charts may remain display-only. */
+  onBarPress?: (bar: Bar, index: number) => void;
 }) {
   const max = Math.max(...data.map((d) => d.value), 1);
   const ticks = [1, 0.75, 0.5, 0.25, 0].map((f) => Math.round(max * f));
@@ -50,7 +53,15 @@ export function BarChart({
           ))}
           <View style={styles.bars}>
             {data.map((d, i) => (
-              <View key={i} style={styles.barCol}>
+              <Pressable
+                key={d.id ?? i}
+                style={({ pressed }) => [styles.barCol, onBarPress && pressed && styles.pressed]}
+                disabled={!onBarPress}
+                onPress={() => onBarPress?.(d, i)}
+                accessibilityRole={onBarPress ? "button" : undefined}
+                accessibilityLabel={onBarPress ? `${d.label}, ${formatValue(d.value)}` : undefined}
+                accessibilityHint={onBarPress ? "Shows receipts containing this item." : undefined}
+              >
                 <View
                   style={[
                     styles.bar,
@@ -60,7 +71,7 @@ export function BarChart({
                     },
                   ]}
                 />
-              </View>
+              </Pressable>
             ))}
           </View>
         </View>
@@ -71,13 +82,21 @@ export function BarChart({
         <View style={{ width: 44 }} />
         <View style={styles.xLabels}>
           {data.map((d, i) => (
-            <View key={i} style={styles.xLabelCol}>
+            <Pressable
+              key={d.id ?? i}
+              style={({ pressed }) => [styles.xLabelCol, onBarPress && pressed && styles.pressed]}
+              disabled={!onBarPress}
+              onPress={() => onBarPress?.(d, i)}
+              accessibilityRole={onBarPress ? "button" : undefined}
+              accessibilityLabel={onBarPress ? d.label : undefined}
+              accessibilityHint={onBarPress ? "Shows receipts containing this item." : undefined}
+            >
               {i % labelStride === 0 && (
                 <Text style={styles.xLabel} numberOfLines={1}>
                   {d.label}
                 </Text>
               )}
-            </View>
+            </Pressable>
           ))}
         </View>
       </View>
@@ -92,7 +111,8 @@ const styles = StyleSheet.create({
   plot: { flex: 1, position: "relative", justifyContent: "flex-end" },
   gridline: { position: "absolute", left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300 },
   bars: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: "100%" },
-  barCol: { flex: 1, alignItems: "center", justifyContent: "flex-end" },
+  barCol: { flex: 1, height: "100%", alignItems: "center", justifyContent: "flex-end" },
+  pressed: { opacity: 0.65 },
   /**
    * Sized as a share of its column rather than a fixed width, so the bars thin
    * out on their own as the bucket count grows. A fixed width overflowed the
@@ -108,6 +128,6 @@ const styles = StyleSheet.create({
   },
   xRow: { flexDirection: "row", marginTop: 6 },
   xLabels: { flex: 1, flexDirection: "row", justifyContent: "space-around" },
-  xLabelCol: { flex: 1, alignItems: "center" },
+  xLabelCol: { flex: 1, minHeight: 22, alignItems: "center" },
   xLabel: { fontSize: 9, color: colors.grey600, transform: [{ rotate: "-18deg" }] },
 });

@@ -277,6 +277,56 @@ function cleanupDemoData() {
   });
 }
 
+/**
+ * One level deep, plus a value compare for the nested bits (`variants`,
+ * `measure`). That's the full shape of a row as `loadAll` returns it.
+ */
+function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const key of keys) {
+    const left = a[key];
+    const right = b[key];
+    if (left === right) continue;
+    if (left && right && typeof left === "object" && typeof right === "object") {
+      if (JSON.stringify(left) !== JSON.stringify(right)) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Swap in freshly-loaded rows while keeping the identity of everything that
+ * didn't actually change.
+ *
+ * `loadAll` deserialises JSON, so every sync handed React brand-new objects for
+ * every row — even a sync that pulled nothing at all. Downstream that reads as
+ * "the whole catalog changed": `React.memo` on the item cards can't bail out,
+ * the Items grid re-chunks and repaints end to end, and because a tab switch
+ * fires a quiet pull, switching tabs visibly stuttered on slow hardware.
+ * Reusing the previous object for unchanged rows — and the previous array when
+ * no row moved — makes a no-op sync a genuine no-op for React.
+ */
+function reconcile<T extends { id: string }>(previous: T[], next: T[]): T[] {
+  const byId = new Map(previous.map((row) => [row.id, row]));
+  let changed = previous.length !== next.length;
+  const merged = next.map((row, index) => {
+    const old = byId.get(row.id);
+    if (
+      old &&
+      shallowEqual(old as unknown as Record<string, unknown>, row as unknown as Record<string, unknown>)
+    ) {
+      if (previous[index] !== old) changed = true;
+      return old;
+    }
+    changed = true;
+    return row;
+  });
+  return changed ? merged : previous;
+}
+
 const CatalogContext = createContext<CatalogState | null>(null);
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
@@ -295,19 +345,35 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   const [customers, setCustomers] = useState<Customer[]>(() => loadAll<Customer>("customers"));
   const [staff, setStaff] = useState<StaffMember[]>(() => loadAll<StaffMember>("staff"));
 
-  // Re-read all local collections whenever sync pushes or pulls data, so the
-  // UI always reflects the current server truth — even on first install where
-  // the provider mounts before the initial pull completes.
+  // Re-read only collections that actually received server rows. The provider
+  // mounts before the initial pull on a fresh install, so this is also how its
+  // local mirror fills as history arrives.
   useEffect(() => {
     if (!SYNC_ENABLED) return;
-    return onSynced(() => {
-      setProducts(loadAll<Item>("products"));
-      setCategories(loadAll<Category>("categories"));
-      setModifiers(loadAll<ModifierGroup>("modifiers"));
-      setIngredients(loadAll<Ingredient>("ingredients"));
-      setTables(loadAll<Table>("tables"));
-      setCustomers(loadAll<Customer>("customers"));
-      setStaff(loadAll<StaffMember>("staff"));
+    return onSynced(({ pulledCollections }) => {
+      // Read only tables that actually received server rows. A receipt arriving
+      // on another till must not parse every product/category/staff document.
+      if (pulledCollections.has("products")) {
+        setProducts((prev) => reconcile(prev, loadAll<Item>("products")));
+      }
+      if (pulledCollections.has("categories")) {
+        setCategories((prev) => reconcile(prev, loadAll<Category>("categories")));
+      }
+      if (pulledCollections.has("modifiers")) {
+        setModifiers((prev) => reconcile(prev, loadAll<ModifierGroup>("modifiers")));
+      }
+      if (pulledCollections.has("ingredients")) {
+        setIngredients((prev) => reconcile(prev, loadAll<Ingredient>("ingredients")));
+      }
+      if (pulledCollections.has("tables")) {
+        setTables((prev) => reconcile(prev, loadAll<Table>("tables")));
+      }
+      if (pulledCollections.has("customers")) {
+        setCustomers((prev) => reconcile(prev, loadAll<Customer>("customers")));
+      }
+      if (pulledCollections.has("staff")) {
+        setStaff((prev) => reconcile(prev, loadAll<StaffMember>("staff")));
+      }
     });
   }, []);
 

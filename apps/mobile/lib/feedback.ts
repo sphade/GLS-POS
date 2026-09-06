@@ -177,10 +177,9 @@ function notify(type: Haptics.NotificationFeedbackType) {
  * almost nothing, so it must never queue behind audio work.
  */
 
-/** Item added to the cart: light tap + short beep. */
+/** Item added to the cart: light vibration only; no selection sound. */
 export function feedbackAddItem() {
   vibrate(Haptics.ImpactFeedbackStyle.Light);
-  playSound("beep");
 }
 
 /** Barcode successfully scanned: medium tap + beep. */

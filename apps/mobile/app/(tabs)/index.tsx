@@ -1,6 +1,14 @@
-﻿import { memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+﻿import {
+  memo,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
-  Alert,
   LayoutAnimation,
   Platform,
   Pressable,
@@ -16,7 +24,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { colors, formatMoney, strings } from "@/constants/theme";
+import { colors, formatMoney, LONG_PRESS_MS, strings } from "@/constants/theme";
 import { PosHeader, PosSearchBar } from "@/components/PosHeader";
 import { VariantChooser } from "@/components/VariantChooser";
 import {
@@ -57,6 +65,13 @@ const UNCATEGORISED = "UNCATEGORISED";
 /** Sentinel for the "ALL" filter chip. */
 const ALL = "__all__";
 
+/** Hoisted so a press handler isn't handed a fresh object on every render. */
+const RIPPLE = { color: "#00000010" };
+const EMPTY_ITEMS: Item[] = [];
+const EMPTY_ROWS: GridRow[] = [];
+/** Stable, so the trailing "new item" tile's cell never remounts. */
+const NEW_ITEM_ROWS: GridRow[] = [{ key: NEW_ITEM_ID, items: [{ id: NEW_ITEM_ID } as Item] }];
+
 // Collapsing animates on Android too (no-op on iOS, which animates natively).
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -64,15 +79,32 @@ if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental
 
 /** One rendered line of the grid (a single item when in list mode). */
 type GridRow = { key: string; items: Item[] };
-type ItemSection = {
+
+/**
+ * A category's items after search + filtering, before any layout work.
+ *
+ * Kept separate from the laid-out section so that collapsing a category — or
+ * flipping grid/list — doesn't have to redo the filtering, and so the arrays
+ * below keep their identity for the memoised children that read them.
+ */
+type CatalogGroup = {
   /** Stable key: the category id, or the UNCATEGORISED sentinel. */
   id: string;
   title: string;
   color?: string;
+  /** Every item in this group, kept even when collapsed (for the select-all box). */
+  items: Item[];
+  /**
+   * Items the select-all box can act on: simple, in-stock products. Variant
+   * products need an explicit choice, so they're never bulk-added. Computed once
+   * here rather than per header render.
+   */
+  sellable: Item[];
+};
+
+type ItemSection = CatalogGroup & {
   total: number;
   collapsed: boolean;
-  /** Every item in this section, kept even when collapsed (for the select-all box). */
-  items: Item[];
   data: GridRow[];
 };
 
@@ -84,6 +116,11 @@ function chunk(items: Item[], size: number): GridRow[] {
     rows.push({ key: slice.map((s) => s.id).join("_"), items: slice });
   }
   return rows;
+}
+
+/** Element-wise identity — catalog objects are stable between renders. */
+function sameItems(a: readonly Item[], b: readonly Item[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
 export default function ItemsScreen() {
@@ -98,6 +135,13 @@ export default function ItemsScreen() {
   const { store } = useStore();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [query, setQuery] = useState("");
+  /**
+   * Filtering runs against the deferred value, so a keystroke paints the new
+   * character straight away and the far heavier regroup-and-re-chunk of the
+   * whole catalog happens in a lower-priority pass behind it. On a slow phone
+   * this is the difference between a search box that types and one that fights.
+   */
+  const deferredQuery = useDeferredValue(query);
   // Read synchronously on first render (expo-sqlite is sync), so the saved
   // layout is correct on the very first paint with no flicker from grid to list.
   const [isGrid, setIsGrid] = useState(() => metaGet(LAYOUT_KEY) !== "list");
@@ -113,21 +157,40 @@ export default function ItemsScreen() {
   const cardWidth = (width - PAD * 2 - GAP * (cols - 1)) / cols;
 
   /** Persist alongside the state change, so the choice outlives the screen. */
-  const toggleLayout = () => {
+  const toggleLayout = useCallback(() => {
     const next = !isGrid;
     setIsGrid(next);
     metaSet(LAYOUT_KEY, next ? "grid" : "list");
-  };
+  }, [isGrid]);
 
-  const toggleCollapse = (id: string) => {
+  const toggleCollapse = useCallback((id: string) => {
     feedbackTap();
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    // Explicit and short: the easeInEaseOut preset runs 300ms, long enough on
+    // slow hardware to read as the app hesitating rather than animating.
+    LayoutAnimation.configureNext({
+      duration: 160,
+      update: { type: LayoutAnimation.Types.easeInEaseOut },
+    });
     setCollapsed((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-  };
+  }, []);
+
+  /** Chips: "All" clears, tapping the active category also clears. */
+  const selectCat = useCallback((id: string) => {
+    feedbackTap();
+    setActiveCat((prev) => (id !== ALL && prev === id ? ALL : id));
+  }, []);
+
+  const openNewItem = useCallback(() => router.push("/item-editor"), [router]);
+  const openScanner = useCallback(() => router.push("/scanner"), [router]);
+  const closeChooser = useCallback(() => setChooser(null), []);
+  const goToCounter = useCallback(() => {
+    feedbackTap();
+    router.navigate("/counter");
+  }, [router]);
 
   /** Item counts per category, for the filter chips (unaffected by search). */
   const counts = useMemo(() => {
@@ -141,30 +204,25 @@ export default function ItemsScreen() {
   }, [products, categories]);
 
   /**
-   * Group the catalog into one section per category (in category order), with
-   * any uncategorised items last. Selecting a chip narrows to that one group;
-   * empty groups are hidden, so searching collapses the view to just the
-   * matches. A collapsed section keeps its header but renders no rows. The
-   * "NEW ITEM" tile trails the whole list as a headerless section.
+   * Stage 1 — group the catalog into one group per category (in category order),
+   * with any uncategorised items last. Selecting a chip narrows to that one
+   * group; empty groups are hidden, so searching collapses the view to just the
+   * matches. Deliberately independent of `cols` and `collapsed`, so neither
+   * re-runs the filtering.
    */
-  const sections = useMemo<ItemSection[]>(() => {
-    const q = query.trim().toLowerCase();
+  const groups = useMemo<CatalogGroup[]>(() => {
+    const q = deferredQuery.trim().toLowerCase();
     const match = (i: Item) => (q ? i.name.toLowerCase().includes(q) : true);
 
-    const build = (id: string, title: string, items: Item[], color?: string): ItemSection => {
-      const isCollapsed = collapsed.has(id);
-      return {
-        id,
-        title,
-        color,
-        total: items.length,
-        collapsed: isCollapsed,
-        items,
-        data: isCollapsed ? [] : chunk(items, cols),
-      };
-    };
+    const build = (id: string, title: string, items: Item[], color?: string): CatalogGroup => ({
+      id,
+      title,
+      color,
+      items,
+      sellable: items.filter((item) => !hasVariants(item) && itemAvailable(item)),
+    });
 
-    const grouped: ItemSection[] = [];
+    const grouped: CatalogGroup[] = [];
     for (const c of categories) {
       if (activeCat !== ALL && activeCat !== c.id) continue;
       const items = products.filter((i) => i.categoryId === c.id && match(i));
@@ -178,20 +236,57 @@ export default function ItemsScreen() {
       if (loose.length > 0) grouped.push(build(UNCATEGORISED, UNCATEGORISED, loose));
     }
 
+    return grouped;
+  }, [deferredQuery, products, categories, activeCat]);
+
+  /**
+   * Rows are cached per group, keyed by the group's id and the current column
+   * count. SectionList identifies a cell by the row object it was given, so
+   * handing it a freshly-chunked row remounted every visible card — which meant
+   * collapsing one category, or a search that only touched one group, repainted
+   * the entire grid. Cached rows make those changes local.
+   */
+  const rowCache = useRef(new Map<string, { items: readonly Item[]; cols: number; rows: GridRow[] }>());
+
+  /**
+   * Stage 2 — lay the groups out. A collapsed section keeps its header but
+   * renders no rows. The "NEW ITEM" tile trails the whole list as a headerless
+   * section.
+   */
+  const sections = useMemo<ItemSection[]>(() => {
+    const laidOut = groups.map<ItemSection>((group) => {
+      const cached = rowCache.current.get(group.id);
+      let rows: GridRow[];
+      if (cached && cached.cols === cols && sameItems(cached.items, group.items)) {
+        rows = cached.rows;
+      } else {
+        rows = chunk(group.items, cols);
+        rowCache.current.set(group.id, { items: group.items, cols, rows });
+      }
+      const isCollapsed = collapsed.has(group.id);
+      return {
+        ...group,
+        total: group.items.length,
+        collapsed: isCollapsed,
+        data: isCollapsed ? EMPTY_ROWS : rows,
+      };
+    });
+
     // Only roles that can edit the menu get the "new item" tile.
     if (canEditCatalog) {
-      grouped.push({
+      laidOut.push({
         id: NEW_ITEM_ID,
         title: "",
         total: 0,
         collapsed: false,
-        items: [],
-        data: [{ key: NEW_ITEM_ID, items: [{ id: NEW_ITEM_ID } as Item] }],
+        items: EMPTY_ITEMS,
+        sellable: EMPTY_ITEMS,
+        data: NEW_ITEM_ROWS,
       });
     }
 
-    return grouped;
-  }, [query, products, categories, cols, activeCat, collapsed, canEditCatalog]);
+    return laidOut;
+  }, [groups, cols, collapsed, canEditCatalog]);
 
   /**
    * Materialise image files in the background once the screen has painted, so
@@ -205,62 +300,122 @@ export default function ItemsScreen() {
   }, [products]);
 
   /**
-   * Items in a section the select-all box can act on: simple, in-stock products.
-   * Variant products need an explicit choice, so they're never bulk-added.
+   * Checkbox toggle: add one of each simple item, or clear them all out. Takes
+   * the already-computed sellable list so this handler keeps a stable identity
+   * across renders (the section objects do not).
    */
-  const sellableOf = (section: ItemSection) =>
-    section.items.filter((item) => !hasVariants(item) && itemAvailable(item));
+  const toggleSection = useCallback(
+    (sellable: Item[]) => {
+      if (!canSell || sellable.length === 0) {
+        feedbackError();
+        return;
+      }
+      const allAdded = sellable.every((item) => getQtyOf(item.id) > 0);
+      if (allAdded) {
+        sellable.forEach((item) => {
+          for (let n = getQtyOf(item.id); n > 0; n--) remove(cartLineKey(item.id));
+        });
+      } else {
+        sellable.forEach((item) => add(item));
+      }
+      feedbackAddItem();
+    },
+    [add, canSell, getQtyOf, remove],
+  );
 
-  /** Checkbox toggle: add one of each simple item, or clear them all out. */
-  const toggleSection = (section: ItemSection) => {
-    if (!canSell) {
-      feedbackError();
-      return;
-    }
-    const sellable = sellableOf(section);
-    if (sellable.length === 0) {
-      feedbackError();
-      return;
-    }
-    const allAdded = sellable.every((item) => getQtyOf(item.id) > 0);
-    if (allAdded) {
-      sellable.forEach((item) => {
-        for (let n = getQtyOf(item.id); n > 0; n--) remove(cartLineKey(item.id));
-      });
-    } else {
-      sellable.forEach((item) => add(item));
-    }
-    feedbackAddItem();
-  };
-
-  const onAdd = (item: Item) => {
-    if (!canSell) {
-      feedbackError();
-      return;
-    }
-    if (!itemAvailable(item)) {
-      feedbackError();
-      return;
-    }
-    if (hasVariants(item)) {
-      feedbackTap();
-      setChooser(item);
-      return;
-    }
-    add(item);
-    feedbackAddItem();
-  };
+  /**
+   * Tap handlers take the item as an argument rather than closing over it.
+   *
+   * That's what makes `memo` on the cards work: an inline `onPress={() =>
+   * onAdd(item)}` is a new function on every parent render, so every visible
+   * card re-rendered whenever anything on this screen changed — typing in
+   * search, switching category, opening the variant sheet.
+   */
+  const onAdd = useCallback(
+    (item: Item) => {
+      if (!canSell || !itemAvailable(item)) {
+        feedbackError();
+        return;
+      }
+      if (hasVariants(item)) {
+        feedbackTap();
+        setChooser(item);
+        return;
+      }
+      add(item);
+      feedbackAddItem();
+    },
+    [add, canSell],
+  );
 
   /** Long-press removes one simple item, or reopens the variant sheet. */
-  const onRemove = (item: Item) => {
-    if (!canSell || getQtyOf(item.id) === 0) return;
-    feedbackTap();
-    if (hasVariants(item)) {
-      setChooser(item);
-      return;
-    }
-    remove(cartLineKey(item.id));
-  };
+  const onRemove = useCallback(
+    (item: Item) => {
+      if (!canSell || getQtyOf(item.id) === 0) return;
+      feedbackTap();
+      if (hasVariants(item)) {
+        setChooser(item);
+        return;
+      }
+      remove(cartLineKey(item.id));
+    },
+    [canSell, getQtyOf, remove],
+  );
+
+  // Stable list callbacks. A new `renderItem` identity makes VirtualizedList
+  // re-render every mounted cell, which would undo the work above.
+  const keyExtractor = useCallback((row: GridRow) => row.key, []);
+
+  const renderSectionHeader = useCallback(
+    ({ section }: { section: ItemSection }) =>
+      section.title ? (
+        <SectionHeader
+          section={section}
+          onToggleCollapse={toggleCollapse}
+          onToggleSection={toggleSection}
+        />
+      ) : null,
+    [toggleCollapse, toggleSection],
+  );
+
+  const renderItem = useCallback(
+    ({ item: row }: { item: GridRow }) => (
+      <View style={[styles.gridRow, cols === 1 && styles.listRow]}>
+        {row.items.map((item) =>
+          item.id === NEW_ITEM_ID ? (
+            <Pressable
+              key={item.id}
+              style={[styles.card, styles.newItemCard, cols > 1 ? { width: cardWidth } : undefined]}
+              onPress={openNewItem}
+              android_ripple={RIPPLE}
+            >
+              <View style={styles.newItemPlus}>
+                <Ionicons name="add" size={26} color={colors.white} />
+              </View>
+              <Text style={styles.newItemText}>{strings.newItem.toUpperCase()}</Text>
+            </Pressable>
+          ) : isGrid ? (
+            <ProductCard
+              key={item.id}
+              item={item}
+              width={cardWidth}
+              onPress={onAdd}
+              onLongPress={onRemove}
+            />
+          ) : (
+            <ProductRow key={item.id} item={item} onPress={onAdd} onLongPress={onRemove} />
+          ),
+        )}
+        {/* Keep the last row aligned to the grid when it isn't full. */}
+        {cols > 1 &&
+          row.items.length < cols &&
+          Array.from({ length: cols - row.items.length }).map((_, i) => (
+            <View key={`spacer_${i}`} style={{ width: cardWidth }} />
+          ))}
+      </View>
+    ),
+    [cardWidth, cols, isGrid, onAdd, onRemove, openNewItem],
+  );
 
   return (
     <View style={styles.root}>
@@ -271,7 +426,7 @@ export default function ItemsScreen() {
           isGrid={isGrid}
           onLayoutSwitch={toggleLayout}
         />
-        <PosSearchBar value={query} onChangeText={setQuery} onScan={() => router.push("/scanner")} />
+        <PosSearchBar value={query} onChangeText={setQuery} onScan={openScanner} />
       </SafeAreaView>
 
       {/* Category filter chips — tap one to view just that category. */}
@@ -281,34 +436,23 @@ export default function ItemsScreen() {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipBarContent}
         >
-          <CategoryTab
-            label="All"
-            active={activeCat === ALL}
-            onPress={() => {
-              feedbackTap();
-              setActiveCat(ALL);
-            }}
-          />
+          <CategoryTab id={ALL} label="All" active={activeCat === ALL} onPress={selectCat} />
           {categories.map((c) => (
             <CategoryTab
               key={c.id}
+              id={c.id}
               label={c.name}
               color={c.color}
               active={activeCat === c.id}
-              onPress={() => {
-                feedbackTap();
-                setActiveCat((prev) => (prev === c.id ? ALL : c.id));
-              }}
+              onPress={selectCat}
             />
           ))}
           {(counts.get(UNCATEGORISED) ?? 0) > 0 && (
             <CategoryTab
+              id={UNCATEGORISED}
               label="Other"
               active={activeCat === UNCATEGORISED}
-              onPress={() => {
-                feedbackTap();
-                setActiveCat((prev) => (prev === UNCATEGORISED ? ALL : UNCATEGORISED));
-              }}
+              onPress={selectCat}
             />
           )}
         </ScrollView>
@@ -317,7 +461,7 @@ export default function ItemsScreen() {
       <SectionList
         key={`cols-${cols}`}
         sections={sections}
-        keyExtractor={(row) => row.key}
+        keyExtractor={keyExtractor}
         stickySectionHeadersEnabled={false}
         contentContainerStyle={styles.gridContent}
         // Windowing: render a screenful first, then fill in while scrolling.
@@ -349,80 +493,13 @@ export default function ItemsScreen() {
             />
           </View>
         }
-        renderSectionHeader={({ section }) =>
-          section.title ? (
-            // The whole white band toggles collapse/expand.
-            <Pressable
-              style={styles.sectionHeader}
-              onPress={() => toggleCollapse(section.id)}
-              android_ripple={{ color: "#00000010" }}
-            >
-              <View style={styles.sectionTitleArea}>
-                <Ionicons
-                  name={section.collapsed ? "chevron-forward" : "chevron-down"}
-                  size={18}
-                  color={colors.grey700}
-                />
-                <Text style={styles.sectionTitle} numberOfLines={1}>
-                  {section.title}
-                </Text>
-                <Text style={styles.sectionCount}>({section.total})</Text>
-              </View>
-
-              {/* Select-all checkbox: adds one of each item in this category, or
-                  clears them. Variant items are left out — they need a choice.
-                  Nested Pressable, so tapping it doesn't also collapse. */}
-              {sellableOf(section).length > 0 && (
-                <SectionSelectAll items={sellableOf(section)} onToggle={() => toggleSection(section)} />
-              )}
-            </Pressable>
-          ) : null
-        }
-        renderItem={({ item: row }) => (
-          <View style={[styles.gridRow, cols === 1 && { flexDirection: "column", gap: 0 }]}>
-            {row.items.map((item) =>
-              item.id === NEW_ITEM_ID ? (
-                <Pressable
-                  key={item.id}
-                  style={[styles.card, styles.newItemCard, cols > 1 ? { width: cardWidth } : undefined]}
-                  onPress={() => router.push("/item-editor")}
-                  android_ripple={{ color: "#00000010" }}
-                >
-                  <View style={styles.newItemPlus}>
-                    <Ionicons name="add" size={26} color={colors.white} />
-                  </View>
-                  <Text style={styles.newItemText}>{strings.newItem.toUpperCase()}</Text>
-                </Pressable>
-              ) : isGrid ? (
-                <ProductCard
-                  key={item.id}
-                  item={item}
-                  width={cardWidth}
-                  onPress={() => onAdd(item)}
-                  onLongPress={() => onRemove(item)}
-                />
-              ) : (
-                <ProductRow
-                  key={item.id}
-                  item={item}
-                  onPress={() => onAdd(item)}
-                  onLongPress={() => onRemove(item)}
-                />
-              ),
-            )}
-            {/* Keep the last row aligned to the grid when it isn't full. */}
-            {cols > 1 &&
-              row.items.length < cols &&
-              Array.from({ length: cols - row.items.length }).map((_, i) => (
-                <View key={`spacer_${i}`} style={{ width: cardWidth }} />
-              ))}
-          </View>
-        )}
+        renderSectionHeader={renderSectionHeader}
+        renderItem={renderItem}
       />
 
-      <GoToCounterBar onPress={() => { feedbackTap(); router.navigate("/counter"); }} />
+      <GoToCounterBar onPress={goToCounter} />
 
-      <VariantChooser item={chooser} visible={!!chooser} onClose={() => setChooser(null)} />
+      <VariantChooser item={chooser} visible={!!chooser} onClose={closeChooser} />
     </View>
   );
 }
@@ -432,26 +509,71 @@ export default function ItemsScreen() {
  * Keeta, Wolt) present menu categories: plain label, bold + underlined when
  * active. The underline picks up the category's own colour when it has one.
  */
-function CategoryTab({
+const CategoryTab = memo(function CategoryTab({
+  id,
   label,
   color,
   active,
   onPress,
 }: {
+  id: string;
   label: string;
   color?: string;
   active: boolean;
-  onPress: () => void;
+  onPress: (id: string) => void;
 }) {
   return (
-    <Pressable style={styles.catTab} onPress={onPress} android_ripple={{ color: "#00000008" }}>
+    <Pressable style={styles.catTab} onPress={() => onPress(id)} android_ripple={CHIP_RIPPLE}>
       <Text style={[styles.catTabText, active && styles.catTabTextActive]} numberOfLines={1}>
         {label}
       </Text>
       {active && <View style={[styles.catTabIndicator, { backgroundColor: color ?? colors.primary }]} />}
     </Pressable>
   );
-}
+});
+
+const CHIP_RIPPLE = { color: "#00000008" };
+
+/**
+ * Category band above each group. The whole white strip toggles
+ * collapse/expand; the checkbox is a nested Pressable so tapping it doesn't also
+ * collapse. Memoised because it re-renders on every section rebuild otherwise.
+ */
+const SectionHeader = memo(function SectionHeader({
+  section,
+  onToggleCollapse,
+  onToggleSection,
+}: {
+  section: ItemSection;
+  onToggleCollapse: (id: string) => void;
+  onToggleSection: (sellable: Item[]) => void;
+}) {
+  return (
+    <Pressable
+      style={styles.sectionHeader}
+      onPress={() => onToggleCollapse(section.id)}
+      android_ripple={RIPPLE}
+    >
+      <View style={styles.sectionTitleArea}>
+        <Ionicons
+          name={section.collapsed ? "chevron-forward" : "chevron-down"}
+          size={18}
+          color={colors.grey700}
+        />
+        <Text style={styles.sectionTitle} numberOfLines={1}>
+          {section.title}
+        </Text>
+        <Text style={styles.sectionCount}>({section.total})</Text>
+      </View>
+
+      {/* Adds one of each item in this category, or clears them. Variant items
+          are left out — they need an explicit choice. */}
+      {section.sellable.length > 0 && (
+        <SectionSelectAll items={section.sellable} onToggle={onToggleSection} />
+      )}
+    </Pressable>
+  );
+});
 
 function Avatar({ item, size }: { item: Item; size: number }) {
   const threshold = item.lowStockAt ?? 3;
@@ -476,7 +598,13 @@ function Avatar({ item, size }: { item: Item; size: number }) {
  * quantities, so its checked state stays live without the whole Items screen
  * re-rendering on every cart change.
  */
-function SectionSelectAll({ items, onToggle }: { items: Item[]; onToggle: () => void }) {
+const SectionSelectAll = memo(function SectionSelectAll({
+  items,
+  onToggle,
+}: {
+  items: Item[];
+  onToggle: (items: Item[]) => void;
+}) {
   const { subscribeToProduct, getQtyOf } = useCartActions();
   const productIds = useMemo(() => items.map((item) => item.id), [items]);
   const subscribe = useCallback(
@@ -497,8 +625,8 @@ function SectionSelectAll({ items, onToggle }: { items: Item[]; onToggle: () => 
     <Pressable
       style={styles.sectionCheck}
       hitSlop={8}
-      onPress={onToggle}
-      android_ripple={{ color: "#00000010", borderless: true }}
+      onPress={() => onToggle(items)}
+      android_ripple={CHECK_RIPPLE}
     >
       <Ionicons
         name={allAdded ? "checkbox" : "square-outline"}
@@ -507,7 +635,9 @@ function SectionSelectAll({ items, onToggle }: { items: Item[]; onToggle: () => 
       />
     </Pressable>
   );
-}
+});
+
+const CHECK_RIPPLE = { color: "#00000010", borderless: true };
 
 /**
  * The floating "Go To Counter" bar. Subscribes to the cart count on its own so
@@ -538,8 +668,9 @@ const ProductCard = memo(function ProductCard({
 }: {
   item: Item;
   width: number;
-  onPress: () => void;
-  onLongPress: () => void;
+  /** Takes the item, so the parent can hand down one stable function. */
+  onPress: (item: Item) => void;
+  onLongPress: (item: Item) => void;
 }) {
   // Subscribes to just this product's quantity, so a tap re-renders only the
   // tile that changed rather than the whole grid.
@@ -552,10 +683,10 @@ const ProductCard = memo(function ProductCard({
   return (
     <Pressable
       style={[styles.card, { width }]}
-      onPress={onPress}
-      onLongPress={onLongPress}
-      delayLongPress={250}
-      android_ripple={{ color: "#00000010" }}
+      onPress={() => onPress(item)}
+      onLongPress={() => onLongPress(item)}
+      delayLongPress={LONG_PRESS_MS}
+      android_ripple={RIPPLE}
     >
       <View style={[styles.imageZone, { width: circle, height: circle }]}>
         <Avatar item={item} size={circle} />
@@ -592,8 +723,8 @@ const ProductRow = memo(function ProductRow({
   onLongPress,
 }: {
   item: Item;
-  onPress: () => void;
-  onLongPress: () => void;
+  onPress: (item: Item) => void;
+  onLongPress: (item: Item) => void;
 }) {
   const qty = useItemQty(item.id);
   const out = !itemAvailable(item);
@@ -601,10 +732,10 @@ const ProductRow = memo(function ProductRow({
   return (
     <Pressable
       style={styles.row}
-      onPress={onPress}
-      onLongPress={onLongPress}
-      delayLongPress={250}
-      android_ripple={{ color: "#00000010" }}
+      onPress={() => onPress(item)}
+      onLongPress={() => onLongPress(item)}
+      delayLongPress={LONG_PRESS_MS}
+      android_ripple={RIPPLE}
     >
       <View style={styles.rowThumb}>
         <Avatar item={item} size={46} />
@@ -639,6 +770,8 @@ const styles = StyleSheet.create({
   gridContent: { paddingTop: GAP, paddingBottom: 96 },
   /** One line of grid cards (or a single row in list mode). */
   gridRow: { flexDirection: "row", gap: GAP, paddingHorizontal: PAD },
+  /** List mode has one item per line, so the row stacks instead of spanning. */
+  listRow: { flexDirection: "column", gap: 0 },
 
   /** Horizontal category tab bar, sits directly under the search row. */
   chipBar: { backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.grey200 },

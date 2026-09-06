@@ -39,6 +39,17 @@ export type StoreMember = {
   role: StoreRole;
 };
 
+/**
+ * Someone who already works in another of your shops and could be added to this
+ * one. `shops` is how many of your shops they're already in.
+ */
+export type AttachableStaff = {
+  userId: string;
+  name: string;
+  username: string | null;
+  shops: number;
+};
+
 export const api = {
   /** Stores the signed-in user belongs to. */
   listStores: () => request<StoreMembership[]>("/stores"),
@@ -62,6 +73,21 @@ export const api = {
       method: "POST",
       headers: { "x-store-id": storeId },
       body: JSON.stringify(body),
+    }),
+
+  /**
+   * People already in your other shops, for adding without a second account.
+   * Scoped server-side to shops you own — not a global user search.
+   */
+  listAttachableStaff: (storeId: string) =>
+    request<AttachableStaff[]>("/members/attachable", { headers: { "x-store-id": storeId } }),
+
+  /** Add an existing account to this store by username, with a per-store role. */
+  attachStaff: (storeId: string, username: string, role: StoreRole) =>
+    request<{ userId: string; role: StoreRole }>("/members/attach", {
+      method: "POST",
+      headers: { "x-store-id": storeId },
+      body: JSON.stringify({ username, role }),
     }),
 
   /** Reset a staff member's password (owner only). */
