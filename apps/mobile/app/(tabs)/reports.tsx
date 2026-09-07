@@ -15,6 +15,7 @@ import { isVoidReturn, useReturns } from "@/lib/returns";
 import { useStore } from "@/lib/store";
 import { useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
+import { stockSummaryOf } from "@/lib/stock";
 
 const CURRENCY = "NGN";
 const RANGES = [
@@ -199,6 +200,7 @@ export default function ReportsScreen() {
       .filter(([, value]) => value > 0)
       .sort((a, b) => b[1] - a[1])[0];
     const netSales = grossSales - refunded;
+    const inventory = products.map(stockSummaryOf);
     return {
       grossSales,
       refunded,
@@ -210,8 +212,8 @@ export default function ReportsScreen() {
       avg: scoped.length ? Math.round(netSales / scoped.length) : 0,
       topItem,
       topMode,
-      lowStock: products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length,
-      remaining: products.reduce((s, i) => s + (i.stockQuantity ?? 0), 0),
+      lowStock: inventory.filter((summary) => summary.low).length,
+      remaining: inventory.reduce((sum, summary) => sum + summary.totalQuantity, 0),
     };
   }, [scoped, scopedReturns, products]);
 

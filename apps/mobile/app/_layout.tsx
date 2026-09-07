@@ -214,6 +214,7 @@ function RootStack() {
 
       {/* Catalog management */}
       <Stack.Screen name="inventory" options={MODAL} />
+      <Stack.Screen name="update-stock" options={MODAL} />
       <Stack.Screen name="item-editor" options={MODAL} />
       <Stack.Screen name="category-editor" options={MODAL} />
       <Stack.Screen name="modifier-editor" options={MODAL} />

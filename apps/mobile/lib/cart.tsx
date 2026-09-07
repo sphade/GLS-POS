@@ -63,6 +63,8 @@ export type Item = {
   currency: string;
   /** null = not stock-tracked */
   stockQuantity: number | null;
+  /** Simple items decrement stock on sale unless explicitly disabled. */
+  autoUpdateStock?: boolean;
   /** Warn/flag when stock drops to or below this (only when tracked). */
   lowStockAt?: number;
   /**

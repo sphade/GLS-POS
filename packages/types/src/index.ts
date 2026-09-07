@@ -75,6 +75,10 @@ export interface Product {
   currency: CurrencyCode;
   /** null = not stock-tracked (Zobaze-style "sell without stock"). */
   stockQuantity: number | null;
+  /** Warn when simple-product stock reaches this quantity. */
+  lowStockAt?: number;
+  /** Simple products decrement stock on sale unless explicitly disabled. */
+  autoUpdateStock?: boolean;
   /** When present, the base product is not directly sellable. */
   variants?: ProductVariant[];
   taxRateBps?: number; // tax rate in basis points (e.g. 750 = 7.5%)
@@ -82,6 +86,50 @@ export interface Product {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Why a tracked product or variant changed quantity. */
+export type StockMovementReason =
+  | "sale"
+  | "adjustment"
+  | "initial"
+  | "restock"
+  | "return"
+  | "waste";
+
+/**
+ * Append-only inventory operation. The product document stores the materialized
+ * balance; this record explains how that balance changed and is the authority
+ * used by the Store Durable Object when devices sync concurrently.
+ */
+export interface StockMovement {
+  id: ID;
+  productId: ID;
+  productName: string;
+  variantId?: ID;
+  variantName?: string;
+  reason: StockMovementReason;
+  /** Actual signed change applied, e.g. -2 for a sale or +10 for a delivery. */
+  delta: number;
+  /** Balance after this operation. Corrected by the server when necessary. */
+  resulting: number;
+  /** Client-observed balance before the operation. */
+  baseStock?: number;
+  /** Original requested delta when the server had to clamp/correct `delta`. */
+  requestedDelta?: number;
+  /** Optional sale-automation setting applied to the same stock target. */
+  autoUpdateStock?: boolean;
+  /** Event time in milliseconds since epoch. */
+  at: number;
+  /** Optional receipt, return, or integration reference. */
+  ref?: string;
+  /** Optional human explanation for a manual movement. */
+  note?: string;
+  /** Actor snapshot retained even if the staff account later changes. */
+  actorId?: ID;
+  actorName?: string;
+  actorEmail?: string;
+  actorRole?: StoreRole;
 }
 
 // ---------------------------------------------------------------------------

@@ -170,7 +170,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Keep the audit trail's "who" in step with the session, so every logged
   // action is attributed to the signed-in user and their role in this store.
   useEffect(() => {
-    setAuditActor(user && activeRole ? { id: user.id, name: user.name, role: activeRole } : null);
+    setAuditActor(
+      user && activeRole
+        ? { id: user.id, name: user.name, email: user.email, role: activeRole }
+        : null,
+    );
   }, [user, activeRole]);
 
   const value = useMemo<AuthState>(() => {

@@ -79,7 +79,7 @@ export default function ReturnScreen() {
         const variant = product.variants?.find((v) => v.id === line.variantId);
         return !!variant && variant.stock != null && variant.autoUpdateStock;
       }
-      return product.stockQuantity != null;
+      return product.stockQuantity != null && product.autoUpdateStock !== false;
     });
   }, [receipt, products]);
 

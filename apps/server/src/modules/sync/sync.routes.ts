@@ -19,10 +19,16 @@ import { syncPushSchema } from "./sync.schema.js";
  */
 export const sync = new Hono<AppEnv>()
   .post("/", validate("json", syncPushSchema), async (c) => {
+    const user = c.get("user");
+    if (!user) throw HttpError.unauthorized();
     // Explicit annotation: the DO RPC type wrapper otherwise widens this oddly.
-    const { denied, changes, cursor }: PushResult = await c
+    const { denied, changes, cursor, head }: PushResult = await c
       .get("store")
-      .push(c.req.valid("json"), c.get("role"));
+      .push(c.req.valid("json"), c.get("role"), {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      });
 
     if (denied.length > 0) {
       throw HttpError.forbidden(
@@ -30,7 +36,7 @@ export const sync = new Hono<AppEnv>()
         "insufficient_permission",
       );
     }
-    return ok(c, { changes, cursor });
+    return ok(c, { changes, cursor, head });
   })
   // Pull-only catch-up: ?cursor=N returns changes since N.
   .get("/", async (c) => {

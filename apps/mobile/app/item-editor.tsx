@@ -27,6 +27,7 @@ export default function ItemEditorScreen() {
   const { products, categories, upsertProduct, deleteProduct, logStockChange } = useCatalog();
   const { can } = useAuth();
   const canEdit = can("catalog:write");
+  const canAdjustStock = can("inventory:adjust");
   const existing = products.find((p) => p.id === id);
 
   const [mode, setMode] = useState<"left" | "right">(
@@ -77,8 +78,49 @@ export default function ItemEditorScreen() {
   const [editingVariant, setEditingVariant] = useState<Variant | null>(null);
   const [touched, setTouched] = useState(false);
 
+  // A stock adjustment opens above this editor. When it closes, merge only the
+  // authoritative stock fields back into the draft so unsaved name/price/form
+  // edits survive without later overwriting the newly adjusted balance.
+  useEffect(() => {
+    if (!existing) return;
+    setTrackStock(existing.stockQuantity !== null);
+    setStockQty(existing.stockQuantity != null ? String(existing.stockQuantity) : "");
+    setVariants((drafts) =>
+      drafts.map((draft) => {
+        const latest = existing.variants?.find((variant) => variant.id === draft.id);
+        return latest
+          ? {
+              ...draft,
+              stock: latest.stock,
+              autoUpdateStock: latest.autoUpdateStock,
+            }
+          : draft;
+      }),
+    );
+  }, [existing?.stockQuantity, existing?.variants]);
+
+  const openStockUpdate = (variantId?: string) => {
+    if (!existing) return;
+    if (!canAdjustStock) {
+      Alert.alert("Permission required", "Your role cannot adjust inventory.");
+      return;
+    }
+    feedbackTap();
+    router.push({
+      pathname: "/update-stock",
+      params: { productId: existing.id, ...(variantId ? { variantId } : {}) },
+    });
+  };
+
   const category = categories.find((c) => c.id === categoryId);
   const isFraction = sellBy === "fraction";
+  const normalizeDraftStock = (value: number) => {
+    const clamped = Math.max(0, value);
+    return isFraction ? Math.round(clamped * 1000) / 1000 : Math.round(clamped);
+  };
+  const existingHasPositiveStock =
+    (existing?.stockQuantity ?? 0) > 0 ||
+    !!existing?.variants?.some((variant) => (variant.stock ?? 0) > 0);
   const priceValid = mode === "right" ? variants.length > 0 : (parseFloat(price) || 0) > 0;
   const dirty = name.trim().length > 0 && priceValid && (touched || !existing);
 
@@ -100,8 +142,8 @@ export default function ItemEditorScreen() {
     if (next === "right" && variants.length === 0) {
       const basePrice = Math.round((parseFloat(price) || 0) * 100);
       if (basePrice > 0) {
-        const baseStock = trackStock ? Math.max(0, Math.round(parseFloat(stockQty) || 0)) : undefined;
-        const baseLowAt = lowAlert.trim() ? Math.max(0, Math.round(parseFloat(lowAlert) || 0)) : undefined;
+        const baseStock = trackStock ? normalizeDraftStock(parseFloat(stockQty) || 0) : undefined;
+        const baseLowAt = lowAlert.trim() ? normalizeDraftStock(parseFloat(lowAlert) || 0) : undefined;
         setVariants([
           {
             ...newVariant(swatches[0]!),
@@ -116,6 +158,13 @@ export default function ItemEditorScreen() {
     }
 
     if (mode === "right" && next === "left" && variants.length > 0) {
+      if (existing?.variants?.some((variant) => (variant.stock ?? 0) > 0)) {
+        Alert.alert(
+          "Stock still available",
+          "Remove each variant's remaining stock before switching this item to Simple mode.",
+        );
+        return;
+      }
       Alert.alert(
         "Remove all variants?",
         "Saving this item in Simple mode will permanently remove its variants. This cannot be undone.",
@@ -138,6 +187,10 @@ export default function ItemEditorScreen() {
   };
 
   const onSave = () => {
+    if (!canEdit) {
+      Alert.alert("Permission required", "Your role cannot change catalog items.");
+      return;
+    }
     let savedVariants: Variant[] | undefined;
     if (mode === "right") {
       if (variants.length === 0) {
@@ -169,11 +222,17 @@ export default function ItemEditorScreen() {
         return;
       }
 
-      savedVariants = variants.map((variant, index) => ({ ...variant, name: names[index]! }));
+      savedVariants = variants.map((variant, index) => ({
+        ...variant,
+        name: names[index]!,
+        stock: variant.stock == null ? undefined : normalizeDraftStock(variant.stock),
+        lowStockAt:
+          variant.lowStockAt == null ? undefined : normalizeDraftStock(variant.lowStockAt),
+      }));
     }
 
-    const simpleStock = trackStock ? Math.max(0, Math.round(parseFloat(stockQty) || 0)) : null;
-    const simpleLowAt = trackStock && lowAlert.trim() ? Math.max(0, Math.round(parseFloat(lowAlert) || 0)) : undefined;
+    const simpleStock = trackStock ? normalizeDraftStock(parseFloat(stockQty) || 0) : null;
+    const simpleLowAt = trackStock && lowAlert.trim() ? normalizeDraftStock(parseFloat(lowAlert) || 0) : undefined;
     const nextStock = mode === "right" ? null : simpleStock;
     const nextPrice = mode === "right"
       ? Math.min(...savedVariants!.map((variant) => variant.price))
@@ -193,6 +252,7 @@ export default function ItemEditorScreen() {
       chooseOne: mode === "right" ? chooseOne : undefined,
       stockQuantity: nextStock,
       lowStockAt: mode === "right" ? undefined : simpleLowAt,
+      autoUpdateStock: mode === "right" ? undefined : (existing?.autoUpdateStock ?? true),
       // Photo bytes live in `product_images`, not on the product document.
       hasImage: pickedImage === null ? false : pickedImage ? true : existing?.hasImage,
     });
@@ -285,18 +345,26 @@ export default function ItemEditorScreen() {
     <SafeAreaView edges={["top"]} style={formStyles.screen}>
       <EditorToolbar
         title={existing ? "Edit Item" : "Add Item"}
-        dirty={dirty}
+        dirty={dirty && canEdit}
         onClose={() => router.back()}
         onSave={onSave}
         onFavourite={feedbackTap}
         onDelete={
           existing && canEdit
-            ? () =>
+            ? () => {
+                if (existingHasPositiveStock) {
+                  Alert.alert(
+                    "Stock still available",
+                    "Remove all remaining stock before deleting this item.",
+                  );
+                  return;
+                }
                 confirmDelete(`"${existing.name}"`, () => {
                   deleteProduct(existing.id);
                   feedbackTap();
                   router.back();
-                })
+                });
+              }
             : undefined
         }
       />
@@ -370,27 +438,55 @@ export default function ItemEditorScreen() {
               valid={(parseFloat(price) || 0) > 0}
             />
 
-            <FeatureCard icon="cube-outline" label="Track stock" on={trackStock} onToggle={setTrackStock}>
-              {/* Rows are pressable so the label focuses its field — the boxed
-                  input alone is a small target to hit. */}
-              <Pressable
-                style={styles.stockRow}
-                accessible={false}
-                onPress={() => stockQtyRef.current?.focus()}
-              >
-                <Text style={styles.stockLabel}>Quantity in stock</Text>
-                <NumberInput
-                  ref={stockQtyRef}
-                  style={styles.stockInput}
-                  value={stockQty}
-                  onChangeText={edit(setStockQty)}
-                  // Loose/weighed items are counted in fractions of a Kg or Ltr;
-                  // everything else is whole units.
-                  decimals={isFraction}
-                  placeholder="0"
-                  placeholderTextColor={colors.hint}
-                />
-              </Pressable>
+            <FeatureCard
+              icon="cube-outline"
+              label="Track stock"
+              on={trackStock}
+              onToggle={(next) => {
+                if (!next && (existing?.stockQuantity ?? 0) > 0) {
+                  Alert.alert(
+                    "Stock still available",
+                    "Remove the remaining stock before turning tracking off.",
+                  );
+                  return;
+                }
+                setTrackStock(next);
+                setTouched(true);
+              }}
+            >
+              {existing?.stockQuantity != null ? (
+                <Pressable
+                  style={styles.stockUpdateRow}
+                  onPress={() => openStockUpdate()}
+                  android_ripple={{ color: "#00000010" }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.stockLabel}>Stock available</Text>
+                    <Text style={styles.stockUpdateHint}>Tap the number to add, remove, or see history</Text>
+                  </View>
+                  <Text style={styles.stockUpdateValue}>{stockQty}</Text>
+                  <Ionicons name="chevron-forward" size={20} color={colors.primary} />
+                </Pressable>
+              ) : (
+                /* A newly tracked item still needs an opening balance. Every
+                   later change goes through the dedicated stock workflow. */
+                <Pressable
+                  style={styles.stockRow}
+                  accessible={false}
+                  onPress={() => stockQtyRef.current?.focus()}
+                >
+                  <Text style={styles.stockLabel}>Opening quantity</Text>
+                  <NumberInput
+                    ref={stockQtyRef}
+                    style={styles.stockInput}
+                    value={stockQty}
+                    onChangeText={edit(setStockQty)}
+                    decimals={isFraction}
+                    placeholder="0"
+                    placeholderTextColor={colors.hint}
+                  />
+                </Pressable>
+              )}
               <Pressable
                 style={styles.stockRow}
                 accessible={false}
@@ -442,6 +538,11 @@ export default function ItemEditorScreen() {
                 total={variants.length}
                 measureUnit={isFraction ? measure.unit : undefined}
                 onPress={() => setEditingVariant(v)}
+                onStockPress={
+                  existing?.variants?.find((variant) => variant.id === v.id)?.stock != null
+                    ? () => openStockUpdate(v.id)
+                    : undefined
+                }
                 onMove={(dir) => {
                   setTouched(true);
                   setVariants((prev) => {
@@ -585,11 +686,31 @@ export default function ItemEditorScreen() {
           setVariants((prev) => (prev.some((x) => x.id === v.id) ? prev.map((x) => (x.id === v.id ? v : x)) : [...prev, v]));
           setEditingVariant(null);
         }}
+        onUpdateStock={
+          editingVariant &&
+          existing?.variants?.find((variant) => variant.id === editingVariant.id)?.stock != null
+            ? () => {
+                const variantId = editingVariant.id;
+                setEditingVariant(null);
+                requestAnimationFrame(() => openStockUpdate(variantId));
+              }
+            : undefined
+        }
         onDelete={
           editingVariant && variants.some((x) => x.id === editingVariant.id)
             ? () => {
+                const persisted = existing?.variants?.find(
+                  (variant) => variant.id === editingVariant.id,
+                );
+                if ((persisted?.stock ?? 0) > 0) {
+                  Alert.alert(
+                    "Stock still available",
+                    "Remove this variant's remaining stock before deleting it.",
+                  );
+                  return;
+                }
                 setTouched(true);
-                setVariants((prev) => prev.filter((x) => x.id !== editingVariant!.id));
+                setVariants((prev) => prev.filter((x) => x.id !== editingVariant.id));
                 setEditingVariant(null);
               }
             : undefined
@@ -606,6 +727,7 @@ function VariantCard({
   total,
   measureUnit,
   onPress,
+  onStockPress,
   onMove,
 }: {
   variant: Variant;
@@ -613,6 +735,7 @@ function VariantCard({
   total: number;
   measureUnit?: string;
   onPress: () => void;
+  onStockPress?: () => void;
   onMove: (dir: -1 | 1) => void;
 }) {
   const flags: { icon: number; on: boolean }[] = [
@@ -642,6 +765,7 @@ function VariantCard({
         <Figure
           label={`Stock Available${measureUnit ? ` (${measureUnit})` : ""}`}
           value={variant.stock != null ? String(variant.stock) : "-"}
+          onPress={onStockPress}
         />
       </View>
 
@@ -666,14 +790,30 @@ function VariantCard({
   );
 }
 
-function Figure({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={{ flex: 1 }}>
+function Figure({ label, value, onPress }: { label: string; value: string; onPress?: () => void }) {
+  const content = (
+    <>
       <Text style={styles.figureLabel} numberOfLines={1}>
         {label}
       </Text>
-      <Text style={styles.figureValue}>{value}</Text>
-    </View>
+      <View style={styles.figureValueRow}>
+        <Text style={[styles.figureValue, onPress && styles.figureValueLink]}>{value}</Text>
+        {onPress ? <Ionicons name="open-outline" size={13} color={colors.primary} /> : null}
+      </View>
+    </>
+  );
+  return onPress ? (
+    <Pressable
+      style={{ flex: 1 }}
+      onPress={(event) => {
+        event.stopPropagation();
+        onPress();
+      }}
+    >
+      {content}
+    </Pressable>
+  ) : (
+    <View style={{ flex: 1 }}>{content}</View>
   );
 }
 
@@ -757,6 +897,16 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   stockLabel: { flex: 1, fontSize: 15, color: colors.grey800 },
+  stockUpdateRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.grey300,
+  },
+  stockUpdateHint: { color: colors.grey500, fontSize: 10, marginTop: 2 },
+  stockUpdateValue: { color: colors.primaryDark, fontSize: 20, fontWeight: "900" },
   stockInput: {
     minWidth: 76,
     borderBottomWidth: 1,
@@ -809,7 +959,9 @@ const styles = StyleSheet.create({
     borderColor: colors.grey200,
   },
   figureLabel: { fontSize: 12, color: colors.grey600 },
-  figureValue: { fontSize: 14, color: colors.grey700, marginTop: 4 },
+  figureValueRow: { flexDirection: "row", alignItems: "center", gap: 3, marginTop: 4 },
+  figureValue: { fontSize: 14, color: colors.grey700 },
+  figureValueLink: { color: colors.primaryDark, fontWeight: "800" },
   variantFlags: {
     flexDirection: "row",
     alignItems: "center",

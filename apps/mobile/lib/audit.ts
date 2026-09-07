@@ -16,13 +16,18 @@ import { loadAll, put as dbPut } from "./db";
  * through every call site.
  */
 
-type Actor = { id: string; name: string; role: StoreRole };
+export type AuditActor = { id: string; name: string; email?: string; role: StoreRole };
 
-let currentActor: Actor | null = null;
+let currentActor: AuditActor | null = null;
 
 /** Auth keeps this current with the signed-in user + active-store role. */
-export function setAuditActor(actor: Actor | null): void {
+export function setAuditActor(actor: AuditActor | null): void {
   currentActor = actor;
+}
+
+/** Snapshot used by append-only domain records such as stock movements. */
+export function getAuditActor(): AuditActor | null {
+  return currentActor ? { ...currentActor } : null;
 }
 
 const uid = () => `aud_${Date.now()}_${Math.round(Math.random() * 1e6)}`;

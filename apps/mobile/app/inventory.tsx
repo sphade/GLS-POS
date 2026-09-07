@@ -7,7 +7,9 @@ import { colors, formatMoney } from "@/constants/theme";
 import { SwipeTabs } from "@/components/SwipeTabs";
 import { EntityListScreen, EntityRow } from "@/components/EntityListScreen";
 import { useCatalog } from "@/lib/catalog";
+import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
+import { formatStockQuantity, stockSummaryOf } from "@/lib/stock";
 
 const TABS = ["ITEMS", "CATEGORIES", "MODIFIERS", "INGREDIENTS"];
 
@@ -18,6 +20,8 @@ const TABS = ["ITEMS", "CATEGORIES", "MODIFIERS", "INGREDIENTS"];
 export default function InventoryScreen() {
   const router = useRouter();
   const { products, categories, modifiers, ingredients } = useCatalog();
+  const { can } = useAuth();
+  const canAdjustStock = can("inventory:adjust");
 
   /** Category name per id, so an item search can also match its category. */
   const categoryNameById = useMemo(
@@ -56,27 +60,33 @@ export default function InventoryScreen() {
                 addLabel="New Item"
                 onAdd={() => router.push("/item-editor")}
                 renderRow={(p) => {
-                  const tracked = p.stockQuantity !== null;
-                  const low = tracked && p.stockQuantity! <= (p.lowStockAt ?? 3);
-                  const out = tracked && p.stockQuantity === 0;
+                  const summary = stockSummaryOf(p);
+                  const variantCount = p.variants?.length ?? 0;
+                  const tracked = summary.targets.length > 0;
+                  /**
+                   * The stock number lives in the chip, so the subtitle must not
+                   * repeat it — price plus variant count is what the chip can't
+                   * say.
+                   */
+                  const subtitle = variantCount > 0
+                    ? `${formatMoney(p.price, p.currency)} · ${variantCount} variant${variantCount === 1 ? "" : "s"}`
+                    : formatMoney(p.price, p.currency);
                   return (
                     <EntityRow
                       initial={p.name.charAt(0).toUpperCase()}
                       color={p.categoryColor}
                       title={p.name}
-                      subtitle={`${formatMoney(p.price, p.currency)}${
-                        tracked ? ` · stock ${p.stockQuantity}` : " · no stock tracking"
-                      }`}
+                      subtitle={subtitle}
                       trailing={
-                        out ? (
-                          <View style={[styles.lowPill, { backgroundColor: colors.grey600 }]}>
-                            <Text style={styles.lowPillText}>OUT</Text>
-                          </View>
-                        ) : low ? (
-                          <View style={styles.lowPill}>
-                            <Text style={styles.lowPillText}>LOW</Text>
-                          </View>
-                        ) : undefined
+                        <StockStat
+                          quantity={tracked ? summary.totalQuantity : null}
+                          low={summary.low}
+                          out={summary.allOut}
+                          enabled={canAdjustStock && tracked}
+                          onPress={() =>
+                            router.push({ pathname: "/update-stock", params: { productId: p.id } })
+                          }
+                        />
                       }
                       onPress={() => router.push({ pathname: "/item-editor", params: { id: p.id } })}
                     />
@@ -171,6 +181,64 @@ export default function InventoryScreen() {
   );
 }
 
+/**
+ * The stock figure, and the way into the update-stock screen.
+ *
+ * A healthy item is plain text, not a badge: boxing every row's number turns a
+ * long list into visual noise and makes the one item that's actually running out
+ * no easier to spot. Only LOW and OUT get a filled pill, so the exceptions are
+ * what catch the eye.
+ *
+ * Deliberately no edit icon. The figure itself is the tap target, and the row
+ * already carries a chevron for the item editor — a second edit glyph beside it
+ * only invites tapping the wrong one.
+ */
+function StockStat({
+  quantity,
+  low,
+  out,
+  enabled,
+  onPress,
+}: {
+  /** null = this item does not track stock. */
+  quantity: number | null;
+  low: boolean;
+  out: boolean;
+  enabled: boolean;
+  onPress: () => void;
+}) {
+  if (quantity === null) {
+    return <Text style={styles.statUntracked}>Not tracked</Text>;
+  }
+
+  const flagged = out || low;
+  const tone = out ? colors.red800 : low ? colors.red500 : colors.grey900;
+
+  return (
+    <Pressable
+      style={styles.statWrap}
+      disabled={!enabled}
+      hitSlop={6}
+      accessibilityRole="button"
+      accessibilityLabel={`Update stock. ${formatStockQuantity(quantity)} in stock`}
+      onPress={(event) => {
+        event.stopPropagation();
+        feedbackTap();
+        onPress();
+      }}
+    >
+      <Text style={[styles.statValue, { color: tone }]}>{formatStockQuantity(quantity)}</Text>
+      {flagged ? (
+        <View style={[styles.statPill, { backgroundColor: out ? colors.red800 : colors.red500 }]}>
+          <Text style={styles.statPillText}>{out ? "OUT" : "LOW"}</Text>
+        </View>
+      ) : (
+        <Text style={styles.statCaption}>in stock</Text>
+      )}
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
   toolbar: {
@@ -183,6 +251,12 @@ const styles = StyleSheet.create({
   },
   toolbarBtn: { width: 44, alignItems: "center" },
   toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
+  statWrap: { alignItems: "flex-end", minWidth: 46, paddingRight: 6, paddingVertical: 2 },
+  statValue: { fontSize: 18, fontWeight: "800" },
+  statCaption: { fontSize: 10, color: colors.grey500, marginTop: 1 },
+  statPill: { borderRadius: 3, paddingHorizontal: 5, paddingVertical: 1, marginTop: 2 },
+  statPillText: { fontSize: 9, fontWeight: "800", color: colors.white, letterSpacing: 0.5 },
+  statUntracked: { fontSize: 11, color: colors.grey500, paddingRight: 6 },
   lowPill: { backgroundColor: colors.red500, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
   lowPillText: { color: colors.white, fontSize: 10, fontWeight: "800" },
 });

@@ -70,6 +70,25 @@ function open(storeId: string): SQLite.SQLiteDatabase {
     );
     database.execSync(`CREATE INDEX IF NOT EXISTS ${c}_dirty_idx ON ${c} (dirty);`);
   }
+
+  /**
+   * Expression index behind the paginated stock timeline (see `loadDocsPage`).
+   * Without it, filtering an append-only log by product means a full scan that
+   * decodes every row's JSON; with it, a page is an index seek. Wrapped because
+   * expression indexes need a modern SQLite — the query still works unindexed.
+   */
+  try {
+    database.execSync(
+      `CREATE INDEX IF NOT EXISTS stock_movements_product_at_idx
+         ON stock_movements (
+           json_extract(data, '$.productId'),
+           json_extract(data, '$.variantId'),
+           json_extract(data, '$.at') DESC
+         );`,
+    );
+  } catch {
+    /* older SQLite without expression-index support */
+  }
   database.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
 
   handles.set(storeId, database);
@@ -146,6 +165,64 @@ export function loadIds(c: Collection): string[] {
     .map((r) => r.id);
 }
 
+/** Only simple identifiers may reach SQL; JSON paths are built, not passed in. */
+const SAFE_FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const jsonPath = (field: string): string => {
+  if (!SAFE_FIELD.test(field)) throw new Error(`Unsafe document field: ${field}`);
+  return `json_extract(data, '$.${field}')`;
+};
+
+/**
+ * One page of documents filtered by top-level JSON fields, ordered by a JSON
+ * field, plus the total number of matches.
+ *
+ * The alternative — `loadAll` then filter/slice in JS — parses every document in
+ * the collection on every read. For an append-only log like `stock_movements`
+ * that grows with every sale, that is the whole store's history parsed to show
+ * ten rows, on the same thread the keyboard is typing on. SQLite does the
+ * filtering, ordering, counting and limiting here instead, so cost tracks the
+ * page size rather than the history length.
+ *
+ * A `null` filter value matches documents where the field is absent or null.
+ */
+export function loadDocsPage<T>(
+  c: Collection,
+  filters: Record<string, string | null>,
+  order: { field: string; direction: "asc" | "desc" },
+  page: { limit: number; offset: number },
+): { rows: T[]; total: number } {
+  const db = conn();
+  const clauses = ["deleted = 0"];
+  const params: string[] = [];
+
+  for (const [field, value] of Object.entries(filters)) {
+    if (value === null) {
+      clauses.push(`${jsonPath(field)} IS NULL`);
+    } else {
+      clauses.push(`${jsonPath(field)} = ?`);
+      params.push(value);
+    }
+  }
+
+  const where = clauses.join(" AND ");
+  const direction = order.direction === "asc" ? "ASC" : "DESC";
+  const total =
+    db.getFirstSync<{ n: number }>(`SELECT COUNT(*) AS n FROM ${c} WHERE ${where}`, ...params)?.n ?? 0;
+
+  const rows = db.getAllSync<{ data: string }>(
+    `SELECT data FROM ${c}
+     WHERE ${where}
+     ORDER BY ${jsonPath(order.field)} ${direction}, id ${direction}
+     LIMIT ? OFFSET ?`,
+    ...params,
+    Math.max(0, page.limit),
+    Math.max(0, page.offset),
+  );
+
+  return { rows: rows.map((r) => JSON.parse(r.data) as T), total };
+}
+
 /** All live (non-deleted) records of a collection, in insertion order. */
 export function loadAll<T>(c: Collection): T[] {
   const db = conn();
@@ -168,22 +245,54 @@ const notifyLocalWrite = () => {
   if (localWriteListener) localWriteListener();
 };
 
-/** Insert or update a record; marks it dirty for the next sync. */
-export function put<T extends { id: string }>(c: Collection, item: T, dirty = true) {
-  const db = conn();
+type DirtyMode = boolean | "preserve";
+
+/** Write one row through a specific handle without notifying sync. */
+function putOn<T extends { id: string }>(
+  db: SQLite.SQLiteDatabase,
+  c: Collection,
+  item: T,
+  dirty: DirtyMode,
+): void {
+  const preserveDirty = dirty === "preserve";
   db.runSync(
     `INSERT INTO ${c} (id, data, updated_at, deleted, dirty) VALUES (?, ?, ?, 0, ?)
      ON CONFLICT(id) DO UPDATE SET
        data = excluded.data,
        updated_at = MAX(excluded.updated_at, updated_at + 1),
        deleted = 0,
-       dirty = excluded.dirty`,
+       dirty = CASE WHEN ? = 1 THEN dirty ELSE excluded.dirty END`,
     item.id,
     JSON.stringify(item),
     Date.now(),
-    dirty ? 1 : 0,
+    dirty === true ? 1 : 0,
+    preserveDirty ? 1 : 0,
   );
+}
+
+/** Insert or update a record; marks it dirty for the next sync. */
+export function put<T extends { id: string }>(c: Collection, item: T, dirty = true) {
+  putOn(conn(), c, item, dirty);
   if (dirty) notifyLocalWrite();
+}
+
+/**
+ * Commit related document writes together and wake sync once after the commit.
+ * Stock adjustments use this so the materialized product quantity can never be
+ * persisted without its append-only movement (or vice versa).
+ */
+export function putBatch(
+  writes: readonly { collection: Collection; item: { id: string }; dirty?: DirtyMode }[],
+  dirty = true,
+): void {
+  if (writes.length === 0) return;
+  const db = conn();
+  db.withTransactionSync(() => {
+    for (const write of writes) {
+      putOn(db, write.collection, write.item, write.dirty ?? dirty);
+    }
+  });
+  if (writes.some((write) => (write.dirty ?? dirty) === true)) notifyLocalWrite();
 }
 
 /** Soft-delete (tombstone) so the deletion can sync. */
@@ -257,8 +366,18 @@ function applyRemoteOn<T extends { id: string }>(
     `SELECT updated_at, dirty FROM ${c} WHERE id = ?`,
     change.id,
   );
-  // Don't clobber a newer local edit that hasn't synced yet.
-  if (local && local.dirty === 1 && local.updated_at >= change.updatedAt) return;
+  // Don't clobber a newer local edit that hasn't synced yet. Stock movements
+  // are the exception: they are append-only and server-normalized, so an
+  // existing server row with the same id is the canonical acknowledgement of
+  // that command and must replace/clean the optimistic local copy.
+  if (
+    local &&
+    local.dirty === 1 &&
+    local.updated_at >= change.updatedAt &&
+    c !== "stock_movements"
+  ) {
+    return;
+  }
   db.runSync(
     `INSERT INTO ${c} (id, data, updated_at, deleted, dirty) VALUES (?, ?, ?, ?, 0)
      ON CONFLICT(id) DO UPDATE SET

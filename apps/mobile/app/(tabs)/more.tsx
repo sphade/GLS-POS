@@ -12,6 +12,7 @@ import { useStore } from "@/lib/store";
 import { useServerRefresh } from "@/lib/sync";
 import { useWebOrders } from "@/lib/web-orders";
 import { feedbackTap } from "@/lib/feedback";
+import { stockSummaryOf } from "@/lib/stock";
 import type { Permission } from "@gls-pos/types";
 
 const CURRENCY = "NGN";
@@ -59,9 +60,10 @@ export default function MoreScreen() {
     };
   }, [store.id, can]);
 
-  const lowStock = products.filter((i) => i.stockQuantity !== null && i.stockQuantity <= 3).length;
-  // Real stock valuation at selling price. (No fabricated "cost price" estimate.)
-  const stockSell = products.reduce((s, i) => s + (i.stockQuantity ?? 0) * i.price, 0);
+  const stockSummaries = products.map(stockSummaryOf);
+  const lowStock = stockSummaries.filter((summary) => summary.low).length;
+  // Real stock valuation at each simple/variant selling price.
+  const stockSell = stockSummaries.reduce((sum, summary) => sum + summary.retailValue, 0);
 
   const allCards: Card[] = [
     {

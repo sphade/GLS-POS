@@ -41,6 +41,7 @@ import {
 import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
+import { stockHintOf } from "@/lib/stock";
 
 const CURRENT_ID = "__current_order__";
 const CURRENT_LABEL = "CURRENT ORDER";
@@ -433,6 +434,7 @@ const CatalogRow = memo(function CatalogRow({
   const qty = useItemQty(item.id);
   const available = itemAvailable(item);
   const displayPrice = itemDisplayPrice(item);
+  const stock = stockHintOf(item);
 
   return (
     <Pressable
@@ -449,6 +451,11 @@ const CatalogRow = memo(function CatalogRow({
           {formatMoney(displayPrice, item.currency)}
           {!available ? " · Out of stock" : ""}
         </Text>
+        {stock && (
+          <Text style={[styles.itemStock, stock.low && styles.itemStockLow]} numberOfLines={1}>
+            {stock.label}
+          </Text>
+        )}
       </View>
       <Text style={[styles.itemQty, qty > 0 && styles.itemQtyActive]}>x {qty}</Text>
     </Pressable>
@@ -640,6 +647,9 @@ const styles = StyleSheet.create({
   itemMain: { flex: 1 },
   itemName: { fontSize: 17, color: colors.grey900, fontWeight: "500" },
   itemPrice: { fontSize: 14, color: colors.grey600, marginTop: 4 },
+  /** Quieter than the name and price — a glance-check, not a headline. */
+  itemStock: { fontSize: 11, fontWeight: "600", color: colors.grey500, marginTop: 3 },
+  itemStockLow: { color: colors.lowStock, fontWeight: "800" },
   itemQty: { fontSize: 18, fontWeight: "700", color: colors.grey700 },
   itemQtyActive: { color: colors.primary },
 

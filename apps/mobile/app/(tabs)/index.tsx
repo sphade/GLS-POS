@@ -44,6 +44,7 @@ import { useStore } from "@/lib/store";
 import { ItemImage } from "@/components/ItemImage";
 import { EmptyState } from "@/components/EmptyState";
 import { warmImageCache } from "@/lib/image-store";
+import { stockHintOf } from "@/lib/stock";
 import { metaGet, metaSet } from "@/lib/db";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
@@ -678,6 +679,7 @@ const ProductCard = memo(function ProductCard({
   const circle = Math.min(width - 28, 78);
   const out = !itemAvailable(item);
   const displayPrice = itemDisplayPrice(item);
+  const stock = stockHintOf(item);
   // Band spans the full card width but only the image area's height (+ padding).
   const bandHeight = circle + 20;
   return (
@@ -699,6 +701,12 @@ const ProductCard = memo(function ProductCard({
       <Text style={styles.price} numberOfLines={1}>
         {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
       </Text>
+      {/* Deliberately absent when untracked or out of stock — see stockHintOf. */}
+      {stock && (
+        <Text style={[styles.stockLeft, stock.low && styles.stockLeftLow]} numberOfLines={1}>
+          {stock.label}
+        </Text>
+      )}
 
       {/* Full-width band over the image area only — leaves name/price clear */}
       {out && (
@@ -729,6 +737,7 @@ const ProductRow = memo(function ProductRow({
   const qty = useItemQty(item.id);
   const out = !itemAvailable(item);
   const displayPrice = itemDisplayPrice(item);
+  const stock = stockHintOf(item);
   return (
     <Pressable
       style={styles.row}
@@ -757,6 +766,14 @@ const ProductRow = memo(function ProductRow({
         <Text style={[styles.price, { textAlign: "left", marginTop: 2 }]}>
           {hasVariants(item) ? "From " : ""}{formatMoney(displayPrice, item.currency)}
         </Text>
+        {stock && (
+          <Text
+            style={[styles.stockLeft, { textAlign: "left" }, stock.low && styles.stockLeftLow]}
+            numberOfLines={1}
+          >
+            {stock.label}
+          </Text>
+        )}
       </View>
       {out && <Text style={styles.rowOosText}>Out of stock</Text>}
     </Pressable>
@@ -927,6 +944,20 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   price: { fontSize: 15, color: colors.primary, fontWeight: "500", marginTop: 6, textAlign: "center" },
+  /**
+   * Small on purpose: stock is a glance-check while selling, not the headline.
+   * It has to stay quieter than the name and price or every tile reads as an
+   * alert.
+   */
+  stockLeft: {
+    fontSize: 10,
+    fontWeight: "600",
+    color: colors.grey500,
+    letterSpacing: 0.2,
+    marginTop: 3,
+    textAlign: "center",
+  },
+  stockLeftLow: { color: colors.lowStock, fontWeight: "800" },
 
   newItemCard: { justifyContent: "center" },
   newItemPlus: {

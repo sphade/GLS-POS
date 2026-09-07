@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -124,6 +124,7 @@ export function VariantEditor({
   onClose,
   onSave,
   onDelete,
+  onUpdateStock,
 }: {
   visible: boolean;
   variant: Variant | null;
@@ -132,11 +133,18 @@ export function VariantEditor({
   onClose: () => void;
   onSave: (v: Variant) => void;
   onDelete?: () => void;
+  /** Existing tracked balances are adjusted in the dedicated audited workflow. */
+  onUpdateStock?: () => void;
 }) {
   const [draft, setDraft] = useState<Variant | null>(variant);
 
-  // Re-seed when a different variant is opened.
-  if (visible && variant && draft?.id !== variant.id) setDraft(variant);
+  // Re-seed on every open and whenever the authoritative same-id variant is
+  // replaced after a stock update. Depending only on the id leaves stale stock
+  // in this draft and can overwrite a movement-backed balance on the next save.
+  useEffect(() => {
+    setDraft(variant);
+  }, [visible, variant]);
+
   if (!visible || !draft) return null;
 
   const set = <K extends keyof Variant>(key: K, value: Variant[K]) =>
@@ -230,14 +238,27 @@ export function VariantEditor({
           {/* Stock */}
           <View style={styles.card}>
             <View style={styles.splitRow}>
-              <Labelled
-                label={`Stock Available${sellByFraction && measureUnit ? ` (${measureUnit})` : ""}`}
-                hint="0"
-                value={draft.stock != null ? String(draft.stock) : ""}
-                onChangeText={(t) => set("stock", parseFloat(t) || 0)}
-                keyboardType="numeric"
-                decimals={sellByFraction}
-              />
+              {onUpdateStock ? (
+                <Pressable style={styles.stockUpdateField} onPress={onUpdateStock}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.smallLabel}>
+                      Stock Available{sellByFraction && measureUnit ? ` (${measureUnit})` : ""}
+                    </Text>
+                    <Text style={styles.stockUpdateValue}>{draft.stock}</Text>
+                    <Text style={styles.stockUpdateHint}>Tap to add, remove, or view history</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={21} color={colors.primary} />
+                </Pressable>
+              ) : (
+                <Labelled
+                  label={`Stock Available${sellByFraction && measureUnit ? ` (${measureUnit})` : ""}`}
+                  hint="0"
+                  value={draft.stock != null ? String(draft.stock) : ""}
+                  onChangeText={(t) => set("stock", parseFloat(t) || 0)}
+                  keyboardType="numeric"
+                  decimals={sellByFraction}
+                />
+              )}
               <View style={styles.checkCol}>
                 <Text style={styles.smallLabel}>Low stock alerts?</Text>
                 <CheckBox value={draft.lowStockAlert} onChange={(v) => set("lowStockAlert", v)} />
@@ -366,6 +387,17 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
 
+  stockUpdateField: {
+    flex: 1,
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderColor: colors.primary,
+    paddingBottom: 4,
+  },
+  stockUpdateValue: { color: colors.primaryDark, fontSize: 19, fontWeight: "800" },
+  stockUpdateHint: { color: colors.grey500, fontSize: 10, marginTop: 2 },
   smallLabel: { fontSize: 12, color: colors.grey600, marginBottom: 4 },
   filledInput: {
     backgroundColor: colors.grey100,

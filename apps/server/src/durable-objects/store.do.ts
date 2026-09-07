@@ -10,6 +10,7 @@ import type {
   Permission,
   PlaceWebOrderRequest,
   PublicMenu,
+  StockMovement,
   StockState,
   StoreRole,
   SyncChange,
@@ -80,6 +81,8 @@ type StoredProduct = {
   barcode?: string;
   stockQuantity: number | null;
   lowStockAt?: number;
+  autoUpdateStock?: boolean;
+  sellBy?: "unit" | "fraction";
   variants?: {
     id: string;
     name: string;
@@ -87,6 +90,7 @@ type StoredProduct = {
     price: number;
     /** Undefined/null means stock is not tracked for this variant. */
     stock?: number | null;
+    autoUpdateStock?: boolean;
   }[];
 };
 
@@ -114,6 +118,95 @@ export function stockStateOf(p: {
   return stock <= (p.lowStockAt ?? 3) ? "low_stock" : "in_stock";
 }
 
+const MOVEMENT_REASONS = new Set<StockMovement["reason"]>([
+  "sale",
+  "adjustment",
+  "initial",
+  "restock",
+  "return",
+  "waste",
+]);
+
+/** Runtime guard for the otherwise opaque sync document boundary. */
+function stockMovementOf(value: unknown): StockMovement | null {
+  if (!value || typeof value !== "object") return null;
+  const movement = value as Partial<StockMovement>;
+  if (
+    typeof movement.id !== "string" ||
+    !movement.id ||
+    typeof movement.productId !== "string" ||
+    !movement.productId ||
+    typeof movement.productName !== "string" ||
+    !movement.productName ||
+    !MOVEMENT_REASONS.has(movement.reason as StockMovement["reason"]) ||
+    typeof movement.delta !== "number" ||
+    !Number.isFinite(movement.delta) ||
+    typeof movement.resulting !== "number" ||
+    !Number.isFinite(movement.resulting) ||
+    movement.resulting < 0 ||
+    typeof movement.at !== "number" ||
+    !Number.isFinite(movement.at) ||
+    (movement.variantId !== undefined && typeof movement.variantId !== "string") ||
+    (movement.variantName !== undefined && typeof movement.variantName !== "string") ||
+    (movement.baseStock !== undefined &&
+      (typeof movement.baseStock !== "number" || !Number.isFinite(movement.baseStock))) ||
+    (movement.requestedDelta !== undefined &&
+      (typeof movement.requestedDelta !== "number" || !Number.isFinite(movement.requestedDelta))) ||
+    (movement.ref !== undefined && typeof movement.ref !== "string") ||
+    (movement.actorId !== undefined && typeof movement.actorId !== "string") ||
+    (movement.actorName !== undefined && typeof movement.actorName !== "string") ||
+    (movement.actorEmail !== undefined && typeof movement.actorEmail !== "string") ||
+    (movement.actorRole !== undefined && typeof movement.actorRole !== "string") ||
+    (movement.autoUpdateStock !== undefined && typeof movement.autoUpdateStock !== "boolean") ||
+    (movement.note !== undefined &&
+      (typeof movement.note !== "string" || movement.note.length > 240))
+  ) {
+    return null;
+  }
+
+  // System reasons have fixed directions. A seller cannot increase inventory by
+  // labelling a positive operation as a sale; a refund cannot remove stock.
+  if (movement.reason === "sale" && movement.delta > 0) return null;
+  if (["initial", "restock", "return"].includes(movement.reason!) && movement.delta < 0) return null;
+  if (movement.reason === "waste" && movement.delta > 0) return null;
+  return movement as StockMovement;
+}
+
+function movementPermission(movement: StockMovement): Permission {
+  if (movement.reason === "sale") return "sale:create";
+  if (movement.reason === "return") return "sale:refund";
+  return "inventory:adjust";
+}
+
+/** Existing movement rows are immutable, except server-corrected balance fields. */
+function isMovementRetry(storedJson: string, incoming: StockMovement): boolean {
+  const stored = stockMovementOf(JSON.parse(storedJson));
+  if (!stored) return false;
+  if (stored.id.startsWith("mov_initial_") && incoming.id === stored.id) {
+    return (
+      stored.reason === "initial" &&
+      incoming.reason === "initial" &&
+      stored.productId === incoming.productId &&
+      stored.variantId === incoming.variantId &&
+      (stored.requestedDelta ?? stored.delta) ===
+        (incoming.requestedDelta ?? incoming.delta)
+    );
+  }
+  return (
+    stored.id === incoming.id &&
+    stored.productId === incoming.productId &&
+    stored.productName === incoming.productName &&
+    stored.variantId === incoming.variantId &&
+    stored.variantName === incoming.variantName &&
+    stored.reason === incoming.reason &&
+    stored.at === incoming.at &&
+    (stored.requestedDelta ?? stored.delta) === (incoming.requestedDelta ?? incoming.delta) &&
+    stored.note === incoming.note &&
+    stored.ref === incoming.ref &&
+    stored.autoUpdateStock === incoming.autoUpdateStock
+  );
+}
+
 type DocumentRow = typeof schema.documents.$inferSelect;
 
 /** Permission needed to write each collection outright. */
@@ -129,7 +222,7 @@ const WRITE_PERMISSION: Record<string, Permission> = {
   // Credit notes reverse money, so they need the refund permission — a cashier
   // who can sell still cannot push a return.
   returns: "sale:refund",
-  stock_movements: "sale:create",
+  stock_movements: "inventory:adjust",
   product_images: "catalog:write",
   // Staff advance a web order through preparing → ready → served while selling.
   web_orders: "sale:create",
@@ -214,6 +307,12 @@ function isStockDecrementOnly(prev: unknown, next: unknown): boolean {
  * exceptions lose their type across the DO RPC boundary, so a plain result
  * keeps the 403 distinguishable from a genuine 500.
  */
+export type StockActor = {
+  id: string;
+  name: string;
+  email?: string;
+};
+
 export type PushResult = {
   /** Collections the caller's role may not write. Empty means the push applied. */
   denied: string[];
@@ -341,14 +440,26 @@ export class StoreDurableObject extends DurableObject<Env> {
    * dropped only if the stored version is strictly newer. Each accepted write
    * gets the next monotonic `server_seq` so other devices pull it in order.
    */
-  async push(request: SyncPushRequest, role: StoreRole): Promise<PushResult> {
+  async push(
+    request: SyncPushRequest,
+    role: StoreRole,
+    actor?: StockActor,
+  ): Promise<PushResult> {
     // Authorise everything up front so a rejected push applies nothing. The DO
     // is single-threaded, so no other write can interleave between the checks
     // and the writes below.
     const stored = new Map<string, { updatedAt: number; data: string } | undefined>();
     const denied: string[] = [];
+    const incomingMovementIds = new Set<string>();
 
     for (const change of request.changes) {
+      if (change.collection === "stock_movements") {
+        if (incomingMovementIds.has(change.id)) {
+          denied.push(change.collection);
+          continue;
+        }
+        incomingMovementIds.add(change.id);
+      }
       const key = `${change.collection}/${change.id}`;
       const [existing] = this.db
         .select({ updatedAt: schema.documents.updatedAt, data: schema.documents.data })
@@ -378,18 +489,12 @@ export class StoreDurableObject extends DurableObject<Env> {
     // ones we've never seen before (idempotent on retry). Captured against the
     // pre-push state, and applied after all product docs are written below.
     const newMovements: SyncChange[] = [];
+    const newMovementIds = new Set<string>();
     const now = Date.now();
 
-    // NOTE: these SQLite statements auto-commit individually; we deliberately
-    // avoid ctx.storage.transaction() around them (the KV-style transaction API
-    // does not cover the SQL view, and wrapping sync SQL in it risks hangs).
-    // Correctness without one transaction comes from idempotency instead:
-    //  - MAX(server_seq) sequencing means a partially-applied push strands no
-    //    sequence numbers and none are reused;
-    //  - the client keeps every row of a failed batch dirty and resends it,
-    //    where already-applied docs resolve to no-ops under LWW;
-    //  - movement deltas apply exactly once because they are keyed by the
-    //    movement's own id (`!existing` guard below).
+    // All SQL below is synchronous and there is no `await` between statements.
+    // SQLite-backed Durable Objects coalesce such writes into one atomic storage
+    // transaction, while movement ids still make whole-request retries safe.
     let seq = this.currentSeq();
 
     for (const change of request.changes) {
@@ -397,6 +502,11 @@ export class StoreDurableObject extends DurableObject<Env> {
       // Clamp future-dated client clocks so one fast device cannot pin a
       // document ahead of every other device's edits.
       const updatedAt = Math.min(change.updatedAt, now + CLOCK_SKEW_MS);
+
+      // Stock movements are append-only commands. Once an id exists, a retry
+      // may acknowledge it but must never replace the server-normalized
+      // before/after balance or its server-stamped actor snapshot.
+      if (change.collection === "stock_movements" && existing) continue;
 
       // Stored version is newer or equal — keep it, drop the incoming change.
       // Ties favour the server copy, which every device sees identically.
@@ -407,15 +517,26 @@ export class StoreDurableObject extends DurableObject<Env> {
       // last-write-wins. Stock is preserved from the server's current value
       // (0 for a brand-new tracked product) and only moved by the movement log.
       let data = change.data;
+      if (change.collection === "stock_movements" && !change.deleted && actor) {
+        data = {
+          ...(change.data as StockMovement),
+          actorId: actor.id,
+          actorName: actor.name,
+          actorEmail: actor.email,
+          actorRole: role,
+        };
+      }
       if (change.collection === "products" && !change.deleted) {
         data = this.sanitizeProductStock(change.data, existing?.data);
       }
       if (
         change.collection === "stock_movements" &&
         !existing &&
-        !change.deleted
+        !change.deleted &&
+        !newMovementIds.has(change.id)
       ) {
-        newMovements.push(change);
+        newMovementIds.add(change.id);
+        newMovements.push({ ...change, data });
       }
 
       seq += 1;
@@ -472,6 +593,14 @@ export class StoreDurableObject extends DurableObject<Env> {
    *    straight into the document.
    */
   private mayWrite(change: SyncChange, role: StoreRole, storedJson?: string): boolean {
+    if (change.collection === "stock_movements") {
+      if (change.deleted) return false;
+      const movement = stockMovementOf(change.data);
+      if (!movement || movement.id !== change.id || movement.delta === 0) return false;
+      if (storedJson && !isMovementRetry(storedJson, movement)) return false;
+      return roleCan(role, movementPermission(movement));
+    }
+
     const required = WRITE_PERMISSION[change.collection];
     if (!required) return false;
 
@@ -579,12 +708,8 @@ export class StoreDurableObject extends DurableObject<Env> {
    * stock. Untracked stock (null) is left alone. Returns the advanced seq.
    */
   private applyMovementDelta(movement: SyncChange, seq: number): number {
-    const data = movement.data as {
-      productId?: string;
-      variantId?: string;
-      delta?: number;
-    };
-    if (!data?.productId || typeof data.delta !== "number" || data.delta === 0) return seq;
+    const data = stockMovementOf(movement.data);
+    if (!data || data.delta === 0) return seq;
 
     const [row] = this.db
       .select({ data: schema.documents.data })
@@ -599,37 +724,89 @@ export class StoreDurableObject extends DurableObject<Env> {
     if (!row) return seq; // can't move stock for a product the store doesn't have
 
     const product = JSON.parse(row.data) as StoredProduct;
-    let changed = false;
+    const precision = product.sellBy === "fraction" ? 1000 : 1;
+    const rounded = (value: number) => Math.round(value * precision) / precision;
+    let before: number | undefined;
+    let resulting: number | undefined;
+    let settingChanged = false;
 
     if (data.variantId) {
-      const variant = product.variants?.find((v) => v.id === data.variantId);
+      const variant = product.variants?.find((candidate) => candidate.id === data.variantId);
       if (variant && variant.stock !== null && variant.stock !== undefined) {
-        variant.stock = Math.max(0, variant.stock + data.delta);
-        changed = true;
+        before = variant.stock;
+        resulting = rounded(Math.max(0, variant.stock + data.delta));
+        variant.stock = resulting;
+        if (typeof data.autoUpdateStock === "boolean") {
+          settingChanged = variant.autoUpdateStock !== data.autoUpdateStock;
+          variant.autoUpdateStock = data.autoUpdateStock;
+        }
       }
     } else if (product.stockQuantity !== null && product.stockQuantity !== undefined) {
-      product.stockQuantity = Math.max(0, product.stockQuantity + data.delta);
-      changed = true;
+      before = product.stockQuantity;
+      resulting = rounded(Math.max(0, product.stockQuantity + data.delta));
+      product.stockQuantity = resulting;
+      if (typeof data.autoUpdateStock === "boolean") {
+        settingChanged = product.autoUpdateStock !== data.autoUpdateStock;
+        product.autoUpdateStock = data.autoUpdateStock;
+      }
     }
 
-    if (!changed) return seq;
+    if (before === undefined || resulting === undefined) return seq;
 
-    const nextSeq = seq + 1;
+    let nextSeq = seq;
+    const now = Date.now();
+    const canonicalUpdatedAt = Math.max(
+      now,
+      Math.min(movement.updatedAt, now + CLOCK_SKEW_MS),
+    );
+    if (resulting !== before || settingChanged) {
+      nextSeq += 1;
+      this.db
+        .insert(schema.documents)
+        .values({
+          collection: "products",
+          id: product.id,
+          data: JSON.stringify(product),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: nextSeq,
+        })
+        .onConflictDoUpdate({
+          target: [schema.documents.collection, schema.documents.id],
+          set: { data: JSON.stringify(product), updatedAt: now, serverSeq: nextSeq },
+        })
+        .run();
+    }
+
+    // Replace the device's optimistic after-value with what this single-writer
+    // store actually applied. If concurrent/offline activity forced a clamp,
+    // retain the requested delta separately so the history remains explainable.
+    const actualDelta = resulting - before;
+    const normalized: StockMovement = {
+      ...data,
+      baseStock: before,
+      delta: actualDelta,
+      resulting,
+      ...(actualDelta !== data.delta
+        ? { requestedDelta: data.requestedDelta ?? data.delta }
+        : {}),
+    };
+    nextSeq += 1;
     this.db
-      .insert(schema.documents)
-      .values({
-        collection: "products",
-        id: product.id,
-        data: JSON.stringify(product),
-        updatedAt: Date.now(),
-        deleted: false,
+      .update(schema.documents)
+      .set({
+        data: JSON.stringify(normalized),
+        updatedAt: canonicalUpdatedAt,
         serverSeq: nextSeq,
       })
-      .onConflictDoUpdate({
-        target: [schema.documents.collection, schema.documents.id],
-        set: { data: JSON.stringify(product), updatedAt: Date.now(), serverSeq: nextSeq },
-      })
+      .where(
+        and(
+          eq(schema.documents.collection, "stock_movements"),
+          eq(schema.documents.id, movement.id),
+        ),
+      )
       .run();
+
     return nextSeq;
   }
 
@@ -941,10 +1118,12 @@ export class StoreDurableObject extends DurableObject<Env> {
             productName: product.name,
             reason: adj.reason ?? "adjustment",
             delta: next - previous,
+            baseStock: previous,
             resulting: next,
             at: now,
             ref: `api:${source}`,
             note: adj.note,
+            actorName: `Integration · ${source}`,
           }),
           updatedAt: now,
           deleted: false,
