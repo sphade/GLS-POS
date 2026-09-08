@@ -57,7 +57,29 @@ function open(storeId: string): SQLite.SQLiteDatabase {
   if (existing) return existing;
 
   const database = SQLite.openDatabaseSync(fileFor(storeId));
+  /**
+   * Storage tuning, which matters most on the oldest hardware.
+   *
+   * `synchronous = FULL` (the default) fsyncs on every commit, and a sale is
+   * several commits — receipt, product, stock movements, audit. On slow eMMC
+   * that is tens of milliseconds each, paid on the JS thread while someone is
+   * punching in an order. `NORMAL` is the documented pairing for WAL: still
+   * corruption-safe, and only risks the last commits on an OS crash or power
+   * cut, which for a till that syncs to the server is a recoverable loss.
+   *
+   * The WAL is also capped and truncated on open. A day of heavy trading grows
+   * it steadily, and every reader pays to scan it — which is why the app gets
+   * slower through a shift and feels fresh again after a restart.
+   */
   database.execSync("PRAGMA journal_mode = WAL;");
+  database.execSync("PRAGMA synchronous = NORMAL;");
+  database.execSync("PRAGMA wal_autocheckpoint = 256;");
+  database.execSync("PRAGMA temp_store = MEMORY;");
+  try {
+    database.execSync("PRAGMA wal_checkpoint(TRUNCATE);");
+  } catch {
+    /* a busy WAL just gets checkpointed on the next open */
+  }
   for (const c of COLLECTIONS) {
     database.execSync(
       `CREATE TABLE IF NOT EXISTS ${c} (
@@ -399,6 +421,100 @@ function metaSetOn(db: SQLite.SQLiteDatabase, key: string, value: string) {
     key,
     value,
   );
+}
+
+/**
+ * Merge specific ids into an already-loaded, newest-first list.
+ *
+ * The point is what it avoids: re-reading a whole append-only collection just
+ * because a few rows arrived. Only the named ids are parsed, deletions drop
+ * out, and the result keeps its sort without re-sorting the entire history.
+ */
+export function mergeById<T extends { id: string }>(
+  current: readonly T[],
+  c: Collection,
+  ids: readonly string[],
+  sortKey: (row: T) => number,
+): T[] {
+  if (ids.length === 0) return current as T[];
+
+  const touched = new Set(ids);
+  const incoming: T[] = [];
+  for (const id of touched) {
+    const row = loadOne<T>(c, id);
+    if (row) incoming.push(row);
+  }
+
+  // Drop the old copies of everything touched, then splice the new ones in.
+  const kept = current.filter((row) => !touched.has(row.id));
+  if (incoming.length === 0) return kept.length === current.length ? (current as T[]) : kept;
+
+  incoming.sort((a, b) => sortKey(b) - sortKey(a));
+  const merged: T[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < kept.length && j < incoming.length) {
+    merged.push(sortKey(incoming[j]!) > sortKey(kept[i]!) ? incoming[j++]! : kept[i++]!);
+  }
+  while (i < kept.length) merged.push(kept[i++]!);
+  while (j < incoming.length) merged.push(incoming[j++]!);
+  return merged;
+}
+
+/**
+ * Merge specific ids into an already-loaded list, keeping its existing order.
+ *
+ * For the catalog, order is insertion order rather than a timestamp, so this
+ * replaces touched rows where they already sit, appends genuinely new ones, and
+ * drops any that were deleted. Returns the original array when nothing actually
+ * changed, so React can skip the render entirely.
+ */
+export function mergeInPlace<T extends { id: string }>(
+  current: readonly T[],
+  c: Collection,
+  ids: readonly string[],
+): T[] {
+  if (ids.length === 0) return current as T[];
+
+  const fetched = new Map<string, T | null>();
+  for (const id of new Set(ids)) fetched.set(id, loadOne<T>(c, id));
+
+  let changed = false;
+  const next: T[] = [];
+  for (const row of current) {
+    if (!fetched.has(row.id)) {
+      next.push(row);
+      continue;
+    }
+    const fresh = fetched.get(row.id) ?? null;
+    if (fresh === null) {
+      changed = true; // tombstoned elsewhere
+      continue;
+    }
+    /**
+     * Keep the previous object when the content is identical. A pull often
+     * re-sends a row that didn't really move (the server rewrites a product on
+     * every stock movement), and handing React a fresh object for it defeats
+     * `React.memo` on the item cards — the whole grid repaints for nothing.
+     */
+    if (JSON.stringify(fresh) === JSON.stringify(row)) {
+      next.push(row);
+    } else {
+      changed = true;
+      next.push(fresh);
+    }
+    fetched.set(row.id, null); // consumed; anything left is new
+  }
+
+  const existing = new Set(current.map((row) => row.id));
+  for (const [id, row] of fetched) {
+    if (row && !existing.has(id)) {
+      next.push(row);
+      changed = true;
+    }
+  }
+
+  return changed ? next : (current as T[]);
 }
 
 /** Rows changed locally since the last push. */

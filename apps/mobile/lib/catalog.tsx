@@ -11,6 +11,7 @@ import {
   loadAll,
   loadDocsPage,
   markAllDirty,
+  mergeInPlace,
   put as dbPut,
   putBatch,
   resetCollection,
@@ -322,56 +323,6 @@ function cleanupDemoData() {
   });
 }
 
-/**
- * One level deep, plus a value compare for the nested bits (`variants`,
- * `measure`). That's the full shape of a row as `loadAll` returns it.
- */
-function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-  const keys = Object.keys(a);
-  if (keys.length !== Object.keys(b).length) return false;
-  for (const key of keys) {
-    const left = a[key];
-    const right = b[key];
-    if (left === right) continue;
-    if (left && right && typeof left === "object" && typeof right === "object") {
-      if (JSON.stringify(left) !== JSON.stringify(right)) return false;
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
-/**
- * Swap in freshly-loaded rows while keeping the identity of everything that
- * didn't actually change.
- *
- * `loadAll` deserialises JSON, so every sync handed React brand-new objects for
- * every row — even a sync that pulled nothing at all. Downstream that reads as
- * "the whole catalog changed": `React.memo` on the item cards can't bail out,
- * the Items grid re-chunks and repaints end to end, and because a tab switch
- * fires a quiet pull, switching tabs visibly stuttered on slow hardware.
- * Reusing the previous object for unchanged rows — and the previous array when
- * no row moved — makes a no-op sync a genuine no-op for React.
- */
-function reconcile<T extends { id: string }>(previous: T[], next: T[]): T[] {
-  const byId = new Map(previous.map((row) => [row.id, row]));
-  let changed = previous.length !== next.length;
-  const merged = next.map((row, index) => {
-    const old = byId.get(row.id);
-    if (
-      old &&
-      shallowEqual(old as unknown as Record<string, unknown>, row as unknown as Record<string, unknown>)
-    ) {
-      if (previous[index] !== old) changed = true;
-      return old;
-    }
-    changed = true;
-    return row;
-  });
-  return changed ? merged : previous;
-}
-
 const CatalogContext = createContext<CatalogState | null>(null);
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
@@ -395,30 +346,31 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   // local mirror fills as history arrives.
   useEffect(() => {
     if (!SYNC_ENABLED) return;
-    return onSynced(({ pulledCollections }) => {
-      // Read only tables that actually received server rows. A receipt arriving
-      // on another till must not parse every product/category/staff document.
-      if (pulledCollections.has("products")) {
-        setProducts((prev) => reconcile(prev, loadAll<Item>("products")));
-      }
-      if (pulledCollections.has("categories")) {
-        setCategories((prev) => reconcile(prev, loadAll<Category>("categories")));
-      }
-      if (pulledCollections.has("modifiers")) {
-        setModifiers((prev) => reconcile(prev, loadAll<ModifierGroup>("modifiers")));
-      }
-      if (pulledCollections.has("ingredients")) {
-        setIngredients((prev) => reconcile(prev, loadAll<Ingredient>("ingredients")));
-      }
-      if (pulledCollections.has("tables")) {
-        setTables((prev) => reconcile(prev, loadAll<Table>("tables")));
-      }
-      if (pulledCollections.has("customers")) {
-        setCustomers((prev) => reconcile(prev, loadAll<Customer>("customers")));
-      }
-      if (pulledCollections.has("staff")) {
-        setStaff((prev) => reconcile(prev, loadAll<StaffMember>("staff")));
-      }
+    return onSynced(({ pulledIds }) => {
+      /**
+       * Merge only the rows that arrived.
+       *
+       * This path is hotter than it looks: the server re-writes a product
+       * document for every stock movement, so one five-line sale on any till
+       * sends roughly ten rows to every device. Re-reading and re-parsing the
+       * whole catalog on each of those saturated the JS thread — which is why
+       * even opening the drawer got slow, not just the item grid.
+       */
+      const merge = <T extends { id: string }>(
+        collection: Parameters<typeof mergeInPlace>[1],
+        setter: React.Dispatch<React.SetStateAction<T[]>>,
+      ) => {
+        const ids = pulledIds.get(collection as never);
+        if (ids?.length) setter((prev) => mergeInPlace<T>(prev, collection, ids));
+      };
+
+      merge<Item>("products", setProducts);
+      merge<Category>("categories", setCategories);
+      merge<ModifierGroup>("modifiers", setModifiers);
+      merge<Ingredient>("ingredients", setIngredients);
+      merge<Table>("tables", setTables);
+      merge<Customer>("customers", setCustomers);
+      merge<StaffMember>("staff", setStaff);
     });
   }, []);
 

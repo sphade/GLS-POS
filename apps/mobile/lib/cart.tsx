@@ -11,7 +11,7 @@
 } from "react";
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
-import { loadAll, metaGet, metaSet, put as dbPut, softDelete } from "./db";
+import { loadAll, mergeById, metaGet, metaSet, put as dbPut, softDelete } from "./db";
 import {
   computeTotals,
   type Discount,
@@ -817,12 +817,17 @@ export function CartProvider({ children }: { children: ReactNode }) {
   // collection the server actually changed; unrelated catalog/order syncs stay
   // out of the cart provider and cannot wake every broad CartContext consumer.
   useEffect(() => {
-    return onSynced(({ pulledCollections }) => {
-      if (pulledCollections.has("held_orders")) {
-        setHeldOrders(loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt));
+    return onSynced(({ pulledIds }) => {
+      // Merge only the rows that arrived. Re-reading every receipt here was the
+      // main reason a long trading day slowed the till down: the cost grew with
+      // the day's sales and ran on every nudge from every other device.
+      const heldIds = pulledIds.get("held_orders");
+      if (heldIds?.length) {
+        setHeldOrders((prev) => mergeById(prev, "held_orders", heldIds, (row) => row.createdAt));
       }
-      if (pulledCollections.has("receipts")) {
-        setReceipts(loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt));
+      const receiptIds = pulledIds.get("receipts");
+      if (receiptIds?.length) {
+        setReceipts((prev) => mergeById(prev, "receipts", receiptIds, (row) => row.createdAt));
       }
     });
   }, []);

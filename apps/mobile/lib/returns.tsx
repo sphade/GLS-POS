@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { formatMoney } from "@/constants/theme";
-import { loadAll, put as dbPut } from "./db";
+import { loadAll, mergeById, put as dbPut } from "./db";
 import { logAudit } from "./audit";
 import { onSynced } from "./sync";
 import { useCatalog } from "./catalog";
@@ -72,9 +72,12 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
   // not actually apply a return row on this device.
   useEffect(
     () =>
-      onSynced(({ pulledCollections }) => {
-        if (pulledCollections.has("returns")) {
-          setReturns(newestFirst(loadAll<SaleReturn>("returns")));
+      onSynced(({ pulledIds }) => {
+        // Merge just the credit notes that arrived; see cart.tsx for why the
+        // old full re-read got slower as the day went on.
+        const ids = pulledIds.get("returns");
+        if (ids?.length) {
+          setReturns((prev) => mergeById(prev, "returns", ids, (row) => row.createdAt));
         }
       }),
     [],

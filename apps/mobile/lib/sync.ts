@@ -163,6 +163,17 @@ export type SyncEvent = {
   appliedCount: number;
   pulledCollections: ReadonlySet<SyncCollection>;
   uploadedCollections: ReadonlySet<SyncCollection>;
+  /**
+   * Ids applied per collection this cycle.
+   *
+   * Providers used to answer a pull by re-reading their whole collection, which
+   * for an append-only one like `receipts` meant parsing the entire trading
+   * history every time any till made a sale. That cost grows all day and lands
+   * on the JS thread, so taps queue behind it. With the ids in hand a provider
+   * can merge just what moved, which stays flat no matter how long the shop has
+   * been open.
+   */
+  pulledIds: ReadonlyMap<SyncCollection, readonly string[]>;
 };
 
 type SyncListener = (event: SyncEvent) => void;
@@ -241,6 +252,7 @@ async function applyPulled(
 
   let applied = 0;
   const pulledCollections = new Set<SyncCollection>();
+  const pulledIds = new Map<SyncCollection, string[]>();
 
   for (let start = 0; start < data.changes.length; start += APPLY_CHUNK) {
     const batch = data.changes.slice(start, start + APPLY_CHUNK);
@@ -254,6 +266,9 @@ async function applyPulled(
       };
       db.applyRemote(collection, row);
       pulledCollections.add(collection);
+      const ids = pulledIds.get(collection);
+      if (ids) ids.push(change.id);
+      else pulledIds.set(collection, [change.id]);
     }
     applied += batch.length;
     if (start + APPLY_CHUNK < data.changes.length) {
@@ -266,7 +281,7 @@ async function applyPulled(
   // every write is an idempotent upsert guarded by last-write-wins.
   db.metaSet(cursorKey(storeId), String(data.cursor));
   if (notify && (applied > 0 || uploadedCollections.size > 0)) {
-    emitSynced({ appliedCount: applied, pulledCollections, uploadedCollections });
+    emitSynced({ appliedCount: applied, pulledCollections, uploadedCollections, pulledIds });
   }
   return applied;
 }
