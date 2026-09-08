@@ -240,6 +240,7 @@ function RootStack() {
       <Stack.Screen name="online-orders" options={MODAL} />
       <Stack.Screen name="table-qr" options={MODAL} />
       <Stack.Screen name="report/[type]" options={MODAL} />
+      <Stack.Screen name="discounts" options={MODAL} />
     </Stack>
   );
 }

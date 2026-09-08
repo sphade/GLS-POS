@@ -262,7 +262,7 @@ export default function ReportsScreen() {
   };
 
   /** Open the sales chart for the current range. */
-  const openChart = (type: string, title: string, view?: "item" | "time") => {
+  const openChart = (type: string, title: string, view?: "item" | "time" | "payment") => {
     feedbackTap();
     router.push({
       pathname: "/report/[type]",
@@ -286,6 +286,17 @@ export default function ReportsScreen() {
   const openInventory = () => {
     feedbackTap();
     router.push("/inventory" as Href);
+  };
+
+  /** Discounts get their own screen: who gave it away, why, and how often. */
+  const openDiscounts = () => {
+    feedbackTap();
+    // Cast as elsewhere in this file: expo-router's generated route union is
+    // rebuilt by the dev server, so a newly added screen isn't in it yet.
+    router.push({
+      pathname: "/discounts",
+      params: { from: String(from), to: String(to), label: rangeLabel },
+    } as unknown as Href);
   };
 
   /**
@@ -440,6 +451,7 @@ export default function ReportsScreen() {
               value={`-${formatMoney(stats.discounted, CURRENCY)}`}
               valueColor={colors.red500}
               message={`${stats.discountRate}% of what was sold`}
+              onPress={openDiscounts}
             />
           )}
           <MetricCard
@@ -450,7 +462,11 @@ export default function ReportsScreen() {
           <MetricCard
             label="AVERAGE SALE"
             value={formatMoney(stats.avg, CURRENCY)}
-            onPress={() => openChart("revenue", "Total Sales")}
+            message={`${stats.count} sale${stats.count === 1 ? "" : "s"} in this period`}
+            // The average is money ÷ sales, so the useful drill-down is when
+            // those sales happened — the time view carries both figures per
+            // bucket, which is where a quiet hour or a big-basket hour shows up.
+            onPress={() => openChart("revenue", "Average Sale", "time")}
           />
           <MetricCard
             label="TOP ITEM"
@@ -463,6 +479,7 @@ export default function ReportsScreen() {
             label="TOP PAYMENT METHOD"
             value={stats.topMode ? stats.topMode[0] : "—"}
             message={stats.topMode ? formatMoney(stats.topMode[1], CURRENCY) : undefined}
+            onPress={() => openChart("revenue", "Payment Methods", "payment")}
           />
           <MetricCard
             label="LOW STOCK ITEMS"

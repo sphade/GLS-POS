@@ -75,6 +75,8 @@ type Bucket = {
   id: string;
   /** Exact product+variant identity when this is an item bucket. */
   itemKey?: string;
+  /** Payment method when this is a payment bucket. */
+  paymentMode?: string;
   /** Chronological position within the range. Unused when grouping by item. */
   order: number;
   /** Short label for the chart axis. */
@@ -220,17 +222,59 @@ function bucketizeByItem(receipts: Receipt[], returns: SaleReturn[]): Bucket[] {
   return [...map.values()];
 }
 
+/**
+ * Group by how the sale was paid for.
+ *
+ * A refund is netted out of the method it was paid back through, so the figures
+ * reflect money actually kept rather than money that once passed through the
+ * till — the same rule the overview's "top payment method" uses.
+ */
+function bucketizeByPayment(receipts: Receipt[], returns: SaleReturn[]): Bucket[] {
+  const map = new Map<string, Bucket>();
+  const touch = (mode: string): Bucket => {
+    let bucket = map.get(mode);
+    if (!bucket) {
+      bucket = {
+        id: `p${mode}`,
+        paymentMode: mode,
+        order: 0,
+        label: shortName(mode),
+        longLabel: mode,
+        amount: 0,
+        items: 0,
+        count: 0,
+      };
+      map.set(mode, bucket);
+    }
+    return bucket;
+  };
+
+  for (const receipt of receipts) {
+    const bucket = touch(receipt.mode);
+    bucket.amount += receipt.total;
+    bucket.count += 1;
+    bucket.items += lineUnits(receipt.lines);
+  }
+  for (const ret of returns) {
+    const bucket = touch(ret.method);
+    bucket.amount -= ret.total;
+    bucket.items -= lineUnits(ret.lines);
+  }
+
+  return [...map.values()];
+}
+
 /** Which breakdown the screen is showing. */
-type Breakdown = "item" | "time";
+type Breakdown = "item" | "time" | "payment";
 
 type SortField = "time" | "amount" | "items" | "count";
 type SortDir = "asc" | "desc";
 
 const SORT_FIELDS: { key: SortField; label: string; views: Breakdown[] }[] = [
   { key: "time", label: "Chronological", views: ["time"] },
-  { key: "amount", label: "By amount", views: ["item", "time"] },
-  { key: "items", label: "By items sold", views: ["item", "time"] },
-  { key: "count", label: "By number of sales", views: ["item", "time"] },
+  { key: "amount", label: "By amount", views: ["item", "time", "payment"] },
+  { key: "items", label: "By items sold", views: ["item", "time", "payment"] },
+  { key: "count", label: "By number of sales", views: ["item", "time", "payment"] },
 ];
 
 function sortBuckets(buckets: Bucket[], field: SortField, dir: SortDir): Bucket[] {
@@ -310,12 +354,15 @@ export default function ReportDetailScreen() {
       ? { field: "time", dir: "asc" }
       : { field: isCount ? "count" : "amount", dir: "desc" };
 
-  const initialView: Breakdown = view === "time" || isCount ? "time" : "item";
+  const initialView: Breakdown =
+    view === "payment" ? "payment" : view === "time" || isCount ? "time" : "item";
   const [activeView, setActiveView] = useState<Breakdown>(initialView);
   const [sortField, setSortField] = useState<SortField>(defaultSortFor(initialView).field);
   const [sortDir, setSortDir] = useState<SortDir>(defaultSortFor(initialView).dir);
   const [sortOpen, setSortOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<Bucket | null>(null);
+  /** Only one receipt is disclosed at a time, matching Today. */
+  const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
 
   const switchView = (next: Breakdown) => {
     if (next === activeView) return;
@@ -331,7 +378,9 @@ export default function ReportDetailScreen() {
       sortBuckets(
         activeView === "item"
           ? bucketizeByItem(receipts, returns)
-          : bucketizeByTime(receipts, returns, granularity),
+              : activeView === "payment"
+            ? bucketizeByPayment(receipts, returns)
+            : bucketizeByTime(receipts, returns, granularity),
         sortField,
         sortDir,
       ),
@@ -339,15 +388,26 @@ export default function ReportDetailScreen() {
   );
 
   /**
-   * Receipt documents are already cached offline. Match the selected product
-   * exactly inside the active report window; `some` keeps one result per sale.
+   * The sales behind whichever bar was tapped. Receipt documents are already
+   * cached offline, so every breakdown can answer "which sales made this up"
+   * without a round-trip: an item bucket matches the exact product+variant, a
+   * payment bucket matches the method, and a time bucket re-buckets each
+   * receipt's own timestamp so it uses the same grouping as the chart.
    */
   const selectedReceipts = useMemo(() => {
-    if (!selectedItem?.itemKey) return [];
-    return receipts.filter((receipt) =>
-      receipt.lines.some((line) => receiptItemKey(line) === selectedItem.itemKey),
+    if (!selectedItem) return [];
+    if (selectedItem.itemKey) {
+      return receipts.filter((receipt) =>
+        receipt.lines.some((line) => receiptItemKey(line) === selectedItem.itemKey),
+      );
+    }
+    if (selectedItem.paymentMode) {
+      return receipts.filter((receipt) => receipt.mode === selectedItem.paymentMode);
+    }
+    return receipts.filter(
+      (receipt) => bucketOf(receipt.createdAt, granularity).order === selectedItem.order,
     );
-  }, [receipts, selectedItem]);
+  }, [receipts, selectedItem, granularity]);
 
   const totals = useMemo(
     () =>
@@ -371,15 +431,20 @@ export default function ReportDetailScreen() {
       ? `${formatMoney(b.amount, CURRENCY)} · ${b.items} item${b.items === 1 ? "" : "s"}`
       : `${b.items} item${b.items === 1 ? "" : "s"} · ${b.count} sale${b.count === 1 ? "" : "s"}`;
 
-  const openItemReceipts = (bucket: Bucket) => {
-    if (!bucket.itemKey) return;
+  const openBucketReceipts = (bucket: Bucket) => {
     feedbackTap();
+    setExpandedReceiptId(null);
     setSelectedItem(bucket);
+  };
+
+  const closeSheet = () => {
+    setSelectedItem(null);
+    setExpandedReceiptId(null);
   };
 
   const openReceipt = (receiptId: string) => {
     feedbackTap();
-    setSelectedItem(null);
+    closeSheet();
     router.push({ pathname: "/receipt/[id]", params: { id: receiptId } });
   };
 
@@ -394,7 +459,9 @@ export default function ReportDetailScreen() {
       ? buckets.length > MAX_ITEM_BARS
         ? `Top ${MAX_ITEM_BARS} of ${buckets.length} items · full list below`
         : "What sold"
-      : GRANULARITY_CAPTION[granularity];
+      : activeView === "payment"
+        ? "How they paid"
+        : GRANULARITY_CAPTION[granularity];
 
   /** Same gate as the overview: the drill-down is reachable by deep link too. */
   if (!can("reports:view")) {
@@ -433,6 +500,11 @@ export default function ReportDetailScreen() {
       <View style={styles.viewTabs}>
         <ViewTab label="BY ITEM" active={activeView === "item"} onPress={() => switchView("item")} />
         <ViewTab label="BY TIME" active={activeView === "time"} onPress={() => switchView("time")} />
+        <ViewTab
+          label="BY PAYMENT"
+          active={activeView === "payment"}
+          onPress={() => switchView("payment")}
+        />
       </View>
 
       {buckets.length === 0 ? (
@@ -458,14 +530,10 @@ export default function ReportDetailScreen() {
           <BarChart
             data={chartData}
             formatValue={formatAxis}
-            onBarPress={
-              activeView === "item"
-                ? (bar) => {
-                    const bucket = charted.find((candidate) => candidate.id === bar.id);
-                    if (bucket) openItemReceipts(bucket);
-                  }
-                : undefined
-            }
+            onBarPress={(bar) => {
+              const bucket = charted.find((candidate) => candidate.id === bar.id);
+              if (bucket) openBucketReceipts(bucket);
+            }}
           />
 
           {buckets.map((bucket) => {
@@ -473,20 +541,16 @@ export default function ReportDetailScreen() {
             return (
               <Pressable
                 key={bucket.id}
-                style={({ pressed }) => [
-                  styles.listCard,
-                  activeView === "item" && pressed && styles.listCardPressed,
-                ]}
-                disabled={activeView !== "item"}
-                onPress={() => openItemReceipts(bucket)}
-                accessibilityRole={activeView === "item" ? "button" : undefined}
-                accessibilityLabel={
-                  activeView === "item"
-                    ? `${bucket.longLabel}, ${formatPrimary(bucket)}`
-                    : undefined
-                }
+                style={({ pressed }) => [styles.listCard, pressed && styles.listCardPressed]}
+                onPress={() => openBucketReceipts(bucket)}
+                accessibilityRole="button"
+                accessibilityLabel={`${bucket.longLabel}, ${formatPrimary(bucket)}`}
                 accessibilityHint={
-                  activeView === "item" ? "Shows receipts containing this item." : undefined
+                  activeView === "item"
+                    ? "Shows receipts containing this item."
+                    : activeView === "payment"
+                      ? "Shows receipts paid by this method."
+                      : "Shows receipts from this period."
                 }
               >
                 <View style={styles.listTop}>
@@ -527,12 +591,12 @@ export default function ReportDetailScreen() {
         visible={selectedItem !== null}
         transparent
         animationType="slide"
-        onRequestClose={() => setSelectedItem(null)}
+        onRequestClose={closeSheet}
       >
-        <Pressable style={styles.backdrop} onPress={() => setSelectedItem(null)}>
+        <Pressable style={styles.backdrop} onPress={closeSheet}>
           <Pressable style={styles.receiptSheet} onPress={(event) => event.stopPropagation()}>
             <View style={styles.sheetHeader}>
-              <Pressable onPress={() => setSelectedItem(null)} hitSlop={8}>
+              <Pressable onPress={closeSheet} hitSlop={8}>
                 <Ionicons name="close" size={24} color={colors.white} />
               </Pressable>
               <View style={styles.receiptSheetTitleWrap}>
@@ -545,9 +609,15 @@ export default function ReportDetailScreen() {
             </View>
             <View style={styles.receiptSheetSummary}>
               <Text style={styles.receiptSheetCount}>
-                {selectedReceipts.length} receipt{selectedReceipts.length === 1 ? "" : "s"}
+                {selectedReceipts.length} receipt{selectedReceipts.length === 1 ? "" : "s"} ·{" "}
+                {formatMoney(
+                  selectedReceipts.reduce((sum, receipt) => sum + receipt.total, 0),
+                  CURRENCY,
+                )}
               </Text>
-              <Text style={styles.receiptSheetHint}>Tap a receipt to open full details</Text>
+              <Text style={styles.receiptSheetHint}>
+                Tap to show items · hold to open the receipt
+              </Text>
             </View>
             <FlatList
               data={selectedReceipts}
@@ -564,16 +634,22 @@ export default function ReportDetailScreen() {
                     color={colors.grey400}
                   />
                   <Text style={styles.receiptEmptyText}>
-                    No sale containing this item is inside this period. This item may only have
-                    return activity here.
+                    {selectedItem?.itemKey
+                      ? "No sale containing this item is inside this period. This item may only have return activity here."
+                      : "No sales here. This period may only have return activity."}
                   </Text>
                 </View>
               }
               renderItem={({ item }) => (
                 <ReceiptDisclosureRow
                   receipt={item}
-                  behavior="navigate"
-                  onPress={() => openReceipt(item.id)}
+                  behavior="expand"
+                  expanded={expandedReceiptId === item.id}
+                  onPress={() => {
+                    feedbackTap();
+                    setExpandedReceiptId((current) => (current === item.id ? null : item.id));
+                  }}
+                  onLongPress={() => openReceipt(item.id)}
                 />
               )}
             />
