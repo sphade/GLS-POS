@@ -11,25 +11,83 @@ import {
 import { AppState } from "react-native";
 import * as Notifications from "expo-notifications";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
-import { loadAll, metaGet, metaSet, put as dbPut } from "./db";
-import { onSynced, pullNow, SYNC_ENABLED, syncNow } from "./sync";
+import {
+  loadDocsByField,
+  loadDocsInRange,
+  loadOne,
+  loadRecentDocs,
+  mergeById,
+  put as dbPut,
+} from "./db";
+import { onSynced, pullNow, SYNC_ENABLED } from "./sync";
 import { useStore } from "./store";
 
 /**
  * VIP web orders that arrived from the guest ordering site.
  *
- * They're created server-side in the store's Durable Object and arrive here via
- * the normal sync, so this provider just reads the local `web_orders`
- * collection and lets staff advance them. Writing back marks the row dirty, so
- * the status change syncs to every other device.
+ * Every row remains in local SQLite and syncs normally. React retains every
+ * open order (operational work must never disappear) plus a small recent
+ * completed window; older completed orders are queried from SQLite on demand.
  */
 
+const OPEN: readonly WebOrderStatus[] = ["received", "preparing", "ready"];
+export const WEB_ORDER_LIVE_HISTORY_LIMIT = 100;
+
+const isOpen = (order: WebOrder): boolean => OPEN.includes(order.status);
+const newestFirst = (a: WebOrder, b: WebOrder) =>
+  b.createdAt - a.createdAt || b.id.localeCompare(a.id);
+
+/** Completed and open orders in a half-open historical range. */
+export function loadWebOrdersInRange(from: number, to: number): WebOrder[] {
+  return loadDocsInRange<WebOrder>("web_orders", "createdAt", from, to);
+}
+
+/** One bounded newest-first web-order page from the complete local history. */
+export function loadRecentWebOrders(
+  limit = WEB_ORDER_LIVE_HISTORY_LIMIT,
+  offset = 0,
+): WebOrder[] {
+  return loadRecentDocs<WebOrder>("web_orders", "createdAt", limit, offset);
+}
+
+function loadOpenWebOrders(): WebOrder[] {
+  const byId = new Map<string, WebOrder>();
+  for (const status of OPEN) {
+    for (const order of loadDocsByField<WebOrder>("web_orders", "status", status, {
+      field: "createdAt",
+      direction: "desc",
+    })) {
+      byId.set(order.id, order);
+    }
+  }
+  return [...byId.values()].sort(newestFirst);
+}
+
+/** Keep every open order, but only the newest completed history in React. */
+function boundLiveOrders(rows: readonly WebOrder[]): WebOrder[] {
+  const byId = new Map(rows.map((order) => [order.id, order]));
+  const unique = [...byId.values()];
+  const open = unique.filter(isOpen);
+  const completed = unique
+    .filter((order) => !isOpen(order))
+    .sort(newestFirst)
+    .slice(0, WEB_ORDER_LIVE_HISTORY_LIMIT);
+  return [...open, ...completed].sort(newestFirst);
+}
+
+function loadLiveOrders(): WebOrder[] {
+  return boundLiveOrders([...loadOpenWebOrders(), ...loadRecentWebOrders()]);
+}
+
 type WebOrdersState = {
+  /** Every open order plus a bounded recent completed window. */
   orders: WebOrder[];
   /** Orders still needing attention, newest first. */
   active: WebOrder[];
   /** Count for the tab badge. */
   pendingCount: number;
+  /** Advances for local writes and pulled rows, including rows outside the window. */
+  webOrderRevision: number;
   setStatus: (id: string, status: WebOrderStatus) => void;
   /** Link a web order to the receipt raised for it. */
   attachReceipt: (id: string, receiptId: string) => void;
@@ -41,93 +99,74 @@ type WebOrdersState = {
   dismissArrival: () => void;
 };
 
-const OPEN: WebOrderStatus[] = ["received", "preparing", "ready"];
-
 const WebOrdersContext = createContext<WebOrdersState | null>(null);
 
 export function WebOrdersProvider({ children }: { children: ReactNode }) {
   const { store } = useStore();
-  const [orders, setOrders] = useState<WebOrder[]>(() => loadAll<WebOrder>("web_orders"));
+  const [orders, setOrders] = useState<WebOrder[]>(loadLiveOrders);
   const [arrivals, setArrivals] = useState<WebOrder[]>([]);
-  /** Ids seen at least once, so we only alert for genuinely new orders. */
-  const seen = useRef<Set<string>>(new Set(loadAll<WebOrder>("web_orders").map((o) => o.id)));
+  const [webOrderRevision, setWebOrderRevision] = useState(0);
+  /** Ids seen at least once, so we only alert for genuinely new active orders. */
+  const seen = useRef<Set<string>>(new Set(orders.map((order) => order.id)));
 
-  /**
-   * Re-read after every sync and alert on anything new.
-   *
-   * Runs off the sync callback rather than a timer so it fires the moment new
-   * data lands — including when the WebSocket triggers an immediate sync.
-   */
-  const refresh = useCallback(() => {
-    const fresh = loadAll<WebOrder>("web_orders");
-    setOrders(fresh);
+  /** Merge only rows named by sync; never re-read the whole append-only table. */
+  const refresh = useCallback((ids: readonly string[], announceArrivals = true) => {
+    if (ids.length === 0) return;
+    const uniqueIds = [...new Set(ids)];
+    const incoming = uniqueIds
+      .map((id) => loadOne<WebOrder>("web_orders", id))
+      .filter((order): order is WebOrder => order !== null);
+    const unseen = announceArrivals
+      ? incoming
+          .filter((order) => !seen.current.has(order.id) && order.status === "received")
+          .sort((a, b) => a.createdAt - b.createdAt)
+      : [];
+    incoming.forEach((order) => seen.current.add(order.id));
 
-    const unseen = fresh
-      .filter((o) => !seen.current.has(o.id) && o.status === "received")
-      .sort((a, b) => a.createdAt - b.createdAt);
-    fresh.forEach((o) => seen.current.add(o.id));
+    setOrders((current) =>
+      boundLiveOrders(mergeById(current, "web_orders", uniqueIds, (row) => row.createdAt)),
+    );
+    setWebOrderRevision((revision) => revision + 1);
+
     if (unseen.length > 0) {
       // Never overwrite one order with another. Restaurant bursts are common;
       // staff must acknowledge each order in arrival order.
       setArrivals((current) => {
-        const queued = new Set(current.map((o) => o.id));
-        return [...current, ...unseen.filter((o) => !queued.has(o.id))];
+        const queued = new Set(current.map((order) => order.id));
+        return [...current, ...unseen.filter((order) => !queued.has(order.id))];
       });
     }
   }, []);
 
-  /** Load historical/backfilled rows without alarming for every old order. */
-  const hydrateSilently = useCallback(() => {
-    const fresh = loadAll<WebOrder>("web_orders");
-    fresh.forEach((o) => seen.current.add(o.id));
-    setOrders(fresh);
-  }, []);
-
   /** The screen refresh button performs a real server pull. */
   const reload = useCallback(() => {
-    void pullNow(store.id);
+    void pullNow(store.id, false, true, true);
   }, [store.id]);
 
   useEffect(
     () =>
-      onSynced(({ pulledCollections }) => {
-        if (pulledCollections.has("web_orders")) refresh();
+      onSynced(({ storeId, source, pulledIds }) => {
+        if (storeId !== store.id) return;
+        const ids = pulledIds.get("web_orders");
+        if (ids?.length) refresh(ids, source !== "backfill");
       }),
-    [refresh],
+    [refresh, store.id],
   );
 
   /**
-   * Repair older devices once by replaying server history, then pull inbound
-   * changes every four seconds. This path is pull-only, so a denied local edit
-   * can never prevent a guest order from appearing.
+   * Pull inbound changes every four seconds. The sync engine owns the only
+   * cursor-zero replay, so this safety poll can never start a duplicate history
+   * pass or suppress updates for the other providers.
    */
   useEffect(() => {
     if (!SYNC_ENABLED) return;
 
-    let cancelled = false;
-    const repairKey = `web_orders_backfill_v1_${store.id}`;
-    void (async () => {
-      const needsBackfill = !metaGet(repairKey);
-      const result = await pullNow(store.id, needsBackfill, !needsBackfill);
-      if (cancelled) return;
-      if (result >= 0 && needsBackfill) {
-        metaSet(repairKey, "1");
-        hydrateSilently();
-      }
-    })();
-
-    // Foreground-only polling, like the main auto-sync: a backgrounded device
-    // stays fresh via nudges and push notifications instead of burning data on
-    // requests nobody can see.
     const timer = setInterval(() => {
       if (AppState.currentState !== "active") return;
       void pullNow(store.id);
     }, 4000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [store.id, hydrateSilently]);
+    return () => clearInterval(timer);
+  }, [store.id]);
 
   /**
    * A push notification arriving while the app is backgrounded doesn't run our
@@ -137,8 +176,8 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
     if (!SYNC_ENABLED) return;
 
     const pullLatest = () => {
-      // Collection-scoped onSynced handles the local refresh if rows arrive.
-      void syncNow(store.id);
+      // Pull-only delivery cannot be blocked by an unrelated denied local edit.
+      void pullNow(store.id);
     };
     const received = Notifications.addNotificationReceivedListener(pullLatest);
     const tapped = Notifications.addNotificationResponseReceivedListener(pullLatest);
@@ -149,30 +188,28 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
   }, [store.id]);
 
   const value = useMemo<WebOrdersState>(() => {
-    const byNewest = [...orders].sort((a, b) => b.createdAt - a.createdAt);
-
     const write = (id: string, patch: Partial<WebOrder>) => {
-      setOrders((prev) =>
-        prev.map((o) => {
-          if (o.id !== id) return o;
-          const next = { ...o, ...patch, updatedAt: Date.now() };
-          dbPut("web_orders", next); // dirty -> syncs to other devices
-          return next;
-        }),
-      );
+      const current = orders.find((order) => order.id === id) ?? loadOne<WebOrder>("web_orders", id);
+      if (!current) return;
+      const next = { ...current, ...patch, updatedAt: Date.now() };
+      dbPut("web_orders", next); // dirty -> syncs to other devices
+      setOrders((rows) => boundLiveOrders([next, ...rows.filter((order) => order.id !== id)]));
+      setWebOrderRevision((revision) => revision + 1);
     };
 
+    const active = orders.filter(isOpen);
     return {
-      orders: byNewest,
-      active: byNewest.filter((o) => OPEN.includes(o.status)),
-      pendingCount: byNewest.filter((o) => o.status === "received").length,
+      orders,
+      active,
+      pendingCount: active.filter((order) => order.status === "received").length,
+      webOrderRevision,
       setStatus: (id, status) => write(id, { status }),
       attachReceipt: (id, receiptId) => write(id, { receiptId, status: "served" }),
       reload,
       arrival: arrivals[0] ?? null,
       dismissArrival: () => setArrivals((current) => current.slice(1)),
     };
-  }, [orders, arrivals, reload]);
+  }, [orders, arrivals, reload, webOrderRevision]);
 
   return <WebOrdersContext.Provider value={value}>{children}</WebOrdersContext.Provider>;
 }

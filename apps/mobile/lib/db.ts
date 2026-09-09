@@ -51,6 +51,35 @@ let activeStoreId: string = BOOTSTRAP;
 
 const fileFor = (storeId: string) => `gls-pos-${storeId.replace(/[^A-Za-z0-9_-]/g, "")}.db`;
 
+/**
+ * Append-only history is read by timestamp or parent id, never by scanning
+ * every JSON document into JavaScript. These can be expensive to build on an
+ * upgraded store, so `prepareHistoryIndexes` creates them asynchronously while
+ * the app shows a responsive loading frame instead of blocking render.
+ */
+const HISTORY_INDEXES = [
+  `CREATE INDEX IF NOT EXISTS receipts_created_at_idx
+     ON receipts (json_extract(data, '$.createdAt') DESC);`,
+  `CREATE INDEX IF NOT EXISTS returns_created_at_idx
+     ON returns (json_extract(data, '$.createdAt') DESC);`,
+  `CREATE INDEX IF NOT EXISTS returns_receipt_created_at_idx
+     ON returns (
+       json_extract(data, '$.receiptId'),
+       json_extract(data, '$.createdAt') ASC
+     );`,
+  `CREATE INDEX IF NOT EXISTS audit_log_at_idx
+     ON audit_log (json_extract(data, '$.at') DESC);`,
+  `CREATE INDEX IF NOT EXISTS web_orders_created_at_idx
+     ON web_orders (json_extract(data, '$.createdAt') DESC);`,
+  `CREATE INDEX IF NOT EXISTS web_orders_status_created_at_idx
+     ON web_orders (
+       json_extract(data, '$.status'),
+       json_extract(data, '$.createdAt') DESC
+     );`,
+] as const;
+
+const historyIndexJobs = new Map<string, Promise<void>>();
+
 /** Open (once) and migrate the database for a store. */
 function open(storeId: string): SQLite.SQLiteDatabase {
   const existing = handles.get(storeId);
@@ -111,6 +140,7 @@ function open(storeId: string): SQLite.SQLiteDatabase {
   } catch {
     /* older SQLite without expression-index support */
   }
+
   database.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
 
   handles.set(storeId, database);
@@ -126,6 +156,34 @@ export function setActiveStore(storeId: string): void {
   if (!storeId) return;
   open(storeId);
   activeStoreId = storeId;
+}
+
+/**
+ * Build history indexes without monopolising the JavaScript thread.
+ *
+ * The first upgraded launch can have years of receipts to index. Expo's async
+ * API performs that native work while React keeps painting the loading frame;
+ * subsequent launches hit `IF NOT EXISTS` and finish immediately. One shared
+ * promise per store prevents remounts from starting duplicate builds.
+ */
+export function prepareHistoryIndexes(storeId: string): Promise<void> {
+  if (!storeId) return Promise.resolve();
+  const existing = historyIndexJobs.get(storeId);
+  if (existing) return existing;
+
+  const database = open(storeId);
+  const job = (async () => {
+    for (const statement of HISTORY_INDEXES) {
+      try {
+        await database.execAsync(statement);
+      } catch {
+        // Older SQLite without expression-index support stays correct; its
+        // historical queries simply run without this acceleration.
+      }
+    }
+  })();
+  historyIndexJobs.set(storeId, job);
+  return job;
 }
 
 export function getActiveStore(): string {
@@ -161,11 +219,14 @@ export function loadOne<T>(c: Collection, id: string): T | null {
  * state (the `dirty` column the sync engine clears), unlike any flag stored
  * inside a document.
  */
+function countDirtyOn(db: SQLite.SQLiteDatabase, c: Collection): number {
+  return db.getFirstSync<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM ${c} WHERE dirty = 1`,
+  )?.n ?? 0;
+}
+
 export function countDirty(c: Collection): number {
-  const db = conn();
-  return (
-    db.getFirstSync<{ n: number }>(`SELECT COUNT(*) AS n FROM ${c} WHERE dirty = 1`)?.n ?? 0
-  );
+  return countDirtyOn(conn(), c);
 }
 
 /**
@@ -177,6 +238,13 @@ export function loadDirtyIds(c: Collection): string[] {
   return conn()
     .getAllSync<{ id: string }>(`SELECT id FROM ${c} WHERE dirty = 1 AND deleted = 0`)
     .map((row) => row.id);
+}
+
+/** Number of live rows without parsing their JSON payloads. */
+export function countDocs(c: Collection): number {
+  return conn().getFirstSync<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM ${c} WHERE deleted = 0`,
+  )?.n ?? 0;
 }
 
 /** Ids of all live records — cheap, no payload. */
@@ -245,6 +313,160 @@ export function loadDocsPage<T>(
   return { rows: rows.map((r) => JSON.parse(r.data) as T), total };
 }
 
+/**
+ * Newest/oldest documents without parsing the rest of the collection.
+ *
+ * This is the live-provider primitive: providers retain a small recent window
+ * while SQLite keeps the complete offline history. `limit + 1` can be used by
+ * callers to determine whether another page exists without a growing COUNT.
+ */
+export function loadRecentDocs<T>(
+  c: Collection,
+  orderField: string,
+  limit: number,
+  offset = 0,
+  direction: "asc" | "desc" = "desc",
+): T[] {
+  const sqlDirection = direction === "asc" ? "ASC" : "DESC";
+  const rows = conn().getAllSync<{ data: string }>(
+    `SELECT data FROM ${c}
+     WHERE deleted = 0
+     ORDER BY ${jsonPath(orderField)} ${sqlDirection}, id ${sqlDirection}
+     LIMIT ? OFFSET ?`,
+    Math.max(0, Math.trunc(limit)),
+    Math.max(0, Math.trunc(offset)),
+  );
+  return rows.map((row) => JSON.parse(row.data) as T);
+}
+
+/**
+ * Documents whose numeric JSON timestamp is inside the half-open `[from, to)`
+ * range. Reports use half-open bounds so adjacent calendar ranges never count
+ * a sale or refund twice.
+ */
+export function loadDocsInRange<T>(
+  c: Collection,
+  field: string,
+  from: number,
+  to: number,
+  direction: "asc" | "desc" = "desc",
+): T[] {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return [];
+  const sqlDirection = direction === "asc" ? "ASC" : "DESC";
+  const path = jsonPath(field);
+  const rows = conn().getAllSync<{ data: string }>(
+    `SELECT data FROM ${c}
+     WHERE deleted = 0 AND ${path} >= ? AND ${path} < ?
+     ORDER BY ${path} ${sqlDirection}, id ${sqlDirection}`,
+    from,
+    to,
+  );
+  return rows.map((row) => JSON.parse(row.data) as T);
+}
+
+/**
+ * All live documents matching one indexed top-level field. Used for a
+ * receipt's credit notes, so refund correctness never depends on whether those
+ * notes happen to be inside the provider's recent in-memory window.
+ */
+export function loadDocsByField<T>(
+  c: Collection,
+  field: string,
+  value: string | number | null,
+  order: { field: string; direction: "asc" | "desc" },
+): T[] {
+  const clauses = ["deleted = 0"];
+  const params: (string | number)[] = [];
+  const matchPath = jsonPath(field);
+  if (value === null) {
+    clauses.push(`${matchPath} IS NULL`);
+  } else {
+    clauses.push(`${matchPath} = ?`);
+    params.push(value);
+  }
+  const sqlDirection = order.direction === "asc" ? "ASC" : "DESC";
+  const rows = conn().getAllSync<{ data: string }>(
+    `SELECT data FROM ${c}
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY ${jsonPath(order.field)} ${sqlDirection}, id ${sqlDirection}`,
+    ...params,
+  );
+  return rows.map((row) => JSON.parse(row.data) as T);
+}
+
+export type DocValueFilter = {
+  field: string;
+  value: string | number | null;
+  operator?: "eq" | "neq";
+};
+
+/**
+ * Sum one numeric document field in SQLite without materialising the matching
+ * documents. Summary bars can therefore remain all-history accurate while the
+ * list below them is paged.
+ */
+export function sumDocs(
+  c: Collection,
+  field: string,
+  filters: readonly DocValueFilter[] = [],
+): number {
+  const clauses = ["deleted = 0"];
+  const params: (string | number)[] = [];
+  for (const filter of filters) {
+    const path = jsonPath(filter.field);
+    const neq = filter.operator === "neq";
+    if (filter.value === null) {
+      clauses.push(`${path} IS ${neq ? "NOT " : ""}NULL`);
+    } else {
+      clauses.push(`${path} ${neq ? "!=" : "="} ?`);
+      params.push(filter.value);
+    }
+  }
+  const path = jsonPath(field);
+  return (
+    conn().getFirstSync<{ total: number | null }>(
+      `SELECT COALESCE(SUM(CAST(${path} AS INTEGER)), 0) AS total
+       FROM ${c} WHERE ${clauses.join(" AND ")}`,
+      ...params,
+    )?.total ?? 0
+  );
+}
+
+/**
+ * Bounded case-insensitive search across selected top-level text fields.
+ * SQLite may scan for a contains query, but only matching page rows are parsed
+ * into JavaScript, and the work happens only when the user explicitly searches.
+ */
+export function searchDocs<T>(
+  c: Collection,
+  fields: readonly string[],
+  query: string,
+  order: { field: string; direction: "asc" | "desc" },
+  page: { limit: number; offset: number },
+): T[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed || fields.length === 0) {
+    return loadRecentDocs<T>(c, order.field, page.limit, page.offset, order.direction);
+  }
+
+  const escaped = trimmed.replace(/[\\%_]/g, "\\$&");
+  const needle = `%${escaped}%`;
+  const matches = fields.map(
+    (field) => `LOWER(CAST(COALESCE(${jsonPath(field)}, '') AS TEXT)) LIKE ? ESCAPE '\\'`,
+  );
+  const direction = order.direction === "asc" ? "ASC" : "DESC";
+  const rows = conn().getAllSync<{ data: string }>(
+    `SELECT data FROM ${c}
+     WHERE deleted = 0 AND (${matches.join(" OR ")})
+     ORDER BY ${jsonPath(order.field)} ${direction}, id ${direction}
+     LIMIT ? OFFSET ?`,
+    ...fields.map(() => needle),
+    Math.max(0, Math.trunc(page.limit)),
+    Math.max(0, Math.trunc(page.offset)),
+  );
+  return rows.map((row) => JSON.parse(row.data) as T);
+}
+
 /** All live (non-deleted) records of a collection, in insertion order. */
 export function loadAll<T>(c: Collection): T[] {
   const db = conn();
@@ -290,6 +512,47 @@ function putOn<T extends { id: string }>(
     dirty === true ? 1 : 0,
     preserveDirty ? 1 : 0,
   );
+}
+
+/**
+ * Atomically allocate a tagged per-device number and insert its document.
+ *
+ * Receipt/credit-note numbering must not depend on a bounded React array, but
+ * persisting the counter in a separate commit adds latency and can leave a gap
+ * if the app stops before the document write. This keeps both writes in one
+ * transaction and wakes sync only after they commit together.
+ */
+export function putWithDeviceSequence<T extends { id: string }>(
+  c: Collection,
+  sequencePrefix: string,
+  build: (tag: number, sequence: number) => T,
+  dirty = true,
+): T {
+  const db = conn();
+  let item!: T;
+  db.withTransactionSync(() => {
+    let tag = Number(metaGetOn(db, "receipt_tag") ?? "") || 0;
+    if (tag < 1 || tag > 9) {
+      tag = 1 + Math.floor(Math.random() * 9);
+      metaSetOn(db, "receipt_tag", String(tag));
+    }
+
+    const sequenceKey = `${sequencePrefix}_${tag}`;
+    const raw = metaGetOn(db, sequenceKey);
+    const stored = raw === null ? Number.NaN : Number(raw);
+    const current =
+      Number.isSafeInteger(stored) && stored >= 0
+        ? stored
+        : (db.getFirstSync<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM ${c} WHERE deleted = 0`,
+          )?.n ?? 0);
+    const next = current + 1;
+    item = build(tag, next);
+    metaSetOn(db, sequenceKey, String(next));
+    putOn(db, c, item, dirty);
+  });
+  if (dirty) notifyLocalWrite();
+  return item;
 }
 
 /** Insert or update a record; marks it dirty for the next sync. */
@@ -353,6 +616,14 @@ export function resetCollection(c: Collection) {
 
 export type ChangeRow<T> = { id: string; data: T; updatedAt: number; deleted: boolean };
 export type DirtyRevision = Pick<ChangeRow<unknown>, "id" | "updatedAt">;
+export type DirtyRevisionBatch = {
+  collection: Collection;
+  revisions: readonly DirtyRevision[];
+};
+export type RemoteCollectionChange = {
+  collection: Collection;
+  change: ChangeRow<{ id: string }>;
+};
 
 // Implementations take an explicit handle; the exports below bind them to the
 // active store. See `storeScope` at the bottom for why sync needs the former.
@@ -364,12 +635,12 @@ function loadDirtyOn<T>(db: SQLite.SQLiteDatabase, c: Collection): ChangeRow<T>[
   return rows.map((r) => ({ id: r.id, data: JSON.parse(r.data) as T, updatedAt: r.updated_at, deleted: !!r.deleted }));
 }
 
-/** Mark only the exact revisions accepted by the server as clean. */
-function clearDirtyOn(
+/** Mark revisions clean inside the caller's current transaction. */
+function clearDirtyRevisionsOn(
   db: SQLite.SQLiteDatabase,
   c: Collection,
   revisions: readonly DirtyRevision[],
-) {
+): void {
   for (const revision of revisions) {
     db.runSync(
       `UPDATE ${c} SET dirty = 0 WHERE id = ? AND updated_at = ? AND dirty = 1`,
@@ -377,6 +648,29 @@ function clearDirtyOn(
       revision.updatedAt,
     );
   }
+}
+
+/** Mark only the exact revisions accepted by the server as clean. */
+function clearDirtyOn(
+  db: SQLite.SQLiteDatabase,
+  c: Collection,
+  revisions: readonly DirtyRevision[],
+): void {
+  if (revisions.length === 0) return;
+  db.withTransactionSync(() => clearDirtyRevisionsOn(db, c, revisions));
+}
+
+/** One commit for all collections acknowledged by one server response. */
+function clearDirtyBatchOn(
+  db: SQLite.SQLiteDatabase,
+  batches: readonly DirtyRevisionBatch[],
+): void {
+  if (!batches.some((batch) => batch.revisions.length > 0)) return;
+  db.withTransactionSync(() => {
+    for (const batch of batches) {
+      clearDirtyRevisionsOn(db, batch.collection, batch.revisions);
+    }
+  });
 }
 
 function applyRemoteOn<T extends { id: string }>(
@@ -411,6 +705,19 @@ function applyRemoteOn<T extends { id: string }>(
   );
 }
 
+/** Apply one pull chunk in a single SQLite transaction. */
+function applyRemoteBatchOn(
+  db: SQLite.SQLiteDatabase,
+  changes: readonly RemoteCollectionChange[],
+): void {
+  if (changes.length === 0) return;
+  db.withTransactionSync(() => {
+    for (const { collection, change } of changes) {
+      applyRemoteOn(db, collection, change);
+    }
+  });
+}
+
 function metaGetOn(db: SQLite.SQLiteDatabase, key: string): string | null {
   return db.getFirstSync<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key)?.value ?? null;
 }
@@ -421,6 +728,92 @@ function metaSetOn(db: SQLite.SQLiteDatabase, key: string, value: string) {
     key,
     value,
   );
+}
+
+export type ReadProjectionTransitionInput = {
+  policyMarkerKey: string;
+  policyVersion: string;
+  readableCollectionsKey: string;
+  activeScopeKey: string;
+  completedScopeKey: string;
+  pendingScopeKey: string;
+  cursorKey: string;
+  replayHeadKey: string;
+  nextScope: string;
+  nextReadable: readonly Collection[];
+};
+
+export type ReadProjectionTransitionResult = {
+  transitioned: boolean;
+  purgedCollections: readonly Collection[];
+};
+
+function normalizedProjection(raw: string | null): Collection[] | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value) || !value.every((entry) => COLLECTIONS.includes(entry as Collection))) {
+      return null;
+    }
+    const selected = new Set(value as Collection[]);
+    return COLLECTIONS.filter((collection) => selected.has(collection));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomically move a store database to a narrower or wider read projection.
+ *
+ * A missing policy marker means the database predates filtered sync, so its
+ * previous projection is deliberately treated as every collection. Clean rows
+ * that leave the projection are deleted; dirty rows and tombstones survive for
+ * later reconciliation by a suitably-authorized user.
+ */
+function transitionReadProjectionOn(
+  db: SQLite.SQLiteDatabase,
+  input: ReadProjectionTransitionInput,
+): ReadProjectionTransitionResult {
+  let transitioned = false;
+  let purgedCollections: Collection[] = [];
+
+  db.withTransactionSync(() => {
+    const policyIsCurrent =
+      metaGetOn(db, input.policyMarkerKey) === input.policyVersion;
+    const storedProjection = policyIsCurrent
+      ? normalizedProjection(metaGetOn(db, input.readableCollectionsKey))
+      : null;
+    const previous = storedProjection ?? [...COLLECTIONS];
+    const nextSet = new Set(input.nextReadable);
+    const next = COLLECTIONS.filter((collection) => nextSet.has(collection));
+    const previousSet = new Set(previous);
+    const projectionChanged =
+      previous.length !== next.length ||
+      previous.some((collection, index) => collection !== next[index]);
+    const scopeChanged = metaGetOn(db, input.activeScopeKey) !== input.nextScope;
+
+    transitioned = !policyIsCurrent || projectionChanged || scopeChanged;
+    if (!transitioned) return;
+
+    purgedCollections = previous.filter(
+      (collection) => previousSet.has(collection) && !nextSet.has(collection),
+    );
+    for (const collection of purgedCollections) {
+      db.runSync(`DELETE FROM ${collection} WHERE dirty = 0`);
+    }
+
+    // These writes share the purge transaction: a crash can expose either the
+    // complete old projection or the complete pending new one, never a mixture.
+    metaSetOn(db, input.pendingScopeKey, input.nextScope);
+    metaSetOn(db, input.replayHeadKey, "");
+    metaSetOn(db, input.cursorKey, "0");
+    metaSetOn(db, input.completedScopeKey, "");
+    metaSetOn(db, input.activeScopeKey, input.nextScope);
+    metaSetOn(db, input.readableCollectionsKey, JSON.stringify(next));
+    metaSetOn(db, input.policyMarkerKey, input.policyVersion);
+  });
+
+  return { transitioned, purgedCollections };
 }
 
 /**
@@ -526,9 +919,17 @@ export function clearDirty(c: Collection, revisions: readonly DirtyRevision[]) {
   clearDirtyOn(conn(), c, revisions);
 }
 
+export function clearDirtyBatch(batches: readonly DirtyRevisionBatch[]): void {
+  clearDirtyBatchOn(conn(), batches);
+}
+
 /** Apply a change pulled from the server (last-write-wins by updatedAt). */
 export function applyRemote<T extends { id: string }>(c: Collection, change: ChangeRow<T>) {
   applyRemoteOn(conn(), c, change);
+}
+
+export function applyRemoteBatch(changes: readonly RemoteCollectionChange[]): void {
+  applyRemoteBatchOn(conn(), changes);
 }
 
 export function metaGet(key: string): string | null {
@@ -558,9 +959,15 @@ export function metaSet(key: string, value: string) {
 export type StoreScope = {
   metaGet: (key: string) => string | null;
   metaSet: (key: string, value: string) => void;
+  transitionReadProjection: (
+    input: ReadProjectionTransitionInput,
+  ) => ReadProjectionTransitionResult;
+  countDirty: (c: Collection) => number;
   loadDirty: <T>(c: Collection) => ChangeRow<T>[];
   clearDirty: (c: Collection, revisions: readonly DirtyRevision[]) => void;
+  clearDirtyBatch: (batches: readonly DirtyRevisionBatch[]) => void;
   applyRemote: <T extends { id: string }>(c: Collection, change: ChangeRow<T>) => void;
+  applyRemoteBatch: (changes: readonly RemoteCollectionChange[]) => void;
 };
 
 /**
@@ -587,9 +994,13 @@ export function storeScope(storeId: string): StoreScope {
   return {
     metaGet: (key) => metaGetOn(handle(), key),
     metaSet: (key, value) => metaSetOn(handle(), key, value),
+    transitionReadProjection: (input) => transitionReadProjectionOn(handle(), input),
+    countDirty: (c) => countDirtyOn(handle(), c),
     loadDirty: <T>(c: Collection) => loadDirtyOn<T>(handle(), c),
     clearDirty: (c, revisions) => clearDirtyOn(handle(), c, revisions),
+    clearDirtyBatch: (batches) => clearDirtyBatchOn(handle(), batches),
     applyRemote: (c, change) => applyRemoteOn(handle(), c, change),
+    applyRemoteBatch: (changes) => applyRemoteBatchOn(handle(), changes),
   };
 }
 

@@ -6,8 +6,8 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { EmptyState } from "@/components/EmptyState";
 import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
-import { useCart, type Receipt } from "@/lib/cart";
-import { useAuth } from "@/lib/auth";
+import { RequirePermission } from "@/components/RequirePermission";
+import { loadReceiptsInRange, useCart, type Receipt } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
 
 const CURRENCY = "NGN";
@@ -36,15 +36,22 @@ type Group = { key: string; label: string; amount: number; count: number };
  * and *how often*. That's what this answers, and why it exists as its own
  * screen rather than another revenue chart.
  */
-export default function DiscountsScreen() {
+export default function DiscountsRoute() {
+  return (
+    <RequirePermission permission="reports:view">
+      <DiscountsScreen />
+    </RequirePermission>
+  );
+}
+
+function DiscountsScreen() {
   const router = useRouter();
   const { from, to, label } = useLocalSearchParams<{
     from?: string;
     to?: string;
     label?: string;
   }>();
-  const { can } = useAuth();
-  const { receipts: allReceipts } = useCart();
+  const { receiptRevision } = useCart();
 
   const [groupBy, setGroupBy] = useState<"reason" | "staff">("reason");
   const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
@@ -57,15 +64,10 @@ export default function DiscountsScreen() {
   /** Only discounted sales, newest first, inside the range drilled in from. */
   const discounted = useMemo(
     () =>
-      allReceipts
-        .filter(
-          (receipt) =>
-            (receipt.discountTotal ?? 0) > 0 &&
-            receipt.createdAt >= bounds.lo &&
-            receipt.createdAt < bounds.hi,
-        )
-        .sort((a, b) => b.createdAt - a.createdAt),
-    [allReceipts, bounds],
+      loadReceiptsInRange(bounds.lo, bounds.hi).filter(
+        (receipt) => (receipt.discountTotal ?? 0) > 0,
+      ),
+    [bounds, receiptRevision],
   );
 
   const totals = useMemo(() => {
@@ -178,19 +180,6 @@ export default function DiscountsScreen() {
     </View>
   );
 
-  /** Same gate as the overview: this route is reachable by deep link too. */
-  if (!can("reports:view")) {
-    return (
-      <SafeAreaView edges={["top"]} style={styles.root}>
-        <Header subtitle={subtitle} onClose={() => router.back()} />
-        <View style={styles.denied}>
-          <Ionicons name="lock-closed-outline" size={46} color={colors.grey400} />
-          <Text style={styles.deniedText}>You don&apos;t have permission to view reports.</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       <Header subtitle={subtitle} onClose={() => router.back()} />
@@ -280,8 +269,6 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 16, fontWeight: "800", color: colors.primary, letterSpacing: 0.5 },
   headerSub: { fontSize: 11, color: colors.grey600, marginTop: 1, letterSpacing: 0.4 },
 
-  denied: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 32 },
-  deniedText: { fontSize: 15, color: colors.grey600, textAlign: "center" },
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center" },
 
   summaryCard: {

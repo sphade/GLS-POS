@@ -284,6 +284,15 @@ export interface SyncChange {
 }
 
 /**
+ * A server-authored change returned by pull (including the download half of a
+ * push). `serverSeq` is never accepted from clients; it is the store Durable
+ * Object's authoritative ordering key for classifying replay rows.
+ */
+export interface SyncPullChange extends SyncChange {
+  serverSeq: number;
+}
+
+/**
  * Push request: the device's current high-water `cursor` (the largest server
  * sequence it has already pulled) plus every locally-dirty change. The response
  * doubles as a pull, returning everything the store has seen since `cursor`.
@@ -295,7 +304,7 @@ export interface SyncPushRequest {
 
 export interface SyncPullResponse {
   /** Changes the store recorded with a sequence greater than the request cursor. */
-  changes: SyncChange[];
+  changes: SyncPullChange[];
   /** New high-water mark for the device to persist and send next time. */
   cursor: number;
   /**
@@ -313,10 +322,50 @@ export interface SyncPullResponse {
 // ---------------------------------------------------------------------------
 
 // Extensionless so both Metro (mobile) and the Worker bundler resolve it.
-import type { StoreRole } from "./permissions";
+import { roleCan, type Permission, type StoreRole } from "./permissions";
 export * from "./permissions";
 export * from "./web-order";
 export * from "./integration";
+
+/** Bump whenever collection visibility semantics change. */
+export const SYNC_READ_POLICY_VERSION = 2;
+
+/**
+ * Collection-level projection shared by the Worker and every offline device.
+ * A collection is readable when the role has any listed permission.
+ */
+const SYNC_READ_PERMISSIONS = {
+  products: ["catalog:read"],
+  categories: ["catalog:read"],
+  modifiers: ["catalog:read"],
+  ingredients: ["catalog:read"],
+  tables: ["tables:manage"],
+  customers: ["customers:manage"],
+  staff: ["staff:manage"],
+  receipts: ["receipts:view", "reports:view"],
+  returns: ["receipts:view", "reports:view"],
+  stock_movements: ["inventory:adjust"],
+  product_images: ["catalog:read"],
+  web_orders: ["sale:create", "kitchen:view"],
+  audit_log: ["audit:view"],
+  held_orders: ["sale:create"],
+} as const satisfies Record<SyncCollection, readonly Permission[]>;
+
+/** Unknown collection names fail closed. */
+export function roleCanReadSyncCollection(
+  role: StoreRole | null | undefined,
+  collection: string,
+): boolean {
+  const required = SYNC_READ_PERMISSIONS[collection as SyncCollection];
+  return !!required && required.some((permission) => roleCan(role, permission));
+}
+
+/** Stable collection order makes the persisted mobile projection deterministic. */
+export function readableSyncCollections(role: StoreRole): readonly SyncCollection[] {
+  return SYNC_COLLECTIONS.filter((collection) =>
+    roleCanReadSyncCollection(role, collection),
+  );
+}
 
 /** A store the signed-in user belongs to, with their role in it. */
 export interface StoreMembership {

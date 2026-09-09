@@ -1,10 +1,10 @@
-import { useState } from "react";
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useMemo, useState } from "react";
+import { ActivityIndicator, Alert, BackHandler, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter, type Href } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
-import { useCart } from "@/lib/cart";
+import { loadReceiptById, useCart } from "@/lib/cart";
 import { getSavedPrinter, printReceipt } from "@/lib/printer";
 import { printViaSystem } from "@/lib/receipt-share";
 import { feedbackTap } from "@/lib/feedback";
@@ -16,10 +16,23 @@ import { feedbackTap } from "@/lib/feedback";
 export default function SaleSuccessScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { receipts } = useCart();
-  const receipt = receipts.find((r) => r.id === id);
+  const { receiptRevision } = useCart();
+  const receipt = useMemo(() => loadReceiptById(id), [id, receiptRevision]);
 
   const [busy, setBusy] = useState(false);
+
+  // A completed sale must never pop back into the cleared Charge/Cash stack.
+  // Dismissing to the existing tab root also avoids accumulating duplicate tab
+  // navigators after a long shift.
+  useFocusEffect(
+    useCallback(() => {
+      const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+        router.dismissTo("/(tabs)");
+        return true;
+      });
+      return () => subscription.remove();
+    }, [router]),
+  );
 
   const amount = receipt ? formatMoney(receipt.total, receipt.currency) : formatMoney(0);
   const receiptId = receipt?.number.replace(/^#/, "") ?? "—";
@@ -98,7 +111,7 @@ export default function SaleSuccessScreen() {
           style={[styles.button, styles.newSale]}
           onPress={() => {
             feedbackTap();
-            router.replace("/(tabs)");
+            router.dismissTo("/(tabs)");
           }}
         >
           <Text style={styles.buttonText}>NEW SALE</Text>

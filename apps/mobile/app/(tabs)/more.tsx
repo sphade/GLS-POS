@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+﻿import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -9,7 +9,12 @@ import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { OFFLINE_MODE } from "@/lib/offline";
 import { useStore } from "@/lib/store";
-import { useServerRefresh } from "@/lib/sync";
+import {
+  getPendingSyncCount,
+  getSyncActivity,
+  subscribeSyncActivity,
+  useServerRefresh,
+} from "@/lib/sync";
 import { useWebOrders } from "@/lib/web-orders";
 import { feedbackTap } from "@/lib/feedback";
 import { stockSummaryOf } from "@/lib/stock";
@@ -38,10 +43,30 @@ type Card = {
 export default function MoreScreen() {
   const router = useRouter();
   const { products, customers } = useCatalog();
-  const { can } = useAuth();
+  const { can, signOut } = useAuth();
   const { store } = useStore();
   const { pendingCount } = useWebOrders();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
+  const getPendingSnapshot = useCallback(() => getPendingSyncCount(store.id), [store.id]);
+  const pendingSyncCount = useSyncExternalStore(
+    subscribeSyncActivity,
+    getPendingSnapshot,
+    getPendingSnapshot,
+  );
+  const syncActivity = useSyncExternalStore(
+    subscribeSyncActivity,
+    getSyncActivity,
+    getSyncActivity,
+  );
+  const hasCurrentStoreError =
+    syncActivity.errorStoreId === store.id && syncActivity.error !== null;
+  const showSyncRecovery = pendingSyncCount > 0 || hasCurrentStoreError;
+  const syncBlocked = syncActivity.busy || refreshing;
+  const syncStatus = syncBlocked
+    ? "SYNCING"
+    : hasCurrentStoreError
+      ? "NEEDS ATTENTION"
+      : "PENDING";
 
   // Staff accounts live in the control plane (API), not the synced local
   // catalog — the old `staff.length` here always showed 0.
@@ -111,6 +136,73 @@ export default function MoreScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
         }
       >
+        {showSyncRecovery ? (
+          <View style={[styles.card, styles.syncRecoveryCard]}>
+            <View style={styles.syncRecoveryHeader}>
+              <Text style={styles.syncRecoveryTitle}>SYNC RECOVERY</Text>
+              <Text
+                style={[
+                  styles.syncRecoveryStatus,
+                  hasCurrentStoreError && !syncBlocked
+                    ? styles.syncRecoveryStatusError
+                    : null,
+                ]}
+              >
+                {syncStatus}
+              </Text>
+            </View>
+            <Text style={styles.syncRecoveryCount}>
+              {pendingSyncCount} pending change{pendingSyncCount === 1 ? "" : "s"}
+            </Text>
+            {hasCurrentStoreError ? (
+              <Text style={styles.syncRecoveryError}>{syncActivity.error}</Text>
+            ) : (
+              <Text style={styles.syncRecoveryHint}>
+                These changes are saved on this device and waiting to upload.
+              </Text>
+            )}
+            <View style={styles.syncRecoveryActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Retry sync"
+                disabled={syncBlocked}
+                onPress={() => {
+                  feedbackTap();
+                  onRefresh();
+                }}
+                style={[
+                  styles.syncRecoveryButton,
+                  syncBlocked ? styles.syncRecoveryButtonDisabled : null,
+                ]}
+              >
+                <Text style={styles.syncRecoveryButtonText}>
+                  {syncBlocked ? "SYNCING…" : "RETRY"}
+                </Text>
+              </Pressable>
+              {hasCurrentStoreError && syncActivity.errorKind === "auth" ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Sign in again"
+                  onPress={() => {
+                    feedbackTap();
+                    void signOut();
+                  }}
+                  style={[styles.syncRecoveryButton, styles.syncRecoverySignInButton]}
+                >
+                  <Text
+                    style={[
+                      styles.syncRecoveryButtonText,
+                      styles.syncRecoverySignInButtonText,
+                    ]}
+                  >
+                    SIGN IN AGAIN
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
+
         <View style={styles.grid}>
           {cards.map((c) => (
             <Pressable
@@ -150,6 +242,60 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.grey200 },
 
   scroll: { padding: 8, paddingBottom: 20 },
+
+  syncRecoveryCard: {
+    width: "100%",
+    alignItems: "stretch",
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+    marginBottom: 8,
+  },
+  syncRecoveryHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  syncRecoveryTitle: {
+    color: colors.grey800,
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+  },
+  syncRecoveryStatus: { color: colors.primary, fontSize: 11, fontWeight: "800" },
+  syncRecoveryStatusError: { color: colors.red500 },
+  syncRecoveryCount: {
+    color: colors.grey800,
+    fontSize: 15,
+    fontWeight: "700",
+    marginTop: 6,
+  },
+  syncRecoveryHint: { color: colors.grey600, fontSize: 13, lineHeight: 18, marginTop: 2 },
+  syncRecoveryError: { color: colors.red500, fontSize: 13, lineHeight: 18, marginTop: 4 },
+  syncRecoveryActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 10,
+  },
+  syncRecoveryButton: {
+    minWidth: 76,
+    alignItems: "center",
+    backgroundColor: colors.primary,
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  syncRecoveryButtonDisabled: { opacity: 0.5 },
+  syncRecoveryButtonText: { color: colors.white, fontSize: 12, fontWeight: "800" },
+  syncRecoverySignInButton: {
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  syncRecoverySignInButtonText: { color: colors.primary },
 
   grid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 8 },
   card: {

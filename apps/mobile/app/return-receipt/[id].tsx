@@ -1,10 +1,16 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatAmount, formatMoney } from "@/constants/theme";
-import { isVoidReturn, reasonLabel, returnLineNetOf, useReturns } from "@/lib/returns";
+import {
+  isVoidReturn,
+  loadReturnById,
+  reasonLabel,
+  returnLineNetOf,
+  useReturns,
+} from "@/lib/returns";
 import { getSavedPrinter, printReturn } from "@/lib/printer";
 import {
   printReturnViaSystem,
@@ -25,10 +31,10 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReturnReceiptScreen() {
   const router = useRouter();
   const { id, fresh } = useLocalSearchParams<{ id: string; fresh?: string }>();
-  const { returns } = useReturns();
+  const { returnRevision } = useReturns();
   const [busy, setBusy] = useState(false);
 
-  const ret = returns.find((r) => r.id === id);
+  const ret = useMemo(() => loadReturnById(id), [id, returnRevision]);
 
   const run = async (fn: () => Promise<void>) => {
     feedbackTap();

@@ -7,11 +7,11 @@ import { colors, formatMoney } from "@/constants/theme";
 import { PosHeader } from "@/components/PosHeader";
 import { DatePickerSheet } from "@/components/DatePickerSheet";
 import { DateRangeSheet } from "@/components/DateRangeSheet";
-import { useAuth } from "@/lib/auth";
+import { RequirePermission } from "@/components/RequirePermission";
 import { EmptyState } from "@/components/EmptyState";
-import { useCart } from "@/lib/cart";
+import { loadReceiptsInRange, useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
-import { isVoidReturn, useReturns } from "@/lib/returns";
+import { isVoidReturn, loadReturnsInRange, useReturns } from "@/lib/returns";
 import { useStore } from "@/lib/store";
 import { useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
@@ -126,12 +126,19 @@ function dateLabelFor(range: string) {
  * Each card either opens the sales chart for the same range, or jumps to a real
  * screen (Inventory), so nothing leads to a dead or misleading page.
  */
-export default function ReportsScreen() {
+export default function ReportsRoute() {
+  return (
+    <RequirePermission permission="reports:view">
+      <ReportsScreen />
+    </RequirePermission>
+  );
+}
+
+function ReportsScreen() {
   const router = useRouter();
-  const { receipts } = useCart();
+  const { receiptRevision } = useCart();
   const { products } = useCatalog();
-  const { returns } = useReturns();
-  const { can } = useAuth();
+  const { returnRevision } = useReturns();
   const { store } = useStore();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
   const [rangeIndex, setRangeIndex] = useState(0);
@@ -153,8 +160,8 @@ export default function ReportsScreen() {
   const customIsSpan = !!custom && !customIsOneDay;
 
   const scoped = useMemo(
-    () => receipts.filter((r) => r.createdAt >= from && r.createdAt < to),
-    [receipts, from, to],
+    () => loadReceiptsInRange(from, to),
+    [from, to, receiptRevision],
   );
 
   /**
@@ -163,9 +170,8 @@ export default function ReportsScreen() {
    * report. Voids never moved money, so they're excluded from the figures.
    */
   const scopedReturns = useMemo(
-    () =>
-      returns.filter((ret) => !isVoidReturn(ret) && ret.createdAt >= from && ret.createdAt < to),
-    [returns, from, to],
+    () => loadReturnsInRange(from, to).filter((ret) => !isVoidReturn(ret)),
+    [from, to, returnRevision],
   );
 
   const stats = useMemo(() => {
@@ -298,23 +304,6 @@ export default function ReportsScreen() {
       params: { from: String(from), to: String(to), label: rangeLabel },
     } as unknown as Href);
   };
-
-  /**
-   * Hiding the tab isn't enough on its own — the route still exists and can be
-   * reached by a deep link or a stray push. The server enforces this too; this
-   * is the UI half.
-   */
-  if (!can("reports:view")) {
-    return (
-      <SafeAreaView edges={["top"]} style={styles.root}>
-        <PosHeader title="Reports" />
-        <View style={styles.denied}>
-          <Ionicons name="lock-closed-outline" size={46} color={colors.grey400} />
-          <Text style={styles.deniedText}>You don&apos;t have permission to view reports.</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
@@ -531,9 +520,6 @@ function MetricCard({
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
-
-  denied: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 32 },
-  deniedText: { fontSize: 15, color: colors.grey600, textAlign: "center" },
 
   dateBar: {
     flexDirection: "row",

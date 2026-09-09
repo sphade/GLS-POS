@@ -1,5 +1,5 @@
 import { API_URL, authCookie } from "./auth-client";
-import { SYNC_ENABLED, syncNow } from "./sync";
+import { pullNow, SYNC_ENABLED, syncNow } from "./sync";
 
 /**
  * Realtime nudges from the store's Durable Object.
@@ -108,8 +108,11 @@ function connect(storeId: string) {
       return;
     }
     attempts = 0;
-    // Catch up on anything missed while disconnected.
-    void syncNow(storeId);
+    // Pull first so incoming orders are never held behind an unrelated denied
+    // local edit. A normal sync follows to flush durable local dirty rows.
+    void pullNow(storeId).finally(() => {
+      if (isCurrent(gen)) void syncNow(storeId);
+    });
     pingTimer = setInterval(() => {
       if (!isCurrent(gen)) return;
       try {
@@ -123,8 +126,10 @@ function connect(storeId: string) {
   ws.onmessage = (event) => {
     if (!isCurrent(gen)) return;
     if (event.data === "pong") return;
-    // Any change notification simply triggers a sync.
-    void syncNow(storeId);
+    // Any change notification triggers a pull-only catch-up. Local writes have
+    // their own debounced upload path, so a rejected edit cannot delay inbound
+    // operational updates.
+    void pullNow(storeId);
   };
 
   ws.onerror = () => {
@@ -141,7 +146,12 @@ function connect(storeId: string) {
 
 /** Open the realtime channel for a store. Returns a stop function. */
 export function startRealtime(storeId: string): () => void {
-  if (!SYNC_ENABLED) {
+  if (
+    !SYNC_ENABLED ||
+    !storeId ||
+    storeId === "bootstrap" ||
+    storeId === "store_unknown"
+  ) {
     stopRealtime();
     return () => {};
   }

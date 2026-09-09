@@ -14,12 +14,13 @@ import type {
   StockState,
   StoreRole,
   SyncChange,
+  SyncPullChange,
   SyncPullResponse,
   SyncPushRequest,
   WebOrder,
   WebOrderLine,
 } from "@gls-pos/types";
-import { roleCan } from "@gls-pos/types";
+import { roleCan, roleCanReadSyncCollection } from "@gls-pos/types";
 import type { Env } from "../env.js";
 import * as schema from "./schema.js";
 import migrations from "./migrations/migrations.js";
@@ -234,6 +235,19 @@ const WRITE_PERMISSION: Record<string, Permission> = {
 };
 
 /**
+ * Read policy for the opaque sync stream.
+ *
+ * Membership middleware supplies the current D1 role on every request, so a
+ * stale or tampered mobile cache cannot download back-office history. Receipt
+ * and return rows intentionally share `receipts:view`: supervisors need both
+ * to display an accurate individual receipt, while cashiers keep only receipts
+ * already created on their own offline till.
+ */
+function mayReadCollection(collection: string, role: StoreRole): boolean {
+  return roleCanReadSyncCollection(role, collection);
+}
+
+/**
  * Whether a pushed receipt reprices the sale with a discount.
  *
  * Checked on the whole document (the order-level total and every line) so a
@@ -316,20 +330,21 @@ export type StockActor = {
 export type PushResult = {
   /** Collections the caller's role may not write. Empty means the push applied. */
   denied: string[];
-  changes: SyncChange[];
+  changes: SyncPullChange[];
   cursor: number;
   /** The store's head sequence, so devices can detect a rebuilt oplog. */
   head: number;
 };
 
 /** DB row → wire change (parse the stored JSON back into a document). */
-function toChange(row: DocumentRow): SyncChange {
+function toChange(row: DocumentRow): SyncPullChange {
   return {
     collection: row.collection as SyncChange["collection"],
     id: row.id,
     data: JSON.parse(row.data),
     updatedAt: row.updatedAt,
     deleted: row.deleted,
+    serverSeq: row.serverSeq,
   };
 }
 
@@ -390,8 +405,9 @@ export class StoreDurableObject extends DurableObject<Env> {
    */
   private changesSincePage(
     cursor: number,
+    role: StoreRole,
     options?: { includeProductImages?: boolean },
-  ): { changes: SyncChange[]; cursor: number } {
+  ): { changes: SyncPullChange[]; cursor: number } {
     const includeImages = options?.includeProductImages === true;
     const rows = this.db
       .select()
@@ -406,20 +422,27 @@ export class StoreDurableObject extends DurableObject<Env> {
       .all();
 
     let bytes = 0;
-    let cut = rows.length;
-    for (let i = 0; i < rows.length; i += 1) {
-      bytes += rows[i]!.data.length + 96;
-      if (bytes > PULL_MAX_BYTES) {
-        // Always include at least one row so a single oversized document
-        // (e.g. a huge image) can't wedge the stream at zero progress.
-        cut = i === 0 ? 1 : i;
-        break;
+    let nextCursor = cursor;
+    const page: DocumentRow[] = [];
+    for (const row of rows) {
+      if (!mayReadCollection(row.collection, role)) {
+        // Hidden rows still consume their sequence. Advancing over them keeps a
+        // restricted client from requesting the same page forever and does not
+        // reveal their contents.
+        nextCursor = row.serverSeq;
+        continue;
       }
+
+      const rowBytes = row.data.length + 96;
+      if (page.length > 0 && bytes + rowBytes > PULL_MAX_BYTES) break;
+      page.push(row);
+      bytes += rowBytes;
+      nextCursor = row.serverSeq;
+      // Always make progress even if one permitted document exceeds the budget.
+      if (rowBytes > PULL_MAX_BYTES) break;
     }
 
-    const page = rows.slice(0, cut);
-    if (page.length === 0) return { changes: [], cursor };
-    return { changes: page.map(toChange), cursor: page[page.length - 1]!.serverSeq };
+    return { changes: page.map(toChange), cursor: nextCursor };
   }
 
   /**
@@ -427,8 +450,8 @@ export class StoreDurableObject extends DurableObject<Env> {
    * device's cursor. Used for a first full download (paged) and periodic
    * catch-up.
    */
-  async pull(cursor: number): Promise<SyncPullResponse> {
-    const page = this.changesSincePage(cursor);
+  async pull(cursor: number, role: StoreRole): Promise<SyncPullResponse> {
+    const page = this.changesSincePage(cursor, role);
     return { changes: page.changes, cursor: page.cursor, head: this.currentSeq() };
   }
 
@@ -575,7 +598,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     // The download half of the round-trip is paged exactly like a pull, so an
     // upload can never be killed by an oversized response. Anything past the
     // page arrives on the device's next cycle.
-    const page = this.changesSincePage(request.cursor);
+    const page = this.changesSincePage(request.cursor, role);
     return { denied: [], changes: page.changes, cursor: page.cursor, head: this.currentSeq() };
   }
 

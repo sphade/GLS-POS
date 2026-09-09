@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import type { AuditEntry } from "@gls-pos/types";
 import { ROLE_LABELS } from "@gls-pos/types";
 import { colors } from "@/constants/theme";
 import { EmptyState } from "@/components/EmptyState";
 import { useAuth } from "@/lib/auth";
 import { loadAuditLog } from "@/lib/audit";
+import { countDocs } from "@/lib/db";
 import { onSynced } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 
@@ -41,26 +41,30 @@ export default function AuditScreen() {
   const { can } = useAuth();
   const allowed = can("audit:view");
 
-  const [entries, setEntries] = useState<AuditEntry[]>(() => (allowed ? loadAuditLog() : []));
   const [limit, setLimit] = useState(PAGE);
+  const [revision, setRevision] = useState(0);
 
-  const refresh = useCallback(() => {
-    if (allowed) setEntries(loadAuditLog());
-  }, [allowed]);
-
-  // Refresh only when this device actually receives audit rows.
+  // Refresh only when this device actually receives audit rows. The next page
+  // is queried from SQLite; no full append-only log enters React memory.
   useEffect(
     () =>
       allowed
         ? onSynced(({ pulledCollections }) => {
-            if (pulledCollections.has("audit_log")) refresh();
+            if (pulledCollections.has("audit_log")) {
+              setRevision((current) => current + 1);
+            }
           })
         : undefined,
-    [allowed, refresh],
+    [allowed],
   );
 
-  const visible = useMemo(() => entries.slice(0, limit), [entries, limit]);
-  const hasMore = entries.length > limit;
+  const page = useMemo(
+    () => (allowed ? loadAuditLog(limit + 1) : []),
+    [allowed, limit, revision],
+  );
+  const visible = page.slice(0, limit);
+  const hasMore = page.length > limit;
+  const total = useMemo(() => (allowed ? countDocs("audit_log") : 0), [allowed, revision]);
 
   if (!allowed) {
     return (
@@ -75,7 +79,7 @@ export default function AuditScreen() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
-      <Header onBack={() => router.back()} count={entries.length} />
+      <Header onBack={() => router.back()} count={total} />
       <FlatList
         data={visible}
         keyExtractor={(e) => e.id}

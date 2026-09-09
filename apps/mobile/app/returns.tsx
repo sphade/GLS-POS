@@ -1,35 +1,67 @@
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { EmptyState } from "@/components/EmptyState";
-import { isVoidReturn, reasonLabel, useReturns, type SaleReturn } from "@/lib/returns";
+import {
+  isVoidReturn,
+  loadRecentReturns,
+  reasonLabel,
+  RETURN_REASONS,
+  useReturns,
+  type SaleReturn,
+} from "@/lib/returns";
+import { countDocs, searchDocs, sumDocs } from "@/lib/db";
 import { feedbackTap } from "@/lib/feedback";
 
+const PAGE = 100;
+
 /**
- * Every return raised at this store, newest first. Refunds are append-only, so
- * this list is the audit surface a manager checks when reconciling the drawer.
+ * Return history is paged from local SQLite. The provider keeps only a small
+ * recent window, while managers can still browse and search every offline
+ * credit note without putting the whole append-only history into React.
  */
 export default function ReturnsScreen() {
   const router = useRouter();
-  const { returns } = useReturns();
+  const { returnRevision } = useReturns();
   const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(PAGE);
+  const deferredQuery = useDeferredValue(query.trim());
 
-  const q = query.trim().toLowerCase();
-  const filtered = useMemo(() => {
-    if (!q) return returns;
-    return returns.filter((ret) =>
-      [ret.number, ret.receiptNumber, ret.servedBy, ret.method, reasonLabel(ret.reason)].some((field) =>
-        field.toLowerCase().includes(q),
-      ),
+  const queried = useMemo(() => {
+    if (!deferredQuery) return loadRecentReturns(limit + 1);
+
+    const page = { limit: limit + 1, offset: 0 };
+    const order = { field: "createdAt", direction: "desc" as const };
+    const direct = searchDocs<SaleReturn>(
+      "returns",
+      ["number", "receiptNumber", "servedBy", "method", "reason"],
+      deferredQuery,
+      order,
+      page,
     );
-  }, [returns, q]);
+    const normalized = deferredQuery.toLowerCase();
+    const labelled = RETURN_REASONS
+      .filter((reason) => reason.label.toLowerCase().includes(normalized))
+      .flatMap((reason) =>
+        searchDocs<SaleReturn>("returns", ["reason"], reason.key, order, page),
+      );
+    const byId = new Map([...direct, ...labelled].map((ret) => [ret.id, ret]));
+    return [...byId.values()]
+      .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+      .slice(0, limit + 1);
+  }, [deferredQuery, limit, returnRevision]);
+  const hasMore = queried.length > limit;
+  const returns = queried.slice(0, limit);
 
+  // Keep all-history summary figures accurate with tiny SQL aggregates rather
+  // than deriving them from whichever page happens to be visible.
+  const totalCount = useMemo(() => countDocs("returns"), [returnRevision]);
   const refundedTotal = useMemo(
-    () => returns.reduce((sum, ret) => (isVoidReturn(ret) ? sum : sum + ret.total), 0),
-    [returns],
+    () => sumDocs("returns", "total", [{ field: "method", value: "No refund", operator: "neq" }]),
+    [returnRevision],
   );
   const currency = returns[0]?.currency ?? "NGN";
 
@@ -49,33 +81,42 @@ export default function ReturnsScreen() {
           <TextInput
             style={styles.searchInput}
             value={query}
-            onChangeText={setQuery}
+            onChangeText={(next) => {
+              setQuery(next);
+              setLimit(PAGE);
+            }}
             placeholder="Credit note, receipt, staff…"
             placeholderTextColor={colors.grey500}
             returnKeyType="search"
           />
           {query.length > 0 && (
-            <Pressable hitSlop={8} onPress={() => setQuery("")}>
+            <Pressable
+              hitSlop={8}
+              onPress={() => {
+                setQuery("");
+                setLimit(PAGE);
+              }}
+            >
               <Ionicons name="close-circle" size={18} color={colors.grey500} />
             </Pressable>
           )}
         </View>
       </View>
 
-      {returns.length > 0 && (
+      {totalCount > 0 && (
         <View style={styles.summaryBar}>
           <Text style={styles.summaryText}>
-            {returns.length} return{returns.length === 1 ? "" : "s"}
+            {totalCount} return{totalCount === 1 ? "" : "s"}
           </Text>
           <Text style={styles.summaryAmount}>{formatMoney(refundedTotal, currency)} refunded</Text>
         </View>
       )}
 
-      {filtered.length === 0 ? (
+      {returns.length === 0 ? (
         <View style={styles.emptyWrap}>
           <EmptyState
             text={
-              returns.length === 0
+              totalCount === 0
                 ? "No returns yet. Open a receipt and tap RETURN to refund an item."
                 : "No returns match that search."
             }
@@ -83,13 +124,31 @@ export default function ReturnsScreen() {
         </View>
       ) : (
         <FlatList
-          data={filtered}
+          data={returns}
           keyExtractor={(ret) => ret.id}
           contentContainerStyle={{ padding: 8, paddingBottom: 24 }}
-          renderItem={({ item }) => <ReturnRow ret={item} onPress={() => {
-            feedbackTap();
-            router.push(`/return-receipt/${item.id}` as Href);
-          }} />}
+          renderItem={({ item }) => (
+            <ReturnRow
+              ret={item}
+              onPress={() => {
+                feedbackTap();
+                router.push(`/return-receipt/${item.id}` as Href);
+              }}
+            />
+          )}
+          ListFooterComponent={
+            hasMore ? (
+              <Pressable
+                style={styles.more}
+                onPress={() => {
+                  feedbackTap();
+                  setLimit((current) => current + PAGE);
+                }}
+              >
+                <Text style={styles.moreText}>Load more</Text>
+              </Pressable>
+            ) : null
+          }
         />
       )}
     </SafeAreaView>
@@ -182,4 +241,6 @@ const styles = StyleSheet.create({
   rowMeta: { fontSize: 12, color: colors.grey600, marginTop: 2 },
   rowStaff: { fontSize: 11, color: colors.grey500, marginTop: 2 },
   rowAmount: { fontSize: 14, fontWeight: "800", color: colors.red500 },
+  more: { alignItems: "center", paddingVertical: 16 },
+  moreText: { color: colors.primary, fontWeight: "700", fontSize: 15 },
 });

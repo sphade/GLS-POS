@@ -11,7 +11,16 @@
 } from "react";
 import type { ProductVariant, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
-import { loadAll, mergeById, metaGet, metaSet, put as dbPut, softDelete } from "./db";
+import {
+  loadAll,
+  loadDocsInRange,
+  loadOne,
+  loadRecentDocs,
+  mergeById,
+  put as dbPut,
+  putWithDeviceSequence,
+  softDelete,
+} from "./db";
 import {
   computeTotals,
   type Discount,
@@ -186,6 +195,27 @@ export type Receipt = {
   paidAt?: number;
 };
 
+/** React keeps only the hot edge; SQLite retains every receipt offline. */
+const RECEIPT_LIVE_LIMIT = 100;
+
+/** One receipt, including records older than the live provider window. */
+export function loadReceiptById(id: string | undefined): Receipt | null {
+  return id ? loadOne<Receipt>("receipts", id) : null;
+}
+
+/** Receipts inside a half-open report range, newest first. */
+export function loadReceiptsInRange(from: number, to: number): Receipt[] {
+  return loadDocsInRange<Receipt>("receipts", "createdAt", from, to);
+}
+
+const boundReceipts = (rows: readonly Receipt[]): Receipt[] =>
+  [...rows]
+    .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+    .slice(0, RECEIPT_LIVE_LIMIT);
+
+const mergeLiveReceipt = (rows: readonly Receipt[], receipt: Receipt): Receipt[] =>
+  boundReceipts([receipt, ...rows.filter((row) => row.id !== receipt.id)]);
+
 export type CartEntry = {
   lineId: string;
   item: Item;
@@ -263,7 +293,10 @@ type CartState = {
   /** Leave the table: discard its ticket if one is open, then empty the cart. */
   abandonTableTicket: () => void;
 
+  /** Newest receipt window only; complete history stays in SQLite. */
   receipts: Receipt[];
+  /** Changes for both live-window and historical receipt query hooks. */
+  receiptRevision: number;
   completeSale: (input: {
     mode: string;
     customerName: string | null;
@@ -798,8 +831,9 @@ export function CartProvider({ children }: { children: ReactNode }) {
   // fake receipts (some flagged unsynced on purpose), which made the Receipts
   // screen and its "not synced" warning show information that wasn't true.
   const [receipts, setReceipts] = useState<Receipt[]>(() =>
-    loadAll<Receipt>("receipts").sort((a, b) => b.createdAt - a.createdAt),
+    loadRecentDocs<Receipt>("receipts", "createdAt", RECEIPT_LIVE_LIMIT),
   );
+  const [receiptRevision, setReceiptRevision] = useState(0);
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>(() =>
     loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt),
   );
@@ -827,7 +861,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
       }
       const receiptIds = pulledIds.get("receipts");
       if (receiptIds?.length) {
-        setReceipts((prev) => mergeById(prev, "receipts", receiptIds, (row) => row.createdAt));
+        setReceipts((prev) =>
+          boundReceipts(mergeById(prev, "receipts", receiptIds, (row) => row.createdAt)),
+        );
+        // A pulled id may be older than the live window. Historical query hooks
+        // still need to observe it even when the bounded array is unchanged.
+        setReceiptRevision((revision) => revision + 1);
       }
     });
   }, []);
@@ -916,7 +955,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
       settleReceipt: (id) => {
-        const receipt = receipts.find((r) => r.id === id);
+        const receipt = receipts.find((r) => r.id === id) ?? loadOne<Receipt>("receipts", id);
         if (!receipt || receipt.status === "paid") return;
         const settled: Receipt = {
           ...receipt,
@@ -924,7 +963,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
           paidAt: Date.now(),
         };
         dbPut("receipts", settled);
-        setReceipts((prev) => prev.map((r) => (r.id === id ? settled : r)));
+        setReceipts((prev) =>
+          prev.some((row) => row.id === id)
+            ? prev.map((row) => (row.id === id ? settled : row))
+            : prev,
+        );
+        setReceiptRevision((revision) => revision + 1);
         logAudit({
           action: "receipt.settle",
           entity: "receipt",
@@ -934,24 +978,16 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
       receipts,
+      receiptRevision,
       completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
         const now = Date.now();
         const settled = status ?? "paid";
-        /**
-         * Invoice number: a per-device tag (1-9, chosen once per install)
-         * prefixes a local sequence. Two tills can therefore never print the
-         * same number for different sales — the old `1000 + length` scheme
-         * collided as soon as two devices' receipt lists merged via sync.
-         */
-        const tagKey = "receipt_tag";
-        let tag = Number(metaGet(tagKey) ?? "") || 0;
-        if (tag < 1 || tag > 9) {
-          tag = 1 + Math.floor(Math.random() * 9);
-          metaSet(tagKey, String(tag));
-        }
-        const receipt: Receipt = {
-          id: `rcpt_${now}`,
-          number: `#${tag}${1000 + receipts.length + 1}`,
+        const receipt = putWithDeviceSequence<Receipt>(
+          "receipts",
+          "receipt_sequence_v1",
+          (tag, sequence) => ({
+            id: `rcpt_${now}`,
+            number: `#${tag}${1000 + sequence}`,
           customerName,
           mode,
           status: settled,
@@ -984,10 +1020,11 @@ export function CartProvider({ children }: { children: ReactNode }) {
           storeName,
           storeReference,
           servedBy,
-          paidAt: settled === "paid" ? now : undefined,
-        };
-        dbPut("receipts", receipt);
-        setReceipts((prev) => [receipt, ...prev]);
+            paidAt: settled === "paid" ? now : undefined,
+          }),
+        );
+        setReceipts((prev) => mergeLiveReceipt(prev, receipt));
+        setReceiptRevision((revision) => revision + 1);
         clear();
         logAudit({
           action: "sale.complete",
@@ -1030,7 +1067,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
           servedBy,
         };
         dbPut("receipts", receipt);
-        setReceipts((prev) => [receipt, ...prev]);
+        setReceipts((prev) => mergeLiveReceipt(prev, receipt));
+        setReceiptRevision((revision) => revision + 1);
         logAudit({
           action: "order.bill",
           entity: "receipt",
@@ -1045,6 +1083,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
     entries,
     orderDiscount,
     receipts,
+    receiptRevision,
     heldOrders,
     add,
     remove,

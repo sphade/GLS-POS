@@ -31,12 +31,16 @@ export default function ChargeScreen() {
   const canSell = can("sale:create");
   const [mode, setMode] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const goBack = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace("/(tabs)/counter" as Href);
+  };
 
   if (!canSell) {
     return (
       <SafeAreaView edges={["top"]} style={styles.root}>
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} style={styles.headerBtn}>
+          <Pressable onPress={goBack} style={styles.headerBtn}>
             <Ionicons name="arrow-back" size={24} color={colors.white} />
           </Pressable>
           <Text style={styles.headerTitle}>{strings.charge}</Text>

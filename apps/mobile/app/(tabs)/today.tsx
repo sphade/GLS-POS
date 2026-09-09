@@ -15,30 +15,30 @@ import type { WebOrder } from "@gls-pos/types";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { EmptyState } from "@/components/EmptyState";
 import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
-import { useCart } from "@/lib/cart";
+import { loadReceiptsInRange, useCart } from "@/lib/cart";
 import {
   isVoidReturn,
+  loadReturnsInRange,
   refundedTotalOf,
   returnStateOf,
   useReturns,
   type ReturnState,
 } from "@/lib/returns";
-import { useWebOrders } from "@/lib/web-orders";
+import { loadWebOrdersInRange, useWebOrders } from "@/lib/web-orders";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
 import { loadDirtyIds } from "@/lib/db";
-import { onSynced, syncNowDetailed, useServerRefresh } from "@/lib/sync";
+import { onSynced, useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 
 export default function TodayScreen() {
   const router = useRouter();
-  const { receipts } = useCart();
-  const { returns: allReturns } = useReturns();
-  const { orders } = useWebOrders();
+  const { receiptRevision } = useCart();
+  const { returnRevision } = useReturns();
+  const { active: activeWebOrders, webOrderRevision } = useWebOrders();
   const { can } = useAuth();
   const { store } = useStore();
   const [tab, setTab] = useState<"pos" | "online">("pos");
-  const [syncing, setSyncing] = useState(false);
   const [query, setQuery] = useState("");
   /** Only one receipt is open at a time, keeping a long day easy to scan. */
   const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
@@ -48,16 +48,34 @@ export default function TodayScreen() {
    * sync engine clears — rather than the stale `receipt.synced` JSON property.
    */
   const [pendingIds, setPendingIds] = useState(() => loadDirtyIds("receipts"));
-  const [syncError, setSyncError] = useState<string | null>(null);
   const { refreshing, onRefresh: serverRefresh } = useServerRefresh(store.id);
-  const pending = pendingIds.length;
   const pendingSet = new Set(pendingIds);
-  /** This tab is Today, so older receipts belong in Reports, not this list. */
+  /** This tab is Today, so older receipts stay in SQLite until requested. */
   const todayReceipts = useMemo(() => {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
-    return receipts.filter((receipt) => receipt.createdAt >= start.getTime());
-  }, [receipts]);
+    return loadReceiptsInRange(start.getTime(), Date.now() + 1);
+  }, [receiptRevision]);
+
+  const todayReturns = useMemo(() => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return loadReturnsInRange(start.getTime(), Date.now() + 1);
+  }, [returnRevision]);
+
+  const todayOrders = useMemo(() => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const byId = new Map(
+      loadWebOrdersInRange(start.getTime(), Date.now() + 1).map((order) => [order.id, order]),
+    );
+    // An unfinished order remains operational after midnight; Today combines
+    // those carry-overs with orders created during the current calendar day.
+    for (const order of activeWebOrders) byId.set(order.id, order);
+    return [...byId.values()].sort(
+      (a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id),
+    );
+  }, [activeWebOrders, webOrderRevision]);
 
   /**
    * Return state per receipt, derived from its credit notes so a refunded sale
@@ -65,9 +83,9 @@ export default function TodayScreen() {
    */
   const returnInfo = useMemo(() => {
     const map = new Map<string, { refunded: number; state: ReturnState }>();
-    if (allReturns.length === 0) return map;
+    if (todayReturns.length === 0) return map;
     for (const receipt of todayReceipts) {
-      const rets = allReturns.filter((ret) => ret.receiptId === receipt.id);
+      const rets = todayReturns.filter((ret) => ret.receiptId === receipt.id);
       if (rets.length === 0) continue;
       map.set(receipt.id, {
         refunded: refundedTotalOf(rets),
@@ -75,18 +93,17 @@ export default function TodayScreen() {
       });
     }
     return map;
-  }, [todayReceipts, allReturns]);
+  }, [todayReceipts, todayReturns]);
 
   /** Money refunded today, by refund date — what the drawer actually paid back. */
-  const refundedToday = useMemo(() => {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    return allReturns.reduce(
-      (sum, ret) =>
-        !isVoidReturn(ret) && ret.createdAt >= start.getTime() ? sum + ret.total : sum,
-      0,
-    );
-  }, [allReturns]);
+  const refundedToday = useMemo(
+    () =>
+      todayReturns.reduce(
+        (sum, ret) => (!isVoidReturn(ret) ? sum + ret.total : sum),
+        0,
+      ),
+    [todayReturns],
+  );
 
   const q = query.trim().toLowerCase();
   /** Filter receipts by number, customer, or payment mode. */
@@ -98,22 +115,20 @@ export default function TodayScreen() {
   }, [todayReceipts, q]);
   /** Filter VIP orders by code, table, or guest. */
   const filteredOrders = useMemo(() => {
-    if (!q) return orders;
-    return orders.filter((o) =>
+    if (!q) return todayOrders;
+    return todayOrders.filter((o) =>
       [o.code, o.tableName, o.guestName ?? ""].some((f) => f.toLowerCase().includes(q)),
     );
-  }, [orders, q]);
+  }, [todayOrders, q]);
   const refreshPending = useCallback(() => {
-    const ids = loadDirtyIds("receipts");
-    setPendingIds(ids);
-    if (ids.length === 0) setSyncError(null);
+    setPendingIds(loadDirtyIds("receipts"));
   }, []);
 
-  // A local sale updates `receipts` immediately even while offline. Mirror its
-  // dirty edge at the same time so Today never labels an unsent sale as synced.
+  // A local sale advances the lightweight receipt revision immediately even
+  // while offline. Mirror its dirty edge so Today never labels it as synced.
   useEffect(() => {
     refreshPending();
-  }, [receipts, refreshPending]);
+  }, [receiptRevision, refreshPending]);
 
   useEffect(
     () =>
@@ -127,33 +142,6 @@ export default function TodayScreen() {
       }),
     [refreshPending],
   );
-
-  const pushNow = async () => {
-    if (syncing) return;
-    feedbackTap();
-    setSyncing(true);
-    setSyncError(null);
-    try {
-      // Detailed result so the banner shows the REAL reason a retry failed
-      // (expired session, offline, server rejected, timeout) instead of a
-      // blanket "check your connection" that hides the actual problem.
-      const result = await syncNowDetailed(store.id);
-      const remaining = loadDirtyIds("receipts");
-      setPendingIds(remaining);
-      if (!result.ok) {
-        setSyncError(result.message);
-      } else if (remaining.length > 0) {
-        setSyncError("Upload failed — check your connection, then tap to retry");
-      } else {
-        setSyncError(null);
-      }
-    } catch {
-      refreshPending();
-      setSyncError("Upload failed — check your connection, then tap to retry");
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   /**
    * Hiding the tab isn't enough — the route still exists and is reachable by a
@@ -198,17 +186,6 @@ export default function TodayScreen() {
           )}
         </View>
       </View>
-
-      {pending > 0 && (
-        <Pressable style={styles.syncBar} onPress={pushNow} disabled={syncing}>
-          <Text style={styles.syncText}>
-            {syncing
-              ? "Uploading receipts…"
-              : syncError ?? `${pending} receipt${pending === 1 ? "" : "s"} waiting to upload · tap to retry`}
-          </Text>
-          <Ionicons name="sync" size={16} color={colors.white} />
-        </Pressable>
-      )}
 
       {refundedToday > 0 && tab === "pos" && (
         <Pressable
@@ -368,15 +345,6 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   searchInput: { flex: 1, color: colors.grey800, fontSize: 16, padding: 0 },
-  syncBar: {
-    backgroundColor: colors.red500,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  syncText: { color: colors.white, fontSize: 12, flex: 1 },
   tabCard: {
     flexDirection: "row",
     backgroundColor: colors.card,

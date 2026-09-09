@@ -23,6 +23,7 @@ export default function TabsLayout() {
   return (
     <Tabs
       initialRouteName="index"
+      backBehavior="initialRoute"
       tabBar={(props) => <PosTabBar {...props} />}
       screenOptions={{ headerShown: false, freezeOnBlur: true }}
     >

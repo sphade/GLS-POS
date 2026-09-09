@@ -20,6 +20,10 @@ export default function CashPaymentScreen() {
   const [received, setReceived] = useState("");
   const currency = store.currency;
   const sym = currencySymbol(currency);
+  const goBack = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace("/(tabs)/counter" as Href);
+  };
 
   const receivedMinor = Math.round((parseFloat(received || "0") || 0) * 100);
   const short = Math.max(0, total - receivedMinor);
@@ -61,7 +65,7 @@ export default function CashPaymentScreen() {
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.headerBtn}>
+        <Pressable onPress={goBack} style={styles.headerBtn}>
           <Ionicons name="arrow-back" size={24} color={colors.white} />
         </Pressable>
         <Text style={styles.headerTitle}>Cash</Text>

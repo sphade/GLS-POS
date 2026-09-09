@@ -14,6 +14,10 @@ const syncChangeSchema = z.object({
   deleted: z.boolean(),
 });
 
+export const syncPullQuerySchema = z.object({
+  cursor: z.coerce.number().int().nonnegative().finite().default(0),
+});
+
 export const syncPushSchema = z.object({
   cursor: z.number().int().nonnegative().default(0),
   changes: z.array(syncChangeSchema).default([]),

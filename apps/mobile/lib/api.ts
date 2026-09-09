@@ -7,6 +7,8 @@ import { OFFLINE_MODE } from "./offline";
  * operational data does NOT go through here — it syncs via lib/sync.ts against
  * the store's Durable Object. Every request carries the better-auth cookie.
  */
+const REQUEST_TIMEOUT_MS = 12_000;
+
 async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   // Offline builds never touch the network; every caller already handles a
   // failed result, so screens degrade with a truthful message instead of
@@ -14,9 +16,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T
   if (OFFLINE_MODE) {
     return { ok: false, error: { code: "offline_build", message: "This build runs without a server." } };
   }
+
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  init?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${API_URL}/api${path}`, {
       ...init,
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Cookie: authCookie(),
@@ -25,7 +33,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T
     });
     return (await res.json()) as ApiResult<T>;
   } catch (err) {
-    return { ok: false, error: { code: "network_error", message: (err as Error).message } };
+    const error = err as Error;
+    return {
+      ok: false,
+      error: {
+        code: error.name === "AbortError" ? "timeout" : "network_error",
+        message: error.name === "AbortError" ? "The server took too long to respond." : error.message,
+      },
+    };
+  } finally {
+    clearTimeout(timeout);
+    init?.signal?.removeEventListener("abort", abortFromCaller);
   }
 }
 

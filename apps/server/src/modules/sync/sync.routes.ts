@@ -4,7 +4,7 @@ import { ok } from "../../lib/response.js";
 import { validate } from "../../lib/validator.js";
 import { HttpError } from "../../lib/http-error.js";
 import type { PushResult } from "../../durable-objects/store.do.js";
-import { syncPushSchema } from "./sync.schema.js";
+import { syncPullQuerySchema, syncPushSchema } from "./sync.schema.js";
 
 /**
  * Offline-first sync endpoint. One round-trip uploads the device's dirty
@@ -39,7 +39,7 @@ export const sync = new Hono<AppEnv>()
     return ok(c, { changes, cursor, head });
   })
   // Pull-only catch-up: ?cursor=N returns changes since N.
-  .get("/", async (c) => {
-    const cursor = Number(c.req.query("cursor") ?? "0") || 0;
-    return ok(c, await c.get("store").pull(cursor));
+  .get("/", validate("query", syncPullQuerySchema), async (c) => {
+    const { cursor } = c.req.valid("query");
+    return ok(c, await c.get("store").pull(cursor, c.get("role")));
   });

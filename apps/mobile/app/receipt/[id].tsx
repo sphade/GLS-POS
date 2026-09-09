@@ -1,15 +1,16 @@
-import { useState } from "react";
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useCallback, useMemo, useState } from "react";
+import { ActivityIndicator, Alert, BackHandler, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter, type Href } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatAmount, formatMoney, strings } from "@/constants/theme";
-import { useCart } from "@/lib/cart";
+import { loadReceiptById, useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth";
 import {
   isOverReturned,
   isVoidReturn,
   lineNetOf,
+  loadReturnsForReceipt,
   receiptNetOf,
   receiptTaxOf,
   refundedTotalOf,
@@ -31,12 +32,37 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReceiptScreen() {
   const { id, fromSale } = useLocalSearchParams<{ id: string; fromSale?: string }>();
   const router = useRouter();
-  const { receipts, settleReceipt } = useCart();
+  const { receiptRevision, settleReceipt } = useCart();
   const { can } = useAuth();
-  const { returnsFor } = useReturns();
+  const { returnRevision } = useReturns();
   const [busy, setBusy] = useState(false);
-  const receipt = receipts.find((r) => r.id === id);
-  const returns = receipt ? returnsFor(receipt.id) : [];
+  const isCheckoutReceipt = fromSale === "1";
+  const closeReceipt = useCallback(() => {
+    if (isCheckoutReceipt) {
+      router.dismissTo("/(tabs)");
+    } else if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace("/(tabs)");
+    }
+  }, [isCheckoutReceipt, router]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!isCheckoutReceipt) return;
+
+      const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+        closeReceipt();
+        return true;
+      });
+      return () => subscription.remove();
+    }, [closeReceipt, isCheckoutReceipt]),
+  );
+  const receipt = useMemo(() => loadReceiptById(id), [id, receiptRevision]);
+  const returns = useMemo(
+    () => (receipt ? loadReturnsForReceipt(receipt.id) : []),
+    [receipt, returnRevision],
+  );
 
   /** Run a share/print action, surfacing any failure instead of failing silently. */
   const run = async (fn: () => Promise<void>) => {
@@ -84,7 +110,7 @@ export default function ReceiptScreen() {
     return (
       <SafeAreaView style={styles.root}>
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} style={styles.headerBtn}>
+          <Pressable onPress={closeReceipt} style={styles.headerBtn}>
             <Ionicons name="arrow-back" size={24} color={colors.grey800} />
           </Pressable>
           <Text style={styles.headerTitleDark}>Receipt</Text>
@@ -120,7 +146,7 @@ export default function ReceiptScreen() {
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.headerBtn}>
+        <Pressable onPress={closeReceipt} style={styles.headerBtn}>
           <Ionicons name="arrow-back" size={24} color={colors.grey800} />
         </Pressable>
         <View style={styles.headerActions}>
@@ -326,7 +352,7 @@ export default function ReceiptScreen() {
             style={styles.newSaleBtn}
             onPress={() => {
               feedbackTap();
-              router.replace("/(tabs)");
+              closeReceipt();
             }}
           >
             <Text style={styles.newSaleText}>{strings.newSale}</Text>

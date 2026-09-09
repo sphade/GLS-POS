@@ -1,17 +1,20 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { colors, formatMoney } from "@/constants/theme";
-import { useWebOrders } from "@/lib/web-orders";
+import { loadRecentWebOrders, useWebOrders } from "@/lib/web-orders";
+import { countDocs } from "@/lib/db";
 import { displayItemName, useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
 import { sendTestPush } from "@/lib/push";
 import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
+
+const WEB_ORDER_PAGE = 100;
 
 /**
  * VIP orders placed from the guest website. Staff see them here, move them
@@ -20,14 +23,22 @@ import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback
  */
 export default function OnlineOrdersScreen() {
   const router = useRouter();
-  const { orders, active, setStatus, attachReceipt, reload } = useWebOrders();
+  const { active, webOrderRevision, setStatus, attachReceipt, reload } = useWebOrders();
   const { billWebOrder } = useCart();
   const { recordSale } = useCatalog();
   const { store } = useStore();
   const { user, can } = useAuth();
   const [showDone, setShowDone] = useState(false);
+  const [historyLimit, setHistoryLimit] = useState(WEB_ORDER_PAGE);
 
-  const list = showDone ? orders : active;
+  const historyPage = useMemo(
+    () => loadRecentWebOrders(historyLimit + 1),
+    [historyLimit, webOrderRevision],
+  );
+  const historyHasMore = historyPage.length > historyLimit;
+  const history = historyPage.slice(0, historyLimit);
+  const totalCount = useMemo(() => countDocs("web_orders"), [webOrderRevision]);
+  const list = showDone ? history : active;
 
   /** Turn a web order into a real (unpaid) receipt and deduct stock. */
   const bill = (order: WebOrder) => {
@@ -56,7 +67,7 @@ export default function OnlineOrdersScreen() {
             );
             attachReceipt(order.id, receipt.id);
             feedbackSaleComplete();
-            router.push({ pathname: "/receipt/[id]", params: { id: receipt.id, fromSale: "1" } });
+            router.push({ pathname: "/receipt/[id]", params: { id: receipt.id } });
           },
         },
       ],
@@ -129,7 +140,7 @@ export default function OnlineOrdersScreen() {
           }}
         >
           <Text style={[styles.filterText, showDone && styles.filterTextOn]}>
-            ALL ({orders.length})
+            ALL ({totalCount})
           </Text>
         </Pressable>
       </View>
@@ -179,6 +190,18 @@ export default function OnlineOrdersScreen() {
             }
           />
         ))}
+
+        {showDone && historyHasMore ? (
+          <Pressable
+            style={styles.more}
+            onPress={() => {
+              feedbackTap();
+              setHistoryLimit((current) => current + WEB_ORDER_PAGE);
+            }}
+          >
+            <Text style={styles.moreText}>Load more</Text>
+          </Pressable>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );
@@ -485,6 +508,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+
+  more: { alignItems: "center", paddingVertical: 16 },
+  moreText: { color: colors.primary, fontWeight: "700", fontSize: 15 },
 
   receiptLink: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingVertical: 4 },
   receiptLinkText: { color: colors.primary, fontSize: 12, fontWeight: "800", letterSpacing: 0.4 },

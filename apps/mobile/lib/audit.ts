@@ -1,5 +1,5 @@
 import type { AuditEntry, StoreRole } from "@gls-pos/types";
-import { loadAll, put as dbPut } from "./db";
+import { loadRecentDocs, put as dbPut } from "./db";
 
 /**
  * Lightweight audit trail.
@@ -59,7 +59,7 @@ export function logAudit(input: {
   }
 }
 
-/** Newest-first audit entries from the local mirror. */
-export function loadAuditLog(): AuditEntry[] {
-  return loadAll<AuditEntry>("audit_log").sort((a, b) => b.at - a.at);
+/** One newest-first audit page from the complete local mirror. */
+export function loadAuditLog(limit = 100, offset = 0): AuditEntry[] {
+  return loadRecentDocs<AuditEntry>("audit_log", "at", limit, offset);
 }

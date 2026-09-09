@@ -1,7 +1,19 @@
-import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
-import { startAutoSync } from "./sync";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import type { StoreRole } from "@gls-pos/types";
+import { prepareStoreSyncScope, startAutoSync } from "./sync";
 import { startRealtime } from "./realtime";
-import { registerForPush } from "./push";
+import {
+  cancelAndDrainPushRegistration,
+  registerForPush,
+} from "./push";
+import { captureBoundAuthCredential } from "./auth-client";
 import { useAuth } from "./auth";
 import { OFFLINE_MODE } from "./offline";
 
@@ -11,6 +23,8 @@ export type Store = {
   /** Short label shown in the avatar circle. */
   initials: string;
   currency: string;
+  /** Canonical membership role used for read-scope synchronization. */
+  role: StoreRole;
   /** The signed-in user's role in this store, shown under the name. */
   reference?: string;
 };
@@ -28,16 +42,46 @@ type StoreState = {
 };
 
 const StoreContext = createContext<StoreState | null>(null);
+const BOOTSTRAP_STORE: Store = {
+  id: "bootstrap",
+  name: "My Store",
+  initials: "MS",
+  currency: "NGN",
+  // Metadata-only placeholder; operational effects never run for this store.
+  role: "owner",
+};
+
+/**
+ * The keyed gate runs its synchronous projection transaction before any
+ * store-scoped data provider can read SQLite under a newly-contracted role.
+ */
+function StoreProjectionGate({
+  store,
+  children,
+}: {
+  store: Store;
+  children: ReactNode;
+}) {
+  useState(() => {
+    prepareStoreSyncScope(store.id, store.role);
+    return `${store.id}:${store.role}`;
+  });
+  return <>{children}</>;
+}
 
 /**
  * The store switcher, backed by the user's real memberships from the control
- * plane. Only mounts once the user is signed in and has at least one store
- * (see the gate in app/_layout.tsx), so `activeStore` is always present.
- *
- * Also drives background sync for whichever store is active.
+ * plane. Before a validated membership is available, the auth screens use the
+ * metadata-only bootstrap scope; no operational or network work is started.
  */
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const { stores: memberships, activeStore, selectStore } = useAuth();
+  const {
+    stores: memberships,
+    activeStore,
+    selectStore,
+    user,
+    credentialRevision,
+  } = useAuth();
 
   const stores = useMemo<Store[]>(
     () =>
@@ -46,47 +90,60 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         name: m.name,
         initials: initialsOf(m.name),
         currency: m.currency,
+        role: m.role,
         reference: m.role.charAt(0).toUpperCase() + m.role.slice(1),
       })),
     [memberships],
   );
 
   const store = useMemo<Store>(() => {
-    const found = activeStore && stores.find((s) => s.id === activeStore.id);
-    return (
-      found ??
-      stores[0] ?? { id: "store_unknown", name: "My Store", initials: "MS", currency: "NGN" }
-    );
+    const found = activeStore && stores.find((candidate) => candidate.id === activeStore.id);
+    return found ?? stores[0] ?? BOOTSTRAP_STORE;
   }, [activeStore, stores]);
+  const operational = store.id !== BOOTSTRAP_STORE.id;
 
-  // Offline builds mount none of the network machinery at all.
-  // Offline-first background sync for the active store. No-ops when sync is
-  // disabled or there's no session, so the POS keeps working from local data.
+  // Offline-first background sync starts only for a membership-validated store.
   useEffect(() => {
-    if (OFFLINE_MODE) return;
-    return startAutoSync(store.id);
-  }, [store.id]);
+    if (OFFLINE_MODE || !operational) return;
+    return startAutoSync(store.id, store.role);
+  }, [operational, store.id, store.role]);
 
-  // Realtime channel on top of polling: the server pushes a nudge the moment
-  // anything changes, so VIP orders land in ~1s. Polling remains the safety net.
+  // Realtime is only a nudge channel; polling remains the safety net.
   useEffect(() => {
-    if (OFFLINE_MODE) return;
+    if (OFFLINE_MODE || !operational) return;
     return startRealtime(store.id);
-  }, [store.id]);
+  }, [operational, store.id]);
 
   // Register this device for push, so a locked phone still gets alerted.
-  // Silently no-ops on simulators or without an EAS project id.
   useEffect(() => {
-    if (OFFLINE_MODE || store.id === "store_unknown") return;
-    void registerForPush(store.id);
-  }, [store.id]);
+    if (OFFLINE_MODE || !operational || !user) return;
+
+    // Capture once, before registration can await permissions, channels, or a
+    // token. A credential revision reruns this effect even for the same user.
+    const credential = captureBoundAuthCredential(user.id);
+    if (!credential) return;
+
+    const controller = new AbortController();
+    void registerForPush(store.id, { credential, signal: controller.signal });
+
+    return () => {
+      controller.abort();
+      void cancelAndDrainPushRegistration();
+    };
+  }, [credentialRevision, operational, store.id, user?.id]);
 
   const value = useMemo<StoreState>(
     () => ({ store, stores, setStoreId: selectStore }),
     [store, stores, selectStore],
   );
 
-  return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
+  return (
+    <StoreContext.Provider value={value}>
+      <StoreProjectionGate key={`${store.id}:${store.role}`} store={store}>
+        {children}
+      </StoreProjectionGate>
+    </StoreContext.Provider>
+  );
 }
 
 export function useStore(): StoreState {

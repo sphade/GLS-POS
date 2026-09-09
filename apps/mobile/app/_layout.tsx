@@ -1,5 +1,5 @@
 ﻿import { useEffect } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -11,9 +11,8 @@ import { CatalogProvider, useCatalog } from "@/lib/catalog";
 import { ReturnsProvider } from "@/lib/returns";
 import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
-import { setActiveStore } from "@/lib/db";
+import { prepareHistoryIndexes, setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
-import { SyncStatusBar } from "@/components/SyncStatusBar";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
 import { colors } from "@/constants/theme";
@@ -92,25 +91,34 @@ function CartCatalogBridge() {
 /**
  * Binds the data layer to the selected store.
  *
- * Each store (branch) has its own local SQLite file, so the active database
- * must be selected BEFORE the data providers read from it — hence the
- * synchronous `setActiveStore` in the render body rather than an effect.
- *
- * `key={store.id}` remounts the providers when the user switches branch, which
- * discards the previous branch's in-memory state and re-reads from that
- * branch's database. Without it, Poka's catalog would linger in Ikeja's till.
+ * The correctness-critical schema is opened synchronously before providers read
+ * it. Historical expression indexes are only query accelerators, so they start
+ * after the cached POS has committed instead of holding the entire app behind a
+ * spinner. A store key still discards the previous branch's in-memory state.
  */
 function StoreScopedData() {
   const { store } = useStore();
   setActiveStore(store.id);
 
+  useEffect(() => {
+    if (store.id === "bootstrap") return;
+    // Yield one frame so catalog, cart, tables and open tickets paint first on
+    // slow flash storage. Queries remain correct while these indexes build.
+    const timer = setTimeout(() => {
+      void prepareHistoryIndexes(store.id);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [store.id]);
+
+  const dataScope = `${store.id}:${store.role}`;
+
   return (
-    <CatalogProvider key={`catalog-${store.id}`}>
-      <CartProvider key={`cart-${store.id}`}>
+    <CatalogProvider key={`catalog-${dataScope}`}>
+      <CartProvider key={`cart-${dataScope}`}>
         {/* Refunds are cold data, so they sit outside the cart's hot path: a
             return raised elsewhere must never re-render the item grid. */}
-        <ReturnsProvider key={`returns-${store.id}`}>
-          <WebOrdersProvider key={`orders-${store.id}`}>
+        <ReturnsProvider key={`returns-${dataScope}`}>
+          <WebOrdersProvider key={`orders-${dataScope}`}>
             <CartCatalogBridge />
             <StatusBar style="light" backgroundColor={colors.primaryDark} />
             <AuthGate>
@@ -118,8 +126,6 @@ function StoreScopedData() {
             </AuthGate>
             {/* Floats above every screen so staff never miss an order. */}
             <NewOrderBanner />
-            {/* Top strip: shows background sync activity + real failure reasons. */}
-            <SyncStatusBar />
           </WebOrdersProvider>
         </ReturnsProvider>
       </CartProvider>
@@ -140,14 +146,23 @@ function StoreScopedData() {
  * into the POS on cached data rather than demanding they create a store.
  */
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { ready, signedIn, stores, storesStatus, canManageBusiness } = useAuth();
+  const {
+    ready,
+    signedIn,
+    stores,
+    storesStatus,
+    canManageBusiness,
+    refresh,
+    signOut,
+  } = useAuth();
   const segments = useSegments();
   const router = useRouter();
 
   const settling = signedIn && storesStatus === "pending";
+  const noUsableStore = signedIn && stores.length === 0 && storesStatus === "failed";
 
   useEffect(() => {
-    if (!ready || settling) return;
+    if (!ready || settling || noUsableStore) return;
     const root = segments[0];
     const onSignIn = root === "sign-in";
     const onCreateStore = root === "create-store";
@@ -169,12 +184,50 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       return;
     }
     if (onSignIn) router.replace("/(tabs)");
-  }, [ready, settling, signedIn, stores.length, storesStatus, canManageBusiness, segments, router]);
+  }, [
+    ready,
+    settling,
+    noUsableStore,
+    signedIn,
+    stores.length,
+    storesStatus,
+    canManageBusiness,
+    segments,
+    router,
+  ]);
 
   if (!ready || settling) {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.screenBg }}>
         <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  if (noUsableStore) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 14,
+          padding: 28,
+          backgroundColor: colors.screenBg,
+        }}
+      >
+        <Text style={{ color: colors.grey800, textAlign: "center", fontSize: 16 }}>
+          This device has no saved shop yet. Connect once to load your access.
+        </Text>
+        <Pressable
+          onPress={() => void refresh()}
+          style={{ backgroundColor: colors.primary, borderRadius: 8, paddingHorizontal: 24, paddingVertical: 12 }}
+        >
+          <Text style={{ color: colors.white, fontWeight: "800" }}>RETRY</Text>
+        </Pressable>
+        <Pressable onPress={() => void signOut()} hitSlop={10}>
+          <Text style={{ color: colors.primary, fontWeight: "700" }}>SIGN OUT</Text>
+        </Pressable>
       </View>
     );
   }

@@ -8,7 +8,14 @@ import {
   type ReactNode,
 } from "react";
 import { formatMoney } from "@/constants/theme";
-import { loadAll, mergeById, put as dbPut } from "./db";
+import {
+  loadDocsByField,
+  loadDocsInRange,
+  loadOne,
+  loadRecentDocs,
+  mergeById,
+  putWithDeviceSequence,
+} from "./db";
 import { logAudit } from "./audit";
 import { onSynced } from "./sync";
 import { useCatalog } from "./catalog";
@@ -31,6 +38,37 @@ import {
  */
 export * from "./return-model";
 
+/** React keeps only the hot edge; SQLite retains every credit note offline. */
+export const RETURN_LIVE_LIMIT = 100;
+
+const boundReturns = (rows: readonly SaleReturn[]): SaleReturn[] =>
+  [...rows]
+    .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+    .slice(0, RETURN_LIVE_LIMIT);
+
+/** One credit note, including records older than the live provider window. */
+export function loadReturnById(id: string | undefined): SaleReturn | null {
+  return id ? loadOne<SaleReturn>("returns", id) : null;
+}
+
+/** Every credit note against one receipt, oldest first for refund calculations. */
+export function loadReturnsForReceipt(receiptId: string): SaleReturn[] {
+  return loadDocsByField<SaleReturn>("returns", "receiptId", receiptId, {
+    field: "createdAt",
+    direction: "asc",
+  });
+}
+
+/** Credit notes raised inside a half-open report range, newest first. */
+export function loadReturnsInRange(from: number, to: number): SaleReturn[] {
+  return loadDocsInRange<SaleReturn>("returns", "createdAt", from, to);
+}
+
+/** A bounded recent page for list screens. */
+export function loadRecentReturns(limit = RETURN_LIVE_LIMIT, offset = 0): SaleReturn[] {
+  return loadRecentDocs<SaleReturn>("returns", "createdAt", limit, offset);
+}
+
 export type CreateReturnInput = {
   receipt: Receipt;
   lines: { lineIndex: number; qty: number; restock: boolean }[];
@@ -47,8 +85,10 @@ export type CreateReturnResult =
   | { ok: false; message: string };
 
 type ReturnsState = {
-  /** Every return, newest first. */
+  /** Newest credit-note window only; complete history stays in SQLite. */
   returns: SaleReturn[];
+  /** Changes for both live-window and historical return query consumers. */
+  returnRevision: number;
   /** Returns raised against one receipt, in the order they happened. */
   returnsFor: (receiptId: string) => SaleReturn[];
   /** Total refunded against one receipt. */
@@ -60,49 +100,42 @@ const ReturnsContext = createContext<ReturnsState | null>(null);
 
 const uid = () => `ret_${Date.now()}_${Math.round(Math.random() * 1e4)}`;
 
-const newestFirst = (list: SaleReturn[]) => list.sort((a, b) => b.createdAt - a.createdAt);
-
 export function ReturnsProvider({ children }: { children: ReactNode }) {
   const { recordReturn } = useCatalog();
-  const [returns, setReturns] = useState<SaleReturn[]>(() =>
-    newestFirst(loadAll<SaleReturn>("returns")),
-  );
+  const [returns, setReturns] = useState<SaleReturn[]>(() => loadRecentReturns());
+  const [returnRevision, setReturnRevision] = useState(0);
 
   // A return can be raised on another till. Ignore every sync event that did
   // not actually apply a return row on this device.
   useEffect(
     () =>
       onSynced(({ pulledIds }) => {
-        // Merge just the credit notes that arrived; see cart.tsx for why the
-        // old full re-read got slower as the day went on.
         const ids = pulledIds.get("returns");
         if (ids?.length) {
-          setReturns((prev) => mergeById(prev, "returns", ids, (row) => row.createdAt));
+          setReturns((prev) =>
+            boundReturns(mergeById(prev, "returns", ids, (row) => row.createdAt)),
+          );
+          // Older rows may not enter the bounded array, but historical screens
+          // still need to rerun their local SQLite query.
+          setReturnRevision((revision) => revision + 1);
         }
       }),
     [],
   );
 
-  const returnsFor = useCallback(
-    (receiptId: string) =>
-      returns
-        .filter((ret) => ret.receiptId === receiptId)
-        .sort((a, b) => a.createdAt - b.createdAt),
-    [returns],
-  );
+  const returnsFor = useCallback((receiptId: string) => loadReturnsForReceipt(receiptId), []);
 
   const refundedFor = useCallback(
     (receiptId: string) =>
-      returns.reduce((sum, ret) => (ret.receiptId === receiptId ? sum + ret.total : sum), 0),
-    [returns],
+      loadReturnsForReceipt(receiptId).reduce((sum, ret) => sum + ret.total, 0),
+    [],
   );
 
   const createReturn = useCallback(
     (input: CreateReturnInput): CreateReturnResult => {
       const { receipt } = input;
-      const prior = returns
-        .filter((ret) => ret.receiptId === receipt.id)
-        .sort((a, b) => a.createdAt - b.createdAt);
+      // Refund safety always checks SQLite, not the bounded provider window.
+      const prior = loadReturnsForReceipt(receipt.id);
       const remaining = remainingByLine(receipt, prior);
 
       // Clamp to what's actually returnable, then drop empty selections. The
@@ -143,9 +176,12 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
         prior,
       );
 
-      const ret: SaleReturn = {
-        id: uid(),
-        number: `R#${1000 + returns.length + 1}`,
+      const ret = putWithDeviceSequence<SaleReturn>(
+        "returns",
+        "return_sequence_v1",
+        (tag, sequence) => ({
+          id: uid(),
+          number: `R#${tag}${1000 + sequence}`,
         receiptId: receipt.id,
         receiptNumber: receipt.number,
         lines,
@@ -161,11 +197,12 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
         storeName: input.storeName,
         storeReference: input.storeReference,
         servedBy: input.servedBy,
-        synced: false,
-      };
+          synced: false,
+        }),
+      );
 
-      dbPut("returns", ret);
-      setReturns((prev) => [ret, ...prev]);
+      setReturns((prev) => boundReturns([ret, ...prev.filter((row) => row.id !== ret.id)]));
+      setReturnRevision((revision) => revision + 1);
 
       /**
        * Put stock back only for lines flagged restock.
@@ -194,12 +231,12 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
 
       return { ok: true, ret };
     },
-    [returns, recordReturn],
+    [recordReturn],
   );
 
   const value = useMemo<ReturnsState>(
-    () => ({ returns, returnsFor, refundedFor, createReturn }),
-    [returns, returnsFor, refundedFor, createReturn],
+    () => ({ returns, returnRevision, returnsFor, refundedFor, createReturn }),
+    [returns, returnRevision, returnsFor, refundedFor, createReturn],
   );
 
   return <ReturnsContext.Provider value={value}>{children}</ReturnsContext.Provider>;
