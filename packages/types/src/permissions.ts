@@ -85,10 +85,11 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "audit:view",
     "kitchen:view",
   ],
-  // Manager operational access without aggregate reports, refunds, or
-  // discounts. Catalog management and individual receipt lookup remain.
+  // Manager operational access without aggregate reports or refunds. Catalog
+  // management and individual receipt lookup remain.
   supervisor: [
     "sale:create",
+    "discount:apply",
     "price:override",
     "catalog:read",
     "catalog:write",
@@ -100,10 +101,31 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "audit:view",
     "kitchen:view",
   ],
-  // Sells and takes payment, but no back office and no reversing money.
-  cashier: ["sale:create", "catalog:read", "customers:manage", "tables:manage"],
+  /**
+   * Sells and takes payment, but no back office and no reversing money.
+   *
+   * `discount:apply` is included because the till UI offers line and order
+   * discounts to anyone who can sell. Without it the store refused the finished
+   * receipt on sync — after the money was taken and the slip printed — and since
+   * a push is all-or-nothing, that one rejection stopped everything else on the
+   * device from uploading too. Discounts stay attributable: every discounted
+   * sale is named with its amount and reason in the audit log.
+   */
+  cashier: [
+    "sale:create",
+    "discount:apply",
+    "catalog:read",
+    "customers:manage",
+    "tables:manage",
+  ],
   // Takes orders to tables; cannot change the menu or see money reports.
-  waiter: ["sale:create", "catalog:read", "tables:manage", "kitchen:view"],
+  waiter: [
+    "sale:create",
+    "discount:apply",
+    "catalog:read",
+    "tables:manage",
+    "kitchen:view",
+  ],
   // Kitchen display only.
   kitchen: ["catalog:read", "kitchen:view"],
 };
