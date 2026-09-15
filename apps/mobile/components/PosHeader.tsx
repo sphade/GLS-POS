@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+﻿import { useRef, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, strings } from "@/constants/theme";
@@ -121,11 +121,18 @@ export function PosSearchBar({
   onChangeText: (t: string) => void;
   onScan?: () => void;
 }) {
+  const inputRef = useRef<TextInput>(null);
+
   return (
     <View style={styles.searchRow}>
-      <View style={styles.searchBox}>
+      <Pressable
+        style={styles.searchBox}
+        accessible={false}
+        onPress={() => inputRef.current?.focus()}
+      >
         <Ionicons name="search" size={20} color={colors.grey600} />
         <TextInput
+          ref={inputRef}
           style={styles.searchInput}
           placeholder={strings.searchHint}
           placeholderTextColor={colors.grey500}
@@ -138,7 +145,7 @@ export function PosSearchBar({
             <Ionicons name="close-circle" size={18} color={colors.grey500} />
           </Pressable>
         )}
-      </View>
+      </Pressable>
       {onScan && (
         <Pressable
           style={styles.scanButton}

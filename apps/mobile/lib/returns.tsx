@@ -15,8 +15,10 @@ import {
   loadRecentDocs,
   mergeById,
   putWithDeviceSequence,
+  runAtomic,
 } from "./db";
 import { logAudit } from "./audit";
+import { uid } from "./ids";
 import { onSynced } from "./sync";
 import { useCatalog } from "./catalog";
 import type { Receipt } from "./cart";
@@ -85,8 +87,10 @@ export type CreateReturnResult =
   | { ok: false; message: string };
 
 type ReturnsState = {
-  /** Newest credit-note window only; complete history stays in SQLite. */
+  /** Newest credit-note window only; complete permitted history stays in SQLite. */
   returns: SaleReturn[];
+  /** Resolve freshly-created returns in memory before permitted SQLite history. */
+  returnById: (id: string | undefined) => SaleReturn | null;
   /** Changes for both live-window and historical return query consumers. */
   returnRevision: number;
   /** Returns raised against one receipt, in the order they happened. */
@@ -98,12 +102,30 @@ type ReturnsState = {
 
 const ReturnsContext = createContext<ReturnsState | null>(null);
 
-const uid = () => `ret_${Date.now()}_${Math.round(Math.random() * 1e4)}`;
+const returnId = () => uid("ret");
 
-export function ReturnsProvider({ children }: { children: ReactNode }) {
+export function ReturnsProvider({
+  children,
+  canReadHistory,
+}: {
+  children: ReactNode;
+  canReadHistory: boolean;
+}) {
   const { recordReturn } = useCatalog();
-  const [returns, setReturns] = useState<SaleReturn[]>(() => loadRecentReturns());
+  const [returns, setReturns] = useState<SaleReturn[]>(() =>
+    canReadHistory ? loadRecentReturns() : [],
+  );
   const [returnRevision, setReturnRevision] = useState(0);
+  const returnById = useCallback(
+    (id: string | undefined): SaleReturn | null => {
+      if (!id) return null;
+      return (
+        returns.find((ret) => ret.id === id) ??
+        (canReadHistory ? loadReturnById(id) : null)
+      );
+    },
+    [canReadHistory, returns],
+  );
 
   // A return can be raised on another till. Ignore every sync event that did
   // not actually apply a return row on this device.
@@ -111,7 +133,7 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
     () =>
       onSynced(({ pulledIds }) => {
         const ids = pulledIds.get("returns");
-        if (ids?.length) {
+        if (canReadHistory && ids?.length) {
           setReturns((prev) =>
             boundReturns(mergeById(prev, "returns", ids, (row) => row.createdAt)),
           );
@@ -120,22 +142,31 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
           setReturnRevision((revision) => revision + 1);
         }
       }),
-    [],
+    [canReadHistory],
   );
 
-  const returnsFor = useCallback((receiptId: string) => loadReturnsForReceipt(receiptId), []);
+  const returnsFor = useCallback(
+    (receiptId: string) => (canReadHistory ? loadReturnsForReceipt(receiptId) : []),
+    [canReadHistory],
+  );
 
   const refundedFor = useCallback(
-    (receiptId: string) =>
-      loadReturnsForReceipt(receiptId).reduce((sum, ret) => sum + ret.total, 0),
-    [],
+    (receiptId: string) => returnsFor(receiptId).reduce((sum, ret) => sum + ret.total, 0),
+    [returnsFor],
   );
 
   const createReturn = useCallback(
     (input: CreateReturnInput): CreateReturnResult => {
       const { receipt } = input;
-      // Refund safety always checks SQLite, not the bounded provider window.
-      const prior = loadReturnsForReceipt(receipt.id);
+      if (!canReadHistory) {
+        return {
+          ok: false,
+          message: "Receipt history is not available for this role.",
+        };
+      }
+      // Refund safety always checks permitted SQLite history, not the bounded
+      // provider window.
+      const prior = returnsFor(receipt.id);
       const remaining = remainingByLine(receipt, prior);
 
       // Clamp to what's actually returnable, then drop empty selections. The
@@ -176,11 +207,15 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
         prior,
       );
 
-      const ret = putWithDeviceSequence<SaleReturn>(
+      // The credit note, the restock movements it authorises and its audit entry
+      // are one financial event: a crash must not leave a refund whose stock was
+      // never returned, or restocked units with no credit note to justify them.
+      const ret = runAtomic(() => {
+      const created = putWithDeviceSequence<SaleReturn>(
         "returns",
         "return_sequence_v1",
         (tag, sequence) => ({
-          id: uid(),
+          id: returnId(),
           number: `R#${tag}${1000 + sequence}`,
         receiptId: receipt.id,
         receiptNumber: receipt.number,
@@ -201,7 +236,9 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
         }),
       );
 
-      setReturns((prev) => boundReturns([ret, ...prev.filter((row) => row.id !== ret.id)]));
+      setReturns((prev) =>
+        boundReturns([created, ...prev.filter((row) => row.id !== created.id)]),
+      );
       setReturnRevision((revision) => revision + 1);
 
       /**
@@ -216,27 +253,30 @@ export function ReturnsProvider({ children }: { children: ReactNode }) {
       const restockLines = lines
         .filter((line) => line.restock && line.productId)
         .map((line) => ({ productId: line.productId!, variantId: line.variantId, qty: line.qty }));
-      if (restockLines.length > 0) recordReturn(restockLines, ret.number);
+      if (restockLines.length > 0) recordReturn(restockLines, created.number);
 
       const writtenOff = lines.reduce((sum, line) => (line.restock ? sum : sum + line.qty), 0);
       logAudit({
         action: "sale.return",
         entity: "return",
-        entityId: ret.id,
+        entityId: created.id,
         summary:
-          `Return ${ret.number} against ${receipt.number} · ${quote.itemCount} item${quote.itemCount === 1 ? "" : "s"}` +
-          ` · ${formatMoney(ret.total, ret.currency)} · ${input.method} · ${reasonLabel(input.reason)}` +
+          `Return ${created.number} against ${receipt.number} · ${quote.itemCount} item${quote.itemCount === 1 ? "" : "s"}` +
+          ` · ${formatMoney(created.total, created.currency)} · ${input.method} · ${reasonLabel(input.reason)}` +
           (writtenOff > 0 ? ` · ${writtenOff} not restocked` : ""),
+      });
+
+        return created;
       });
 
       return { ok: true, ret };
     },
-    [recordReturn],
+    [canReadHistory, recordReturn, returnsFor],
   );
 
   const value = useMemo<ReturnsState>(
-    () => ({ returns, returnRevision, returnsFor, refundedFor, createReturn }),
-    [returns, returnRevision, returnsFor, refundedFor, createReturn],
+    () => ({ returns, returnById, returnRevision, returnsFor, refundedFor, createReturn }),
+    [returns, returnById, returnRevision, returnsFor, refundedFor, createReturn],
   );
 
   return <ReturnsContext.Provider value={value}>{children}</ReturnsContext.Provider>;

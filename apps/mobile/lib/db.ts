@@ -57,26 +57,53 @@ const fileFor = (storeId: string) => `gls-pos-${storeId.replace(/[^A-Za-z0-9_-]/
  * upgraded store, so `prepareHistoryIndexes` creates them asynchronously while
  * the app shows a responsive loading frame instead of blocking render.
  */
-const HISTORY_INDEXES = [
-  `CREATE INDEX IF NOT EXISTS receipts_created_at_idx
-     ON receipts (json_extract(data, '$.createdAt') DESC);`,
-  `CREATE INDEX IF NOT EXISTS returns_created_at_idx
-     ON returns (json_extract(data, '$.createdAt') DESC);`,
-  `CREATE INDEX IF NOT EXISTS returns_receipt_created_at_idx
-     ON returns (
-       json_extract(data, '$.receiptId'),
-       json_extract(data, '$.createdAt') ASC
-     );`,
-  `CREATE INDEX IF NOT EXISTS audit_log_at_idx
-     ON audit_log (json_extract(data, '$.at') DESC);`,
-  `CREATE INDEX IF NOT EXISTS web_orders_created_at_idx
-     ON web_orders (json_extract(data, '$.createdAt') DESC);`,
-  `CREATE INDEX IF NOT EXISTS web_orders_status_created_at_idx
-     ON web_orders (
-       json_extract(data, '$.status'),
-       json_extract(data, '$.createdAt') DESC
-     );`,
-] as const;
+const HISTORY_INDEXES: readonly { collection: Collection; statement: string }[] = [
+  {
+    collection: "receipts",
+    statement: `CREATE INDEX IF NOT EXISTS receipts_created_at_idx
+       ON receipts (json_extract(data, '$.createdAt') DESC);`,
+  },
+  {
+    collection: "returns",
+    statement: `CREATE INDEX IF NOT EXISTS returns_created_at_idx
+       ON returns (json_extract(data, '$.createdAt') DESC);`,
+  },
+  {
+    collection: "returns",
+    statement: `CREATE INDEX IF NOT EXISTS returns_receipt_created_at_idx
+       ON returns (
+         json_extract(data, '$.receiptId'),
+         json_extract(data, '$.createdAt') ASC
+       );`,
+  },
+  {
+    collection: "audit_log",
+    statement: `CREATE INDEX IF NOT EXISTS audit_log_at_idx
+       ON audit_log (json_extract(data, '$.at') DESC);`,
+  },
+  {
+    collection: "stock_movements",
+    statement: `CREATE INDEX IF NOT EXISTS stock_movements_product_at_idx
+       ON stock_movements (
+         json_extract(data, '$.productId'),
+         json_extract(data, '$.variantId'),
+         json_extract(data, '$.at') DESC
+       );`,
+  },
+  {
+    collection: "web_orders",
+    statement: `CREATE INDEX IF NOT EXISTS web_orders_created_at_idx
+       ON web_orders (json_extract(data, '$.createdAt') DESC);`,
+  },
+  {
+    collection: "web_orders",
+    statement: `CREATE INDEX IF NOT EXISTS web_orders_status_created_at_idx
+       ON web_orders (
+         json_extract(data, '$.status'),
+         json_extract(data, '$.createdAt') DESC
+       );`,
+  },
+];
 
 const historyIndexJobs = new Map<string, Promise<void>>();
 
@@ -120,25 +147,15 @@ function open(storeId: string): SQLite.SQLiteDatabase {
       );`,
     );
     database.execSync(`CREATE INDEX IF NOT EXISTS ${c}_dirty_idx ON ${c} (dirty);`);
-  }
-
-  /**
-   * Expression index behind the paginated stock timeline (see `loadDocsPage`).
-   * Without it, filtering an append-only log by product means a full scan that
-   * decodes every row's JSON; with it, a page is an index seek. Wrapped because
-   * expression indexes need a modern SQLite — the query still works unindexed.
-   */
-  try {
+    /**
+     * The uploader reads pending rows oldest-first with a limit. Without
+     * `updated_at` in the index SQLite has to sort every dirty row to answer
+     * that, which is precisely the cost the limit exists to avoid on a till
+     * carrying a large backlog.
+     */
     database.execSync(
-      `CREATE INDEX IF NOT EXISTS stock_movements_product_at_idx
-         ON stock_movements (
-           json_extract(data, '$.productId'),
-           json_extract(data, '$.variantId'),
-           json_extract(data, '$.at') DESC
-         );`,
+      `CREATE INDEX IF NOT EXISTS ${c}_dirty_updated_at_idx ON ${c} (dirty, updated_at);`,
     );
-  } catch {
-    /* older SQLite without expression-index support */
   }
 
   database.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
@@ -163,17 +180,26 @@ export function setActiveStore(storeId: string): void {
  *
  * The first upgraded launch can have years of receipts to index. Expo's async
  * API performs that native work while React keeps painting the loading frame;
- * subsequent launches hit `IF NOT EXISTS` and finish immediately. One shared
- * promise per store prevents remounts from starting duplicate builds.
+ * subsequent launches hit `IF NOT EXISTS` and finish immediately. Jobs are
+ * keyed by store plus read projection so a later manager session can build
+ * indexes that a restricted till correctly skipped.
  */
-export function prepareHistoryIndexes(storeId: string): Promise<void> {
+export function prepareHistoryIndexes(
+  storeId: string,
+  readableCollections: readonly Collection[],
+): Promise<void> {
   if (!storeId) return Promise.resolve();
-  const existing = historyIndexJobs.get(storeId);
+
+  const readable = new Set(readableCollections);
+  const projectionKey = COLLECTIONS.filter((collection) => readable.has(collection)).join(",");
+  const jobKey = `${storeId}:${projectionKey}`;
+  const existing = historyIndexJobs.get(jobKey);
   if (existing) return existing;
 
   const database = open(storeId);
   const job = (async () => {
-    for (const statement of HISTORY_INDEXES) {
+    for (const { collection, statement } of HISTORY_INDEXES) {
+      if (!readable.has(collection)) continue;
       try {
         await database.execAsync(statement);
       } catch {
@@ -182,7 +208,7 @@ export function prepareHistoryIndexes(storeId: string): Promise<void> {
       }
     }
   })();
-  historyIndexJobs.set(storeId, job);
+  historyIndexJobs.set(jobKey, job);
   return job;
 }
 
@@ -481,12 +507,127 @@ export function loadAll<T>(c: Collection): T[] {
  * promptly instead of waiting for the next 20s poll. Registered by sync.ts; a
  * plain callback avoids an import cycle (sync.ts imports db.ts, not the reverse).
  */
-let localWriteListener: (() => void) | null = null;
-export function onLocalWrite(cb: (() => void) | null): void {
-  localWriteListener = cb;
+/**
+ * Subscribers woken after a local dirty write commits.
+ *
+ * This is a Set rather than one slot on purpose. It used to be a single
+ * callback assigned by `onLocalWrite(cb)` and cleared with `onLocalWrite(null)`,
+ * which meant a stale teardown could unregister whoever had replaced it. A
+ * store switch, a role change or a React remount could therefore leave nothing
+ * listening, silently disabling push-on-write and dropping the app back to the
+ * 20-second safety poll — sales sitting on a till for no visible reason.
+ */
+const localWriteListeners = new Set<() => void>();
+
+/** Subscribe to committed local writes. Returns an unsubscribe function. */
+export function onLocalWrite(cb: () => void): () => void {
+  localWriteListeners.add(cb);
+  return () => localWriteListeners.delete(cb);
 }
+
+function emitLocalWrite(): void {
+  for (const listener of localWriteListeners) {
+    try {
+      listener();
+    } catch {
+      // A failing listener must never break the write that triggered it.
+    }
+  }
+}
+
+/**
+ * Re-entrant transactions.
+ *
+ * A sale is not one write: it is the receipt, its numbering counter, the
+ * decremented product documents, an append-only stock movement per line, the
+ * audit entry, and the tombstone of the table ticket it came from. Those used to
+ * commit in two or three separate transactions, which left real gaps — the app
+ * dying (or the OS killing it) between them recorded a sale whose stock was
+ * never deducted, or deducted stock for a receipt that no longer existed.
+ *
+ * SQLite has no nested `BEGIN`, so an inner writer that opens its own
+ * transaction while an outer one is running would throw. Savepoints give the
+ * same all-or-nothing guarantee while nesting cleanly, so every writer below can
+ * keep opening "a transaction" without knowing whether it is the outermost one.
+ */
+const txDepth = new WeakMap<SQLite.SQLiteDatabase, number>();
+let savepointSeq = 0;
+/** Set when a dirty write happens inside a transaction; flushed after commit. */
+let pendingLocalWrite = false;
+
+const depthOf = (db: SQLite.SQLiteDatabase): number => txDepth.get(db) ?? 0;
+
+function withTx(db: SQLite.SQLiteDatabase, body: () => void): void {
+  const depth = depthOf(db);
+
+  if (depth === 0) {
+    txDepth.set(db, 1);
+    try {
+      db.withTransactionSync(body);
+    } finally {
+      txDepth.set(db, 0);
+    }
+    return;
+  }
+
+  const name = `gls_sp_${(savepointSeq += 1)}`;
+  txDepth.set(db, depth + 1);
+  try {
+    db.execSync(`SAVEPOINT ${name}`);
+    try {
+      body();
+      db.execSync(`RELEASE ${name}`);
+    } catch (error) {
+      // Undo only this inner unit; the enclosing transaction decides its own
+      // fate, exactly as a standalone transaction would have.
+      db.execSync(`ROLLBACK TO ${name}`);
+      db.execSync(`RELEASE ${name}`);
+      throw error;
+    }
+  } finally {
+    txDepth.set(db, depth);
+  }
+}
+
+/**
+ * Commit several related writes as one unit, waking sync once afterwards.
+ *
+ * Used by anything that must never be half-recorded — completing a sale,
+ * refunding one — so a crash leaves either the whole operation or none of it.
+ * Nested calls are safe. The callback's return value is passed through.
+ */
+export function runAtomic<T>(body: () => T): T {
+  const db = conn();
+  let result!: T;
+  try {
+    withTx(db, () => {
+      result = body();
+    });
+  } catch (error) {
+    // The unit rolled back, so there is nothing for sync to upload. Drop the
+    // deferred wake-up rather than leaving it armed for an unrelated write.
+    if (depthOf(db) === 0) pendingLocalWrite = false;
+    throw error;
+  }
+  flushLocalWrite(db);
+  return result;
+}
+
+function flushLocalWrite(db: SQLite.SQLiteDatabase): void {
+  if (depthOf(db) > 0 || !pendingLocalWrite) return;
+  pendingLocalWrite = false;
+  emitLocalWrite();
+}
+
 const notifyLocalWrite = () => {
-  if (localWriteListener) localWriteListener();
+  // Mid-transaction the rows are not durable yet, and the upload would race the
+  // commit. Remember it and wake sync once the outermost unit has committed.
+  if (depthOf(conn()) > 0) {
+    pendingLocalWrite = true;
+    return;
+  }
+  pendingLocalWrite = false;
+  emitLocalWrite();
 };
 
 type DirtyMode = boolean | "preserve";
@@ -530,7 +671,7 @@ export function putWithDeviceSequence<T extends { id: string }>(
 ): T {
   const db = conn();
   let item!: T;
-  db.withTransactionSync(() => {
+  withTx(db, () => {
     let tag = Number(metaGetOn(db, "receipt_tag") ?? "") || 0;
     if (tag < 1 || tag > 9) {
       tag = 1 + Math.floor(Math.random() * 9);
@@ -572,7 +713,7 @@ export function putBatch(
 ): void {
   if (writes.length === 0) return;
   const db = conn();
-  db.withTransactionSync(() => {
+  withTx(db, () => {
     for (const write of writes) {
       putOn(db, write.collection, write.item, write.dirty ?? dirty);
     }
@@ -615,6 +756,15 @@ export function resetCollection(c: Collection) {
 // --- sync-facing helpers (used in Phase B2) --------------------------------
 
 export type ChangeRow<T> = { id: string; data: T; updatedAt: number; deleted: boolean };
+/**
+ * A dirty row plus the encoded size SQLite already knew.
+ *
+ * The uploader needs each row's size to fill its request budget. Measuring that
+ * with `JSON.stringify` meant serialising every pending row on the JS thread on
+ * every attempt, purely to count characters — then serialising the whole batch
+ * again to send it. The stored column length is the same number, already to hand.
+ */
+export type DirtyRow<T> = ChangeRow<T> & { bytes: number };
 export type DirtyRevision = Pick<ChangeRow<unknown>, "id" | "updatedAt">;
 export type DirtyRevisionBatch = {
   collection: Collection;
@@ -628,11 +778,41 @@ export type RemoteCollectionChange = {
 // Implementations take an explicit handle; the exports below bind them to the
 // active store. See `storeScope` at the bottom for why sync needs the former.
 
-function loadDirtyOn<T>(db: SQLite.SQLiteDatabase, c: Collection): ChangeRow<T>[] {
-  const rows = db.getAllSync<{ id: string; data: string; updated_at: number; deleted: number }>(
-    `SELECT id, data, updated_at, deleted FROM ${c} WHERE dirty = 1`,
-  );
-  return rows.map((r) => ({ id: r.id, data: JSON.parse(r.data) as T, updatedAt: r.updated_at, deleted: !!r.deleted }));
+/**
+ * Rows awaiting upload, oldest first, optionally capped.
+ *
+ * Both details matter on a slow connection. Without a cap this read parsed the
+ * entire backlog on every sync attempt — including attempts that were about to
+ * fail — so the further behind a till fell, the more work each doomed retry cost
+ * on the same thread that handles taps. With a cap the cost per attempt is
+ * bounded and the queue still drains, just across more cycles.
+ *
+ * Oldest-first means a backlog uploads in the order it was rung up, so the
+ * earliest sales reach the server first and a partial drain is still coherent.
+ */
+function loadDirtyOn<T>(
+  db: SQLite.SQLiteDatabase,
+  c: Collection,
+  limit?: number,
+): DirtyRow<T>[] {
+  const capped = typeof limit === "number" && Number.isInteger(limit) && limit > 0;
+  const rows = capped
+    ? db.getAllSync<{ id: string; data: string; updated_at: number; deleted: number }>(
+        `SELECT id, data, updated_at, deleted FROM ${c} WHERE dirty = 1
+         ORDER BY updated_at ASC, id ASC LIMIT ?`,
+        limit,
+      )
+    : db.getAllSync<{ id: string; data: string; updated_at: number; deleted: number }>(
+        `SELECT id, data, updated_at, deleted FROM ${c} WHERE dirty = 1
+         ORDER BY updated_at ASC, id ASC`,
+      );
+  return rows.map((r) => ({
+    id: r.id,
+    data: JSON.parse(r.data) as T,
+    updatedAt: r.updated_at,
+    deleted: !!r.deleted,
+    bytes: r.data.length,
+  }));
 }
 
 /** Mark revisions clean inside the caller's current transaction. */
@@ -657,19 +837,58 @@ function clearDirtyOn(
   revisions: readonly DirtyRevision[],
 ): void {
   if (revisions.length === 0) return;
-  db.withTransactionSync(() => clearDirtyRevisionsOn(db, c, revisions));
+  withTx(db, () => clearDirtyRevisionsOn(db, c, revisions));
 }
 
-/** One commit for all collections acknowledged by one server response. */
+/**
+ * Reclaim the space held by retired product photos.
+ *
+ * Photos used to be stored as base64 in `product_images` — 30–80KB per item. The
+ * feature is gone (items now render a generated avatar), but devices seeded by an
+ * earlier build still carry those blobs, which is easily the largest thing in a
+ * store's local database and pure dead weight now that nothing reads it.
+ *
+ * The table itself is deliberately kept. It remains part of the sync protocol, so
+ * dropping it would break a device that still has an older cursor or an upgraded
+ * device receiving legacy rows. Only its contents go.
+ */
+function purgeRetiredProductImagesOn(db: SQLite.SQLiteDatabase): void {
+  const [row] = db.getAllSync<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM product_images`,
+  );
+  if (!row || row.n === 0) return;
+  db.runSync(`DELETE FROM product_images`);
+}
+
+/** Delete only server-acknowledged rows from collections outside this role's projection. */
+function purgeCleanCollectionsOn(
+  db: SQLite.SQLiteDatabase,
+  collections: readonly Collection[],
+): void {
+  for (const collection of new Set(collections)) {
+    db.runSync(`DELETE FROM ${collection} WHERE dirty = 0`);
+  }
+}
+
+/**
+ * One commit for all revisions acknowledged by one server response and any
+ * newly-clean rows that this role is not allowed to retain.
+ */
 function clearDirtyBatchOn(
   db: SQLite.SQLiteDatabase,
   batches: readonly DirtyRevisionBatch[],
+  purgeCollections: readonly Collection[] = [],
+  redactProductCosts = false,
 ): void {
-  if (!batches.some((batch) => batch.revisions.length > 0)) return;
-  db.withTransactionSync(() => {
+  const hasRevisions = batches.some((batch) => batch.revisions.length > 0);
+  if (!hasRevisions && purgeCollections.length === 0) return;
+
+  withTx(db, () => {
     for (const batch of batches) {
       clearDirtyRevisionsOn(db, batch.collection, batch.revisions);
     }
+    if (redactProductCosts) redactAcknowledgedProductCostsOn(db, batches);
+    purgeCleanCollectionsOn(db, purgeCollections);
   });
 }
 
@@ -711,7 +930,7 @@ function applyRemoteBatchOn(
   changes: readonly RemoteCollectionChange[],
 ): void {
   if (changes.length === 0) return;
-  db.withTransactionSync(() => {
+  withTx(db, () => {
     for (const { collection, change } of changes) {
       applyRemoteOn(db, collection, change);
     }
@@ -741,6 +960,7 @@ export type ReadProjectionTransitionInput = {
   replayHeadKey: string;
   nextScope: string;
   nextReadable: readonly Collection[];
+  retainProductCosts: boolean;
 };
 
 export type ReadProjectionTransitionResult = {
@@ -762,13 +982,148 @@ function normalizedProjection(raw: string | null): Collection[] | null {
   }
 }
 
+type CostProjection = { value: unknown; changed: boolean };
+
+/** Remove root/variant costs from one product-shaped snapshot. */
+function stripProductSnapshotCosts(value: unknown): CostProjection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { value, changed: false };
+  }
+
+  const product = { ...(value as Record<string, unknown>) };
+  let changed = false;
+  if (Object.prototype.hasOwnProperty.call(product, "cost")) {
+    delete product.cost;
+    changed = true;
+  }
+  if (Array.isArray(product.variants)) {
+    product.variants = product.variants.map((variant) => {
+      if (!variant || typeof variant !== "object" || Array.isArray(variant)) return variant;
+      const projected = { ...(variant as Record<string, unknown>) };
+      if (!Object.prototype.hasOwnProperty.call(projected, "cost")) return variant;
+      delete projected.cost;
+      changed = true;
+      return projected;
+    });
+  }
+  return { value: product, changed };
+}
+
+/** Redact only product revisions that the same server response made clean. */
+function redactAcknowledgedProductCostsOn(
+  db: SQLite.SQLiteDatabase,
+  batches: readonly DirtyRevisionBatch[],
+): void {
+  for (const batch of batches) {
+    if (batch.collection !== "products") continue;
+    for (const revision of batch.revisions) {
+      const row = db.getFirstSync<{ data: string }>(
+        `SELECT data FROM products
+         WHERE id = ? AND updated_at = ? AND dirty = 0`,
+        revision.id,
+        revision.updatedAt,
+      );
+      if (!row) continue;
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.data) as unknown;
+      } catch {
+        continue;
+      }
+      const projection = stripProductSnapshotCosts(parsed);
+      if (!projection.changed) continue;
+      db.runSync(
+        `UPDATE products SET data = ?
+         WHERE id = ? AND updated_at = ? AND dirty = 0`,
+        JSON.stringify(projection.value),
+        revision.id,
+        revision.updatedAt,
+      );
+    }
+  }
+}
+
+/**
+ * Remove back-office cost fields from clean cached products before restricted
+ * providers can read them. Dirty rows are deliberately untouched: they may be
+ * unsynced manager edits and remain covered by the offline-safety exception.
+ */
+function redactCleanProductCostsOn(db: SQLite.SQLiteDatabase): void {
+  const rows = db.getAllSync<{ id: string; data: string }>(
+    `SELECT id, data FROM products WHERE dirty = 0 AND instr(data, '"cost"') > 0`,
+  );
+
+  for (const row of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.data) as unknown;
+    } catch {
+      continue;
+    }
+    const projection = stripProductSnapshotCosts(parsed);
+    if (projection.changed) {
+      db.runSync(
+        `UPDATE products SET data = ? WHERE id = ? AND dirty = 0`,
+        JSON.stringify(projection.value),
+        row.id,
+      );
+    }
+  }
+}
+
+/**
+ * Held bills need product names/prices but never product costs. Strip legacy
+ * snapshots from clean and dirty rows without changing their sync revision;
+ * the operational ticket remains complete and any later upload is sanitized.
+ */
+function redactHeldOrderCostsOn(db: SQLite.SQLiteDatabase): void {
+  const rows = db.getAllSync<{ id: string; data: string }>(
+    `SELECT id, data FROM held_orders WHERE instr(data, '"cost"') > 0`,
+  );
+
+  for (const row of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.data) as unknown;
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+
+    const held = { ...(parsed as Record<string, unknown>) };
+    if (!Array.isArray(held.entries)) continue;
+    let changed = false;
+    held.entries = held.entries.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+      const projected = { ...(entry as Record<string, unknown>) };
+      const item = stripProductSnapshotCosts(projected.item);
+      const variant = stripProductSnapshotCosts(projected.variant);
+      if (item.changed) {
+        projected.item = item.value;
+        changed = true;
+      }
+      if (variant.changed) {
+        projected.variant = variant.value;
+        changed = true;
+      }
+      return changed ? projected : entry;
+    });
+
+    if (changed) {
+      db.runSync(`UPDATE held_orders SET data = ? WHERE id = ?`, JSON.stringify(held), row.id);
+    }
+  }
+}
+
 /**
  * Atomically move a store database to a narrower or wider read projection.
  *
  * A missing policy marker means the database predates filtered sync, so its
  * previous projection is deliberately treated as every collection. Clean rows
- * that leave the projection are deleted; dirty rows and tombstones survive for
- * later reconciliation by a suitably-authorized user.
+ * outside the projection and clean protected product costs are removed; dirty
+ * rows (including tombstones) survive for later reconciliation by a suitably-
+ * authorized user.
  */
 function transitionReadProjectionOn(
   db: SQLite.SQLiteDatabase,
@@ -777,7 +1132,7 @@ function transitionReadProjectionOn(
   let transitioned = false;
   let purgedCollections: Collection[] = [];
 
-  db.withTransactionSync(() => {
+  withTx(db, () => {
     const policyIsCurrent =
       metaGetOn(db, input.policyMarkerKey) === input.policyVersion;
     const storedProjection = policyIsCurrent
@@ -786,21 +1141,23 @@ function transitionReadProjectionOn(
     const previous = storedProjection ?? [...COLLECTIONS];
     const nextSet = new Set(input.nextReadable);
     const next = COLLECTIONS.filter((collection) => nextSet.has(collection));
-    const previousSet = new Set(previous);
     const projectionChanged =
       previous.length !== next.length ||
       previous.some((collection, index) => collection !== next[index]);
     const scopeChanged = metaGetOn(db, input.activeScopeKey) !== input.nextScope;
 
     transitioned = !policyIsCurrent || projectionChanged || scopeChanged;
-    if (!transitioned) return;
 
-    purgedCollections = previous.filter(
-      (collection) => previousSet.has(collection) && !nextSet.has(collection),
-    );
-    for (const collection of purgedCollections) {
-      db.runSync(`DELETE FROM ${collection} WHERE dirty = 0`);
-    }
+    // Run this on every preparation, not only role transitions. A restricted
+    // till may have created receipt/audit/stock rows since the last transition;
+    // once acknowledged, none of those clean rows should survive a remount.
+    purgedCollections = COLLECTIONS.filter((collection) => !nextSet.has(collection));
+    purgeCleanCollectionsOn(db, purgedCollections);
+    purgeRetiredProductImagesOn(db);
+    redactHeldOrderCostsOn(db);
+    if (!input.retainProductCosts) redactCleanProductCostsOn(db);
+
+    if (!transitioned) return;
 
     // These writes share the purge transaction: a crash can expose either the
     // complete old projection or the complete pending new one, never a mixture.
@@ -911,16 +1268,20 @@ export function mergeInPlace<T extends { id: string }>(
 }
 
 /** Rows changed locally since the last push. */
-export function loadDirty<T>(c: Collection): ChangeRow<T>[] {
-  return loadDirtyOn<T>(conn(), c);
+export function loadDirty<T>(c: Collection, limit?: number): DirtyRow<T>[] {
+  return loadDirtyOn<T>(conn(), c, limit);
 }
 
 export function clearDirty(c: Collection, revisions: readonly DirtyRevision[]) {
   clearDirtyOn(conn(), c, revisions);
 }
 
-export function clearDirtyBatch(batches: readonly DirtyRevisionBatch[]): void {
-  clearDirtyBatchOn(conn(), batches);
+export function clearDirtyBatch(
+  batches: readonly DirtyRevisionBatch[],
+  purgeCollections: readonly Collection[] = [],
+  redactProductCosts = false,
+): void {
+  clearDirtyBatchOn(conn(), batches, purgeCollections, redactProductCosts);
 }
 
 /** Apply a change pulled from the server (last-write-wins by updatedAt). */
@@ -963,9 +1324,13 @@ export type StoreScope = {
     input: ReadProjectionTransitionInput,
   ) => ReadProjectionTransitionResult;
   countDirty: (c: Collection) => number;
-  loadDirty: <T>(c: Collection) => ChangeRow<T>[];
+  loadDirty: <T>(c: Collection, limit?: number) => DirtyRow<T>[];
   clearDirty: (c: Collection, revisions: readonly DirtyRevision[]) => void;
-  clearDirtyBatch: (batches: readonly DirtyRevisionBatch[]) => void;
+  clearDirtyBatch: (
+    batches: readonly DirtyRevisionBatch[],
+    purgeCollections?: readonly Collection[],
+    redactProductCosts?: boolean,
+  ) => void;
   applyRemote: <T extends { id: string }>(c: Collection, change: ChangeRow<T>) => void;
   applyRemoteBatch: (changes: readonly RemoteCollectionChange[]) => void;
 };
@@ -996,9 +1361,10 @@ export function storeScope(storeId: string): StoreScope {
     metaSet: (key, value) => metaSetOn(handle(), key, value),
     transitionReadProjection: (input) => transitionReadProjectionOn(handle(), input),
     countDirty: (c) => countDirtyOn(handle(), c),
-    loadDirty: <T>(c: Collection) => loadDirtyOn<T>(handle(), c),
+    loadDirty: <T>(c: Collection, limit?: number) => loadDirtyOn<T>(handle(), c, limit),
     clearDirty: (c, revisions) => clearDirtyOn(handle(), c, revisions),
-    clearDirtyBatch: (batches) => clearDirtyBatchOn(handle(), batches),
+    clearDirtyBatch: (batches, purgeCollections, redactProductCosts) =>
+      clearDirtyBatchOn(handle(), batches, purgeCollections, redactProductCosts),
     applyRemote: (c, change) => applyRemoteOn(handle(), c, change),
     applyRemoteBatch: (changes) => applyRemoteBatchOn(handle(), changes),
   };

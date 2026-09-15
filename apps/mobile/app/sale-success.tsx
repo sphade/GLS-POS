@@ -4,7 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
-import { loadReceiptById, useCart } from "@/lib/cart";
+import { useCart } from "@/lib/cart";
 import { getSavedPrinter, printReceipt } from "@/lib/printer";
 import { printViaSystem } from "@/lib/receipt-share";
 import { feedbackTap } from "@/lib/feedback";
@@ -16,8 +16,11 @@ import { feedbackTap } from "@/lib/feedback";
 export default function SaleSuccessScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { receiptRevision } = useCart();
-  const receipt = useMemo(() => loadReceiptById(id), [id, receiptRevision]);
+  const { receiptById, receiptRevision } = useCart();
+  const receipt = useMemo(
+    () => receiptById(id),
+    [id, receiptById, receiptRevision],
+  );
 
   const [busy, setBusy] = useState(false);
 

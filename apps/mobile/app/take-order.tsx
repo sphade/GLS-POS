@@ -42,6 +42,7 @@ import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 import { stockHintOf } from "@/lib/stock";
+import { itemMatchesSearch } from "@/lib/search";
 
 const CURRENT_ID = "__current_order__";
 const CURRENT_LABEL = "CURRENT ORDER";
@@ -119,7 +120,7 @@ export default function TakeOrderScreen() {
     const other: Item[] = [];
 
     for (const item of products) {
-      if (q && !item.name.toLowerCase().includes(q)) continue;
+      if (!itemMatchesSearch(item, q)) continue;
       const categoryItems = item.categoryId ? grouped.get(item.categoryId) : undefined;
       if (categoryItems) categoryItems.push(item);
       else other.push(item);
@@ -269,6 +270,34 @@ export default function TakeOrderScreen() {
 
     return cancelPagerAlignment;
   }, [alignPager, cancelPagerAlignment, pages.length]);
+
+  /**
+   * A search finds items on pages the cashier is not looking at.
+   *
+   * Categories live on separate pages here, so typing "bread" while standing on
+   * RICE emptied the visible page and left the match one swipe away, unseen. From
+   * behind the counter that reads as "we don't have bread". If the current page
+   * has no match and another does, move to the first page that does; once on a
+   * page with matches it stays put, so narrowing a query never yanks the pager
+   * around mid-keystroke.
+   */
+  useEffect(() => {
+    if (deferredQuery.trim().length === 0) return;
+    const current = currentPage.current;
+    // Page 0 is the running order, never a search target.
+    const currentHasMatches =
+      current >= 1 && (pages[current - 1]?.items.length ?? 0) > 0;
+    if (currentHasMatches) return;
+
+    const firstMatch = pages.findIndex((page) => page.items.length > 0);
+    if (firstMatch === -1) return;
+    const target = firstMatch + 1;
+    if (target === current) return;
+
+    currentPage.current = target;
+    setIndex(target);
+    alignPager(target);
+  }, [alignPager, deferredQuery, pages]);
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>

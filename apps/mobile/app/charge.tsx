@@ -6,6 +6,7 @@ import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { runAtomic } from "@/lib/db";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
 import { feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
@@ -66,14 +67,20 @@ export default function ChargeScreen() {
       variantId: e.variant?.id,
       qty: e.qty,
     }));
-    const receipt = completeSale({
-      mode,
-      customerName: name.trim() || null,
-      storeName: store.name,
-      storeReference: store.reference,
-      servedBy: user?.name ?? "Staff",
+    // The receipt, its stock movements, the audit entry and the table ticket it
+    // consumed commit together: a crash here can never bank a sale whose stock
+    // was not deducted, nor deduct stock for a sale that was never recorded.
+    const receipt = runAtomic(() => {
+      const sale = completeSale({
+        mode,
+        customerName: name.trim() || null,
+        storeName: store.name,
+        storeReference: store.reference,
+        servedBy: user?.name ?? "Staff",
+      });
+      recordSale(lines, sale.id);
+      return sale;
     });
-    recordSale(lines, receipt.id);
     router.replace(`/sale-success?id=${receipt.id}` as Href);
   };
 

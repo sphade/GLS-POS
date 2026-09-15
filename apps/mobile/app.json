@@ -67,15 +67,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to scan barcodes and take product photos.",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to scan barcodes.",
           "recordAudioAndroid": false
-        }
-      ],
-      [
-        "expo-image-picker",
-        {
-          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos to set product images.",
-          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to take product photos."
         }
       ],
       [

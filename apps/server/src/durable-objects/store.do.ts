@@ -7,20 +7,25 @@ import type {
   ApiCategory,
   ApiProduct,
   ApiStockAdjustment,
-  Permission,
   PlaceWebOrderRequest,
   PublicMenu,
   StockMovement,
   StockState,
   StoreRole,
   SyncChange,
+  SyncDeniedChange,
   SyncPullChange,
   SyncPullResponse,
   SyncPushRequest,
   WebOrder,
   WebOrderLine,
 } from "@gls-pos/types";
-import { roleCan, roleCanReadSyncCollection } from "@gls-pos/types";
+import {
+  readableSyncCollections,
+  roleCanReadProductCosts,
+  syncMoneyDocumentIsConsistent,
+  syncWriteDisposition,
+} from "@gls-pos/types";
 import type { Env } from "../env.js";
 import * as schema from "./schema.js";
 import migrations from "./migrations/migrations.js";
@@ -76,6 +81,7 @@ type StoredProduct = {
   id: string;
   name: string;
   price: number;
+  cost?: number;
   currency?: string;
   categoryId?: string;
   sku?: string;
@@ -89,6 +95,7 @@ type StoredProduct = {
     name: string;
     /** Integer minor units. */
     price: number;
+    cost?: number;
     /** Undefined/null means stock is not tracked for this variant. */
     stock?: number | null;
     autoUpdateStock?: boolean;
@@ -173,12 +180,6 @@ function stockMovementOf(value: unknown): StockMovement | null {
   return movement as StockMovement;
 }
 
-function movementPermission(movement: StockMovement): Permission {
-  if (movement.reason === "sale") return "sale:create";
-  if (movement.reason === "return") return "sale:refund";
-  return "inventory:adjust";
-}
-
 /** Existing movement rows are immutable, except server-corrected balance fields. */
 function isMovementRetry(storedJson: string, incoming: StockMovement): boolean {
   const stored = stockMovementOf(JSON.parse(storedJson));
@@ -210,64 +211,82 @@ function isMovementRetry(storedJson: string, incoming: StockMovement): boolean {
 
 type DocumentRow = typeof schema.documents.$inferSelect;
 
-/** Permission needed to write each collection outright. */
-const WRITE_PERMISSION: Record<string, Permission> = {
-  products: "catalog:write",
-  categories: "catalog:write",
-  modifiers: "catalog:write",
-  ingredients: "catalog:write",
-  tables: "tables:manage",
-  customers: "customers:manage",
-  staff: "staff:manage",
-  receipts: "sale:create",
-  // Credit notes reverse money, so they need the refund permission — a cashier
-  // who can sell still cannot push a return.
-  returns: "sale:refund",
-  stock_movements: "inventory:adjust",
-  product_images: "catalog:write",
-  // Staff advance a web order through preparing → ready → served while selling.
-  web_orders: "sale:create",
-  // Every signed-in role appends audit entries for its own actions; the base
-  // read permission (held by all roles) gates it. Viewing is gated separately.
-  audit_log: "catalog:read",
-  // Open/held bills are created and settled by anyone who can sell.
-  held_orders: "sale:create",
-};
+/** Remove protected root/variant cost values from a product-shaped snapshot. */
+function stripProductCosts(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
 
-/**
- * Read policy for the opaque sync stream.
- *
- * Membership middleware supplies the current D1 role on every request, so a
- * stale or tampered mobile cache cannot download back-office history. Receipt
- * and return rows intentionally share `receipts:view`: supervisors need both
- * to display an accurate individual receipt, while cashiers keep only receipts
- * already created on their own offline till.
- */
-function mayReadCollection(collection: string, role: StoreRole): boolean {
-  return roleCanReadSyncCollection(role, collection);
+  const projected = { ...(value as Record<string, unknown>) };
+  delete projected.cost;
+  if (Array.isArray(projected.variants)) {
+    projected.variants = projected.variants.map((variant) => {
+      if (!variant || typeof variant !== "object" || Array.isArray(variant)) return variant;
+      const visible = { ...(variant as Record<string, unknown>) };
+      delete visible.cost;
+      return visible;
+    });
+  }
+  return projected;
+}
+
+/** Strip protected cost values before a product document crosses the sync boundary. */
+function projectProductForRole(value: unknown, role: StoreRole): unknown {
+  return roleCanReadProductCosts(role) ? value : stripProductCosts(value);
+}
+
+/** Held bills embed product snapshots but never need back-office cost values. */
+function stripHeldOrderCosts(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+
+  const held = { ...(value as Record<string, unknown>) };
+  if (!Array.isArray(held.entries)) return held;
+  held.entries = held.entries.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const projected = { ...(entry as Record<string, unknown>) };
+    if ("item" in projected) projected.item = stripProductCosts(projected.item);
+    if ("variant" in projected) projected.variant = stripProductCosts(projected.variant);
+    return projected;
+  });
+  return held;
 }
 
 /**
- * Whether a pushed receipt reprices the sale with a discount.
- *
- * Checked on the whole document (the order-level total and every line) so a
- * device can't slip a reduction past the role check by putting it on one line.
+ * A seller receives products without cost values but still sends stock-only
+ * product revisions. Restore those protected fields from the authoritative
+ * document so a restricted write can never erase or replace them.
  */
-function isDiscounted(data: unknown): boolean {
-  if (!data || typeof data !== "object") return false;
-  const doc = data as {
-    discountTotal?: unknown;
-    orderDiscount?: unknown;
-    lines?: { discount?: unknown; orderDiscountShare?: unknown }[];
-  };
-  if (typeof doc.discountTotal === "number" && doc.discountTotal > 0) return true;
-  if (doc.orderDiscount && typeof doc.orderDiscount === "object") return true;
-  if (!Array.isArray(doc.lines)) return false;
-  return doc.lines.some(
-    (line) =>
-      (typeof line?.discount === "number" && line.discount > 0) ||
-      (typeof line?.orderDiscountShare === "number" && line.orderDiscountShare > 0),
-  );
+function preserveProductCosts(storedJson: string | undefined, incoming: unknown): unknown {
+  if (!storedJson || !incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return incoming;
+  }
+
+  const stored = JSON.parse(storedJson) as Record<string, unknown>;
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return incoming;
+
+  const next = { ...(incoming as Record<string, unknown>) };
+  if (Object.prototype.hasOwnProperty.call(stored, "cost")) next.cost = stored.cost;
+  else delete next.cost;
+
+  if (Array.isArray(next.variants) && Array.isArray(stored.variants)) {
+    const storedById = new Map<string, Record<string, unknown>>();
+    for (const variant of stored.variants) {
+      if (!variant || typeof variant !== "object" || Array.isArray(variant)) continue;
+      const record = variant as Record<string, unknown>;
+      if (typeof record.id === "string") storedById.set(record.id, record);
+    }
+    next.variants = next.variants.map((variant) => {
+      if (!variant || typeof variant !== "object" || Array.isArray(variant)) return variant;
+      const visible = { ...(variant as Record<string, unknown>) };
+      const current = typeof visible.id === "string" ? storedById.get(visible.id) : undefined;
+      if (current && Object.prototype.hasOwnProperty.call(current, "cost")) {
+        visible.cost = current.cost;
+      } else {
+        delete visible.cost;
+      }
+      return visible;
+    });
+  }
+
+  return next;
 }
 
 const stockDidNotIncrease = (before: unknown, after: unknown): boolean => {
@@ -287,7 +306,7 @@ function variantStockDecrementOnly(prev: unknown, next: unknown): boolean {
     const b = after as Record<string, unknown>;
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const key of keys) {
-      if (key === "stock") continue;
+      if (key === "stock" || key === "cost") continue;
       if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return false;
     }
     return stockDidNotIncrease(a.stock, b.stock);
@@ -306,7 +325,7 @@ function isStockDecrementOnly(prev: unknown, next: unknown): boolean {
 
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const key of keys) {
-    if (key === "stockQuantity" || key === "variants") continue;
+    if (key === "stockQuantity" || key === "variants" || key === "cost") continue;
     if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return false;
   }
 
@@ -328,20 +347,44 @@ export type StockActor = {
 };
 
 export type PushResult = {
-  /** Collections the caller's role may not write. Empty means the push applied. */
+  /**
+   * Collections the caller's role may not write, for protocol v1 callers whose
+   * pushes are all-or-nothing. Empty means the push applied.
+   *
+   * Always empty for v2 (`partial`) callers: they get `deniedIds` instead and
+   * every authorized row is still applied.
+   */
   denied: string[];
+  /** Exact rows that were refused. Only populated for `partial` pushes. */
+  deniedIds: SyncDeniedChange[];
   changes: SyncPullChange[];
   cursor: number;
   /** The store's head sequence, so devices can detect a rebuilt oplog. */
   head: number;
 };
 
-/** DB row → wire change (parse the stored JSON back into a document). */
-function toChange(row: DocumentRow): SyncPullChange {
+/** Per-request behaviour negotiated from the caller's `x-sync-protocol`. */
+export type PushOptions = {
+  /**
+   * Apply every authorized row and report the refused ones, instead of refusing
+   * the entire request. See `SYNC_PROTOCOL_VERSION`.
+   */
+  partial?: boolean;
+};
+
+/** DB row → role-projected wire change (parse stored JSON only after authorization). */
+function toChange(row: DocumentRow, role: StoreRole): SyncPullChange {
+  const stored = JSON.parse(row.data) as unknown;
+  const data =
+    row.collection === "products"
+      ? projectProductForRole(stored, role)
+      : row.collection === "held_orders"
+        ? stripHeldOrderCosts(stored)
+        : stored;
   return {
     collection: row.collection as SyncChange["collection"],
     id: row.id,
-    data: JSON.parse(row.data),
+    data,
     updatedAt: row.updatedAt,
     deleted: row.deleted,
     serverSeq: row.serverSeq,
@@ -392,16 +435,12 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * All changes recorded with a sequence greater than `cursor`, oldest first,
-   * capped to one page. The returned cursor is the last row *included*, so a
-   * capped response still counts as progress and the next pull continues from
-   * exactly there — never re-sending, never skipping.
+   * Role-readable changes after `cursor`, oldest first, capped to one page.
    *
-   * `product_images` is deliberately EXCLUDED from device sync: rows are
-   * 30–80KB of base64 each, and a fresh install otherwise drags megabytes of
-   * photos through dozens of round-trips. Item photos reach devices via their
-   * remote URLs instead (hydrated client-side). Rows are still stored, so an
-   * explicit future out-of-band channel can serve them.
+   * Authorization is part of the SQL predicate rather than a post-query loop:
+   * hidden receipt/audit history therefore consumes neither row slots nor
+   * client round-trips. When the final readable page is exhausted, the cursor
+   * jumps over any hidden tail to the global head without exposing its data.
    */
   private changesSincePage(
     cursor: number,
@@ -409,13 +448,24 @@ export class StoreDurableObject extends DurableObject<Env> {
     options?: { includeProductImages?: boolean },
   ): { changes: SyncPullChange[]; cursor: number } {
     const includeImages = options?.includeProductImages === true;
+    const readable = readableSyncCollections(role).filter(
+      (collection) => includeImages || collection !== "product_images",
+    );
+    const head = this.currentSeq();
+
+    // Preserve an ahead cursor so the client can detect an oplog rebuild from
+    // `cursor > head` and deliberately restart its replay from zero.
+    if (cursor > head) return { changes: [], cursor };
+    if (cursor === head || readable.length === 0) return { changes: [], cursor: head };
+
     const rows = this.db
       .select()
       .from(schema.documents)
       .where(
-        includeImages
-          ? gt(schema.documents.serverSeq, cursor)
-          : and(gt(schema.documents.serverSeq, cursor), sql`${schema.documents.collection} <> 'product_images'`),
+        and(
+          gt(schema.documents.serverSeq, cursor),
+          inArray(schema.documents.collection, readable),
+        ),
       )
       .orderBy(schema.documents.serverSeq)
       .limit(PULL_MAX_ROWS)
@@ -423,26 +473,26 @@ export class StoreDurableObject extends DurableObject<Env> {
 
     let bytes = 0;
     let nextCursor = cursor;
+    let consumedRows = 0;
     const page: DocumentRow[] = [];
     for (const row of rows) {
-      if (!mayReadCollection(row.collection, role)) {
-        // Hidden rows still consume their sequence. Advancing over them keeps a
-        // restricted client from requesting the same page forever and does not
-        // reveal their contents.
-        nextCursor = row.serverSeq;
-        continue;
-      }
-
       const rowBytes = row.data.length + 96;
       if (page.length > 0 && bytes + rowBytes > PULL_MAX_BYTES) break;
       page.push(row);
+      consumedRows += 1;
       bytes += rowBytes;
       nextCursor = row.serverSeq;
       // Always make progress even if one permitted document exceeds the budget.
       if (rowBytes > PULL_MAX_BYTES) break;
     }
 
-    return { changes: page.map(toChange), cursor: nextCursor };
+    // A short, fully-consumed filtered page proves there are no more readable
+    // rows. Skip the hidden suffix in one step instead of returning empty pages.
+    if (consumedRows === rows.length && rows.length < PULL_MAX_ROWS) {
+      nextCursor = head;
+    }
+
+    return { changes: page.map((row) => toChange(row, role)), cursor: nextCursor };
   }
 
   /**
@@ -467,18 +517,30 @@ export class StoreDurableObject extends DurableObject<Env> {
     request: SyncPushRequest,
     role: StoreRole,
     actor?: StockActor,
+    options?: PushOptions,
   ): Promise<PushResult> {
     // Authorise everything up front so a rejected push applies nothing. The DO
     // is single-threaded, so no other write can interleave between the checks
     // and the writes below.
+    const partial = options?.partial === true;
     const stored = new Map<string, { updatedAt: number; data: string } | undefined>();
     const denied: string[] = [];
+    const deniedIds: SyncDeniedChange[] = [];
+    const deniedKeys = new Set<string>();
     const incomingMovementIds = new Set<string>();
+
+    const refuse = (change: SyncChange) => {
+      denied.push(change.collection);
+      const key = `${change.collection}/${change.id}`;
+      if (deniedKeys.has(key)) return;
+      deniedKeys.add(key);
+      deniedIds.push({ collection: change.collection, id: change.id });
+    };
 
     for (const change of request.changes) {
       if (change.collection === "stock_movements") {
         if (incomingMovementIds.has(change.id)) {
-          denied.push(change.collection);
+          refuse(change);
           continue;
         }
         incomingMovementIds.add(change.id);
@@ -496,12 +558,16 @@ export class StoreDurableObject extends DurableObject<Env> {
         .all();
       stored.set(key, existing);
 
-      if (!this.mayWrite(change, role, existing?.data)) denied.push(change.collection);
+      if (!this.mayWrite(change, role, existing?.data)) refuse(change);
     }
 
-    if (denied.length > 0) {
+    // v1 devices cannot be told which row failed, so nothing is applied and the
+    // Worker turns this into a 403. v2 devices apply the rest and keep only the
+    // named rows pending.
+    if (denied.length > 0 && !partial) {
       return {
         denied: [...new Set(denied)],
+        deniedIds,
         changes: [],
         cursor: request.cursor,
         head: this.currentSeq(),
@@ -520,7 +586,13 @@ export class StoreDurableObject extends DurableObject<Env> {
     // transaction, while movement ids still make whole-request retries safe.
     let seq = this.currentSeq();
 
+    let appliedAny = false;
+
     for (const change of request.changes) {
+      // Refused rows only reach here on a partial push, where the rest of the
+      // batch is still applied.
+      if (deniedKeys.has(`${change.collection}/${change.id}`)) continue;
+
       const existing = stored.get(`${change.collection}/${change.id}`);
       // Clamp future-dated client clocks so one fast device cannot pin a
       // document ahead of every other device's edits.
@@ -549,8 +621,14 @@ export class StoreDurableObject extends DurableObject<Env> {
           actorRole: role,
         };
       }
+      if (change.collection === "held_orders" && !change.deleted) {
+        data = stripHeldOrderCosts(data);
+      }
       if (change.collection === "products" && !change.deleted) {
-        data = this.sanitizeProductStock(change.data, existing?.data);
+        if (!roleCanReadProductCosts(role)) {
+          data = preserveProductCosts(existing?.data, data);
+        }
+        data = this.sanitizeProductStock(data, existing?.data);
       }
       if (
         change.collection === "stock_movements" &&
@@ -563,6 +641,7 @@ export class StoreDurableObject extends DurableObject<Env> {
       }
 
       seq += 1;
+      appliedAny = true;
       const row = {
         collection: change.collection,
         id: change.id,
@@ -592,14 +671,21 @@ export class StoreDurableObject extends DurableObject<Env> {
     }
 
     // Let other devices know there's something to pull (e.g. one till marks an
-    // order READY and every other screen updates straight away).
-    if (request.changes.length > 0) this.broadcast("changes");
+    // order READY and every other screen updates straight away). A push whose
+    // every row was refused or superseded changed nothing worth waking them for.
+    if (appliedAny) this.broadcast("changes");
 
     // The download half of the round-trip is paged exactly like a pull, so an
     // upload can never be killed by an oversized response. Anything past the
     // page arrives on the device's next cycle.
     const page = this.changesSincePage(request.cursor, role);
-    return { denied: [], changes: page.changes, cursor: page.cursor, head: this.currentSeq() };
+    return {
+      denied: [],
+      deniedIds,
+      changes: page.changes,
+      cursor: page.cursor,
+      head: this.currentSeq(),
+    };
   }
 
   /**
@@ -616,26 +702,28 @@ export class StoreDurableObject extends DurableObject<Env> {
    *    straight into the document.
    */
   private mayWrite(change: SyncChange, role: StoreRole, storedJson?: string): boolean {
+    const disposition = syncWriteDisposition(role, change);
+    if (disposition === "denied") return false;
+
+    // Money must add up before it is stored. Permissions decide who may raise a
+    // sale or a refund; this decides whether the document they sent is coherent,
+    // which is what stops a bill being quietly reduced without a declared
+    // discount. Tombstones carry no money to check.
+    if (!change.deleted && !syncMoneyDocumentIsConsistent(change.collection, change.data)) {
+      return false;
+    }
+
     if (change.collection === "stock_movements") {
-      if (change.deleted) return false;
       const movement = stockMovementOf(change.data);
       if (!movement || movement.id !== change.id || movement.delta === 0) return false;
-      if (storedJson && !isMovementRetry(storedJson, movement)) return false;
-      return roleCan(role, movementPermission(movement));
+      return !storedJson || isMovementRetry(storedJson, movement);
     }
 
-    const required = WRITE_PERMISSION[change.collection];
-    if (!required) return false;
+    if (disposition === "allowed") return true;
 
-    if (change.collection === "receipts" && !change.deleted && isDiscounted(change.data)) {
-      if (!roleCan(role, "discount:apply")) return false;
-    }
-
-    if (roleCan(role, required)) return true;
-
-    if (change.collection === "products" && roleCan(role, "sale:create") && !change.deleted) {
-      // No stored doc means this would be creating a product — not a sale.
-      if (!storedJson) return false;
+    // The only conditional case is a seller's product update. No stored doc
+    // means this would create a product, and any non-stock change is rejected.
+    if (change.collection === "products" && storedJson) {
       return isStockDecrementOnly(JSON.parse(storedJson), change.data);
     }
 

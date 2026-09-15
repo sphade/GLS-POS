@@ -2,7 +2,6 @@
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
 import { EditorToolbar, FeatureCard, FieldCard, PickerCard, Segmented, ToggleRow, confirmDelete, formStyles } from "@/components/form";
@@ -10,7 +9,6 @@ import { VariantEditor, VARIANT_ICONS } from "@/components/VariantEditor";
 import { NumberInput } from "@/components/NumberInput";
 import { swatches, useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
-import { getImageUri, removeImage, saveImage } from "@/lib/image-store";
 import { MEASURES, newVariant, type Measure, type SellBy, type Variant } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
 
@@ -39,26 +37,6 @@ export default function ItemEditorScreen() {
   const [sellBy, setSellBy] = useState<SellBy>(existing?.sellBy ?? "unit");
   const [measure, setMeasure] = useState<Measure>(existing?.measure ?? MEASURES[0]!);
   const [variants, setVariants] = useState<Variant[]>(existing?.variants ?? []);
-
-  /** Newly picked photo, held until save. null = user removed the existing one. */
-  const [pickedImage, setPickedImage] = useState<{ base64: string; mime: string } | null | undefined>(
-    undefined,
-  );
-  /** Preview URI for the already-stored image, if any. */
-  const [storedUri, setStoredUri] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (existing?.hasImage) void getImageUri(existing.id).then(setStoredUri);
-  }, [existing?.id, existing?.hasImage]);
-
-  // What to show in the circle: the fresh pick, else the stored image.
-  const previewUri =
-    pickedImage === null
-      ? undefined
-      : pickedImage
-        ? `data:${pickedImage.mime};base64,${pickedImage.base64}`
-        : (storedUri ?? undefined);
-  const hasAnyImage = !!previewUri;
 
   // Simple-mode stock control.
   const [trackStock, setTrackStock] = useState(existing ? existing.stockQuantity !== null : false);
@@ -253,13 +231,7 @@ export default function ItemEditorScreen() {
       stockQuantity: nextStock,
       lowStockAt: mode === "right" ? undefined : simpleLowAt,
       autoUpdateStock: mode === "right" ? undefined : (existing?.autoUpdateStock ?? true),
-      // Photo bytes live in `product_images`, not on the product document.
-      hasImage: pickedImage === null ? false : pickedImage ? true : existing?.hasImage,
     });
-
-    // Persist the image itself against the saved product's id.
-    if (pickedImage) saveImage(saved.id, pickedImage.base64, pickedImage.mime);
-    else if (pickedImage === null) removeImage(saved.id);
 
     // Audit trail: log the stock delta from a manual create/edit. The server
     // rebuilds stock from these movements, so every stock change must emit one —
@@ -290,55 +262,6 @@ export default function ItemEditorScreen() {
 
     feedbackTap();
     router.back();
-  };
-
-  /** Launch the library or camera, crop to a square, compress, and keep the
-   *  result as a base64 data URI so it lives in SQLite (no bucket, no upload). */
-  const captureImage = async (from: "camera" | "library") => {
-    const opts: ImagePicker.ImagePickerOptions = {
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.4,
-      base64: true,
-    };
-    const res =
-      from === "camera"
-        ? await (async () => {
-            const perm = await ImagePicker.requestCameraPermissionsAsync();
-            if (!perm.granted) {
-              Alert.alert("Camera permission needed", "Enable camera access to take a photo.");
-              return null;
-            }
-            return ImagePicker.launchCameraAsync(opts);
-          })()
-        : await ImagePicker.launchImageLibraryAsync(opts);
-
-    if (!res || res.canceled || !res.assets?.[0]?.base64) return;
-    const asset = res.assets[0];
-    setPickedImage({ base64: asset.base64!, mime: asset.mimeType ?? "image/jpeg" });
-    setTouched(true);
-  };
-
-  const onImagePress = () => {
-    feedbackTap();
-    Alert.alert("Item image", undefined, [
-      { text: "Take photo", onPress: () => captureImage("camera") },
-      { text: "Choose from library", onPress: () => captureImage("library") },
-      ...(hasAnyImage
-        ? [
-            {
-              text: "Remove image",
-              style: "destructive" as const,
-              onPress: () => {
-                setPickedImage(null);
-                setTouched(true);
-              },
-            },
-          ]
-        : []),
-      { text: "Cancel", style: "cancel" as const },
-    ]);
   };
 
   return (
@@ -507,19 +430,6 @@ export default function ItemEditorScreen() {
                 Stock goes down automatically with each sale{isFraction ? ` (per ${measure.unit})` : ""}.
               </Text>
             </FeatureCard>
-
-            <View style={styles.imagePickerCard}>
-              <Pressable
-                style={[styles.imageCircle, { backgroundColor: category?.color ?? "#EF3E36" }]}
-                onPress={onImagePress}
-              >
-                {previewUri && <Image source={{ uri: previewUri }} style={styles.imageCirclePhoto} />}
-                <View style={styles.editBadge}>
-                  <Ionicons name={hasAnyImage ? "pencil" : "camera"} size={15} color={colors.primary} />
-                </View>
-              </Pressable>
-              <Text style={styles.changeImage}>{hasAnyImage ? "Change image" : "Add image"}</Text>
-            </View>
 
             <View style={styles.tipBanner}>
               <MaterialCommunityIcons name="lightbulb-on-outline" size={22} color={colors.primary} />
@@ -918,23 +828,6 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   stockHint: { fontSize: 12, color: colors.grey600, marginTop: 8 },
-
-  imagePickerCard: { alignItems: "center", paddingVertical: 18 },
-  imageCircle: { width: 104, height: 104, borderRadius: 52, alignItems: "center", justifyContent: "center", overflow: "hidden" },
-  imageCirclePhoto: { ...StyleSheet.absoluteFillObject, width: 104, height: 104, borderRadius: 52 },
-  editBadge: {
-    position: "absolute",
-    bottom: 0,
-    right: 0,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.white,
-    alignItems: "center",
-    justifyContent: "center",
-    elevation: 3,
-  },
-  changeImage: { color: colors.blue600, fontSize: 14, marginTop: 12, fontWeight: "600" },
 
   tipBanner: {
     flexDirection: "row",

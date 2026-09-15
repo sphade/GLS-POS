@@ -2,7 +2,6 @@
   memo,
   useCallback,
   useDeferredValue,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -41,10 +40,10 @@ import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { useServerRefresh } from "@/lib/sync";
 import { useStore } from "@/lib/store";
-import { ItemImage } from "@/components/ItemImage";
+import { ProductAvatar } from "@/components/product-avatar";
 import { EmptyState } from "@/components/EmptyState";
-import { warmImageCache } from "@/lib/image-store";
 import { stockHintOf } from "@/lib/stock";
+import { itemMatchesSearch } from "@/lib/search";
 import { metaGet, metaSet } from "@/lib/db";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
@@ -179,9 +178,15 @@ export default function ItemsScreen() {
     });
   }, []);
 
-  /** Chips: "All" clears, tapping the active category also clears. */
+  /**
+   * Chips: "All" clears, tapping the active category also clears.
+   *
+   * Choosing a category also ends any search. A search deliberately outranks the
+   * chip, so leaving the text in place would make the tap appear to do nothing.
+   */
   const selectCat = useCallback((id: string) => {
     feedbackTap();
+    setQuery("");
     setActiveCat((prev) => (id !== ALL && prev === id ? ALL : id));
   }, []);
 
@@ -213,7 +218,19 @@ export default function ItemsScreen() {
    */
   const groups = useMemo<CatalogGroup[]>(() => {
     const q = deferredQuery.trim().toLowerCase();
-    const match = (i: Item) => (q ? i.name.toLowerCase().includes(q) : true);
+    const match = (i: Item) => itemMatchesSearch(i, q);
+    /**
+     * A search always looks at the whole menu, whatever category is selected.
+     *
+     * The category chip used to narrow the search too, so a cashier standing in
+     * RICE who typed "bread" was told there was no bread — the item was simply in
+     * a category the filter had excluded. Nothing on screen explained that, and
+     * from behind the counter it reads as missing stock. Searching is how you find
+     * something you cannot see, so it must never be scoped to where you already
+     * are. The chip resumes filtering the moment the box is cleared.
+     */
+    const searching = q.length > 0;
+    const scopedTo = searching ? ALL : activeCat;
 
     const build = (id: string, title: string, items: Item[], color?: string): CatalogGroup => ({
       id,
@@ -225,13 +242,13 @@ export default function ItemsScreen() {
 
     const grouped: CatalogGroup[] = [];
     for (const c of categories) {
-      if (activeCat !== ALL && activeCat !== c.id) continue;
+      if (scopedTo !== ALL && scopedTo !== c.id) continue;
       const items = products.filter((i) => i.categoryId === c.id && match(i));
       if (items.length === 0) continue;
       grouped.push(build(c.id, c.name.toUpperCase(), items, c.color));
     }
 
-    if (activeCat === ALL || activeCat === UNCATEGORISED) {
+    if (scopedTo === ALL || scopedTo === UNCATEGORISED) {
       const known = new Set(categories.map((c) => c.id));
       const loose = products.filter((i) => (!i.categoryId || !known.has(i.categoryId)) && match(i));
       if (loose.length > 0) grouped.push(build(UNCATEGORISED, UNCATEGORISED, loose));
@@ -239,6 +256,14 @@ export default function ItemsScreen() {
 
     return grouped;
   }, [deferredQuery, products, categories, activeCat]);
+
+  /**
+   * While searching, the chip bar shows "All" as selected, because that is what
+   * is actually in force. Leaving RICE underlined during a catalog-wide search
+   * would be the same lie in a different place.
+   */
+  const searchIsActive = deferredQuery.trim().length > 0;
+  const shownCat = searchIsActive ? ALL : activeCat;
 
   /**
    * Rows are cached per group, keyed by the group's id and the current column
@@ -288,17 +313,6 @@ export default function ItemsScreen() {
 
     return laidOut;
   }, [groups, cols, collapsed, canEditCatalog]);
-
-  /**
-   * Materialise image files in the background once the screen has painted, so
-   * scrolling never blocks on a file write. Runs after the first frame.
-   */
-  useEffect(() => {
-    const ids = products.filter((p) => p.hasImage).map((p) => p.id);
-    if (ids.length === 0) return;
-    const t = setTimeout(() => void warmImageCache(ids), 400);
-    return () => clearTimeout(t);
-  }, [products]);
 
   /**
    * Checkbox toggle: add one of each simple item, or clear them all out. Takes
@@ -437,14 +451,14 @@ export default function ItemsScreen() {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipBarContent}
         >
-          <CategoryTab id={ALL} label="All" active={activeCat === ALL} onPress={selectCat} />
+          <CategoryTab id={ALL} label="All" active={shownCat === ALL} onPress={selectCat} />
           {categories.map((c) => (
             <CategoryTab
               key={c.id}
               id={c.id}
               label={c.name}
               color={c.color}
-              active={activeCat === c.id}
+              active={shownCat === c.id}
               onPress={selectCat}
             />
           ))}
@@ -452,7 +466,7 @@ export default function ItemsScreen() {
             <CategoryTab
               id={UNCATEGORISED}
               label="Other"
-              active={activeCat === UNCATEGORISED}
+              active={shownCat === UNCATEGORISED}
               onPress={selectCat}
             />
           )}
@@ -581,13 +595,10 @@ function Avatar({ item, size }: { item: Item; size: number }) {
   const low = item.stockQuantity !== null && item.stockQuantity > 0 && item.stockQuantity <= threshold;
   return (
     <View style={{ width: size, height: size }}>
-      <ItemImage
-        productId={item.id}
+      <ProductAvatar
         name={item.name}
         size={size}
         color={item.categoryColor ?? colors.red500}
-        hasImage={!!item.hasImage}
-        remoteUrl={item.imageUrl}
       />
       {low && <View style={styles.lowDot} />}
     </View>
@@ -657,10 +668,7 @@ function GoToCounterBar({ onPress }: { onPress: () => void }) {
   );
 }
 
-/**
- * Memoised so adding one item to the cart doesn't re-render (and re-decode the
- * image of) every other tile in the grid.
- */
+/** Memoised so adding one item to the cart re-renders only the affected tile. */
 const ProductCard = memo(function ProductCard({
   item,
   width,
@@ -680,7 +688,7 @@ const ProductCard = memo(function ProductCard({
   const out = !itemAvailable(item);
   const displayPrice = itemDisplayPrice(item);
   const stock = stockHintOf(item);
-  // Band spans the full card width but only the image area's height (+ padding).
+  // Band spans the full card width but only the avatar area's height (+ padding).
   const bandHeight = circle + 20;
   return (
     <Pressable
@@ -690,7 +698,7 @@ const ProductCard = memo(function ProductCard({
       delayLongPress={LONG_PRESS_MS}
       android_ripple={RIPPLE}
     >
-      <View style={[styles.imageZone, { width: circle, height: circle }]}>
+      <View style={[styles.avatarZone, { width: circle, height: circle }]}>
         <Avatar item={item} size={circle} />
       </View>
 
@@ -856,12 +864,10 @@ const styles = StyleSheet.create({
     marginBottom: GAP,
     elevation: 1,
   },
-  avatar: { alignItems: "center", justifyContent: "center", overflow: "hidden" },
-  avatarInitial: { color: colors.white, fontWeight: "800" },
   lowDot: { position: "absolute", top: 4, left: 4, width: 10, height: 10, borderRadius: 5, backgroundColor: colors.white },
 
   /** Square zone that holds the circular avatar; overlays fill it. */
-  imageZone: { alignItems: "center", justifyContent: "center", position: "relative" },
+  avatarZone: { alignItems: "center", justifyContent: "center", position: "relative" },
   rowThumb: { width: 46, height: 46, position: "relative" },
 
   /** Out-of-stock: scrim over the whole zone + a clear red label. */

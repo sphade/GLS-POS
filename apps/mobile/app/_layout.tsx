@@ -1,4 +1,5 @@
 ﻿import { useEffect } from "react";
+import { readableSyncCollections } from "@gls-pos/types";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -98,26 +99,36 @@ function CartCatalogBridge() {
  */
 function StoreScopedData() {
   const { store } = useStore();
+  const { can } = useAuth();
   setActiveStore(store.id);
+
+  const canReadReceiptHistory = can("receipts:view") || can("reports:view");
 
   useEffect(() => {
     if (store.id === "bootstrap") return;
     // Yield one frame so catalog, cart, tables and open tickets paint first on
-    // slow flash storage. Queries remain correct while these indexes build.
+    // slow flash storage. Only indexes for this role's readable collections
+    // are built; a later wider role gets its own projection-keyed index job.
     const timer = setTimeout(() => {
-      void prepareHistoryIndexes(store.id);
+      void prepareHistoryIndexes(store.id, readableSyncCollections(store.role));
     }, 0);
     return () => clearTimeout(timer);
-  }, [store.id]);
+  }, [store.id, store.role]);
 
   const dataScope = `${store.id}:${store.role}`;
 
   return (
     <CatalogProvider key={`catalog-${dataScope}`}>
-      <CartProvider key={`cart-${dataScope}`}>
+      <CartProvider
+        key={`cart-${dataScope}`}
+        canReadReceiptHistory={canReadReceiptHistory}
+      >
         {/* Refunds are cold data, so they sit outside the cart's hot path: a
             return raised elsewhere must never re-render the item grid. */}
-        <ReturnsProvider key={`returns-${dataScope}`}>
+        <ReturnsProvider
+          key={`returns-${dataScope}`}
+          canReadHistory={canReadReceiptHistory}
+        >
           <WebOrdersProvider key={`orders-${dataScope}`}>
             <CartCatalogBridge />
             <StatusBar style="light" backgroundColor={colors.primaryDark} />

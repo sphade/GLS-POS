@@ -6,6 +6,7 @@ import { useRouter, type Href } from "expo-router";
 import { colors, currencySymbol, denominationsFor, formatMoney, strings } from "@/constants/theme";
 import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
+import { runAtomic } from "@/lib/db";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
 import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
@@ -49,16 +50,21 @@ export default function CashPaymentScreen() {
       variantId: e.variant?.id,
       qty: e.qty,
     }));
-    const receipt = completeSale({
-      mode: "Cash",
-      customerName: null,
-      cashReceived: receivedMinor,
-      status: "paid",
-      storeName: store.name,
-      storeReference: store.reference,
-      servedBy: user?.name ?? "Staff",
+    // One commit for the receipt, its stock movements, the audit entry and the
+    // ticket it consumed — see the same guarantee on the card/transfer path.
+    const receipt = runAtomic(() => {
+      const sale = completeSale({
+        mode: "Cash",
+        customerName: null,
+        cashReceived: receivedMinor,
+        status: "paid",
+        storeName: store.name,
+        storeReference: store.reference,
+        servedBy: user?.name ?? "Staff",
+      });
+      recordSale(lines, sale.id);
+      return sale;
     });
-    recordSale(lines, receipt.id);
     router.replace(`/sale-success?id=${receipt.id}` as Href);
   };
 

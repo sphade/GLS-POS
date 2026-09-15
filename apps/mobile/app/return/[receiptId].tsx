@@ -12,7 +12,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
-import { loadReceiptById, useCart } from "@/lib/cart";
+import { useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
@@ -22,7 +22,6 @@ import {
   RETURN_REASONS,
   isOverReturned,
   lineNetForQty,
-  loadReturnsForReceipt,
   quoteReturn,
   receiptTaxOf,
   refundedTotalOf,
@@ -44,15 +43,15 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReturnScreen() {
   const router = useRouter();
   const { receiptId } = useLocalSearchParams<{ receiptId: string }>();
-  const { receiptRevision } = useCart();
+  const { receiptById, receiptRevision } = useCart();
   const { products } = useCatalog();
   const { store } = useStore();
   const { user, can } = useAuth();
-  const { returnRevision, createReturn } = useReturns();
+  const { returnRevision, createReturn, returnsFor } = useReturns();
 
   const receipt = useMemo(
-    () => loadReceiptById(receiptId),
-    [receiptId, receiptRevision],
+    () => receiptById(receiptId),
+    [receiptById, receiptId, receiptRevision],
   );
 
   const [quantities, setQuantities] = useState<Record<number, number>>({});
@@ -63,8 +62,8 @@ export default function ReturnScreen() {
   const [saving, setSaving] = useState(false);
 
   const prior = useMemo(
-    () => (receipt ? loadReturnsForReceipt(receipt.id) : []),
-    [receipt, returnRevision],
+    () => (receipt ? returnsFor(receipt.id) : []),
+    [receipt, returnRevision, returnsFor],
   );
   const remaining = useMemo(
     () => (receipt ? remainingByLine(receipt, prior) : []),

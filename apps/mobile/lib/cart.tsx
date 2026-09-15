@@ -28,6 +28,7 @@ import {
   type Totals,
 } from "./discount-model";
 import { logAudit } from "./audit";
+import { uid } from "./ids";
 import { onSynced } from "./sync";
 
 /**
@@ -76,14 +77,6 @@ export type Item = {
   autoUpdateStock?: boolean;
   /** Warn/flag when stock drops to or below this (only when tracked). */
   lowStockAt?: number;
-  /**
-   * True when a photo exists for this item. The bytes live in the separate
-   * `product_images` collection (see lib/image-store.ts) — never on this
-   * document, so reading the catalog stays fast.
-   */
-  hasImage?: boolean;
-  /** Remote source URL used once to hydrate the local image; display fallback. */
-  imageUrl?: string;
   /** Free-text label when sellBy === "unit" (e.g. "plate", "cup"). */
   unit?: string;
   sellBy?: SellBy;
@@ -250,6 +243,25 @@ export type HeldOrder = {
   resumedAt?: number;
 };
 
+/** Held bills need selling fields, never back-office root or variant costs. */
+function snapshotHeldEntries(entries: readonly CartEntry[]): CartEntry[] {
+  const stripVariantCost = (variant: Variant): Variant => {
+    const projected = { ...variant };
+    delete projected.cost;
+    return projected;
+  };
+
+  return entries.map((entry) => {
+    const item = { ...entry.item } as Item & { cost?: unknown };
+    delete item.cost;
+    if (item.variants) item.variants = item.variants.map(stripVariantCost);
+
+    const projected: CartEntry = { ...entry, item };
+    if (entry.variant) projected.variant = stripVariantCost(entry.variant);
+    return projected;
+  });
+}
+
 type CartState = {
   entries: Record<string, CartEntry>;
   count: number;
@@ -293,8 +305,10 @@ type CartState = {
   /** Leave the table: discard its ticket if one is open, then empty the cart. */
   abandonTableTicket: () => void;
 
-  /** Newest receipt window only; complete history stays in SQLite. */
+  /** Newest receipt window only; complete permitted history stays in SQLite. */
   receipts: Receipt[];
+  /** Resolve in-memory checkout receipts first, then permitted SQLite history. */
+  receiptById: (id: string | undefined) => Receipt | null;
   /** Changes for both live-window and historical receipt query hooks. */
   receiptRevision: number;
   completeSale: (input: {
@@ -452,7 +466,13 @@ type CartFast = {
 
 const CartFastContext = createContext<CartFast | null>(null);
 
-export function CartProvider({ children }: { children: ReactNode }) {
+export function CartProvider({
+  children,
+  canReadReceiptHistory,
+}: {
+  children: ReactNode;
+  canReadReceiptHistory: boolean;
+}) {
   const [entries, setEntries] = useState<Record<string, CartEntry>>({});
   const [orderDiscount, setOrderDiscountState] = useState<Discount | null>(null);
 
@@ -751,10 +771,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
     const prior = res ? heldOrdersRef.current.find((h) => h.id === res) : undefined;
     const parkedDiscount = orderDiscountRef.current;
     const held: HeldOrder = {
-      id: res ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
+      id: res ?? uid("held"),
       label,
       note: prior?.note,
-      entries: list,
+      entries: snapshotHeldEntries(list),
       itemCount: list.reduce((s, e) => s + e.qty, 0),
       total: summaryRef.current.total,
       currency: list[0]?.item.currency ?? "NGN",
@@ -826,14 +846,25 @@ export function CartProvider({ children }: { children: ReactNode }) {
       getSummary,
     ],
   );
-  // Receipts persist in SQLite (offline-first). Seeded once for the demo.
-  // Receipts are real sales only — no demo seeding. An earlier version seeded 17
-  // fake receipts (some flagged unsynced on purpose), which made the Receipts
-  // screen and its "not synced" warning show information that wasn't true.
+  // Receipt history is cold, permission-scoped data. Restricted sellers start
+  // empty and retain only receipts created during this provider lifetime so the
+  // just-completed sale can still be printed after its clean row is purged.
   const [receipts, setReceipts] = useState<Receipt[]>(() =>
-    loadRecentDocs<Receipt>("receipts", "createdAt", RECEIPT_LIVE_LIMIT),
+    canReadReceiptHistory
+      ? loadRecentDocs<Receipt>("receipts", "createdAt", RECEIPT_LIVE_LIMIT)
+      : [],
   );
   const [receiptRevision, setReceiptRevision] = useState(0);
+  const receiptById = useCallback(
+    (id: string | undefined): Receipt | null => {
+      if (!id) return null;
+      return (
+        receipts.find((receipt) => receipt.id === id) ??
+        (canReadReceiptHistory ? loadReceiptById(id) : null)
+      );
+    },
+    [canReadReceiptHistory, receipts],
+  );
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>(() =>
     loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt),
   );
@@ -860,7 +891,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         setHeldOrders((prev) => mergeById(prev, "held_orders", heldIds, (row) => row.createdAt));
       }
       const receiptIds = pulledIds.get("receipts");
-      if (receiptIds?.length) {
+      if (canReadReceiptHistory && receiptIds?.length) {
         setReceipts((prev) =>
           boundReceipts(mergeById(prev, "receipts", receiptIds, (row) => row.createdAt)),
         );
@@ -869,7 +900,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         setReceiptRevision((revision) => revision + 1);
       }
     });
-  }, []);
+  }, [canReadReceiptHistory]);
 
   const value = useMemo<CartState>(() => {
     const list = Object.values(entries);
@@ -911,7 +942,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
           id: existingId ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
           label: label.trim() || "Open bill",
           note,
-          entries: list,
+          entries: snapshotHeldEntries(list),
           itemCount: list.reduce((s, e) => s + e.qty, 0),
           total,
           currency: list[0]?.item.currency ?? "NGN",
@@ -955,7 +986,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
       settleReceipt: (id) => {
-        const receipt = receipts.find((r) => r.id === id) ?? loadOne<Receipt>("receipts", id);
+        const receipt = receiptById(id);
         if (!receipt || receipt.status === "paid") return;
         const settled: Receipt = {
           ...receipt,
@@ -978,6 +1009,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       },
 
       receipts,
+      receiptById,
       receiptRevision,
       completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
         const now = Date.now();
@@ -986,7 +1018,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
           "receipts",
           "receipt_sequence_v1",
           (tag, sequence) => ({
-            id: `rcpt_${now}`,
+            id: uid("rcpt"),
             number: `#${tag}${1000 + sequence}`,
           customerName,
           mode,
@@ -1044,7 +1076,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       billWebOrder: ({ order, storeName, storeReference, servedBy }) => {
         const now = Date.now();
         const receipt: Receipt = {
-          id: `rcpt_${now}`,
+          id: uid("rcpt"),
           number: order.code,
           customerName: order.guestName ?? null,
           mode: "Unpaid",
@@ -1083,6 +1115,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
     entries,
     orderDiscount,
     receipts,
+    receiptById,
     receiptRevision,
     heldOrders,
     add,

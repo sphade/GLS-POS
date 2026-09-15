@@ -4,13 +4,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatAmount, formatMoney, strings } from "@/constants/theme";
-import { loadReceiptById, useCart } from "@/lib/cart";
+import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth";
 import {
   isOverReturned,
   isVoidReturn,
   lineNetOf,
-  loadReturnsForReceipt,
   receiptNetOf,
   receiptTaxOf,
   refundedTotalOf,
@@ -32,9 +31,9 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReceiptScreen() {
   const { id, fromSale } = useLocalSearchParams<{ id: string; fromSale?: string }>();
   const router = useRouter();
-  const { receiptRevision, settleReceipt } = useCart();
+  const { receiptById, receiptRevision, settleReceipt } = useCart();
   const { can } = useAuth();
-  const { returnRevision } = useReturns();
+  const { returnRevision, returnsFor } = useReturns();
   const [busy, setBusy] = useState(false);
   const isCheckoutReceipt = fromSale === "1";
   const closeReceipt = useCallback(() => {
@@ -58,10 +57,13 @@ export default function ReceiptScreen() {
       return () => subscription.remove();
     }, [closeReceipt, isCheckoutReceipt]),
   );
-  const receipt = useMemo(() => loadReceiptById(id), [id, receiptRevision]);
+  const receipt = useMemo(
+    () => receiptById(id),
+    [id, receiptById, receiptRevision],
+  );
   const returns = useMemo(
-    () => (receipt ? loadReturnsForReceipt(receipt.id) : []),
-    [receipt, returnRevision],
+    () => (receipt ? returnsFor(receipt.id) : []),
+    [receipt, returnRevision, returnsFor],
   );
 
   /** Run a share/print action, surfacing any failure instead of failing silently. */

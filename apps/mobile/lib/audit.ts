@@ -1,5 +1,6 @@
 import type { AuditEntry, StoreRole } from "@gls-pos/types";
 import { loadRecentDocs, put as dbPut } from "./db";
+import { uid } from "./ids";
 
 /**
  * Lightweight audit trail.
@@ -30,7 +31,7 @@ export function getAuditActor(): AuditActor | null {
   return currentActor ? { ...currentActor } : null;
 }
 
-const uid = () => `aud_${Date.now()}_${Math.round(Math.random() * 1e6)}`;
+const auditId = () => uid("aud");
 
 /** Append an audit entry. No-op (but never throws) when signed out. */
 export function logAudit(input: {
@@ -43,7 +44,7 @@ export function logAudit(input: {
   if (!actor) return;
   try {
     const entry: AuditEntry = {
-      id: uid(),
+      id: auditId(),
       at: Date.now(),
       actorId: actor.id,
       actorName: actor.name,

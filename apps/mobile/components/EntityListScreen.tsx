@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useDeferredValue, useMemo, useRef, useState, type ReactNode } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -38,9 +38,22 @@ export function EntityListScreen<T>({
   const router = useRouter();
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
+  const embeddedSearchRef = useRef<TextInput>(null);
 
-  const q = query.trim().toLowerCase();
-  const filtered = q ? data.filter((d) => searchOf(d).toLowerCase().includes(q)) : data;
+  /**
+   * Filtering runs against the deferred query and is memoised.
+   *
+   * It used to run inline on every render, so each keystroke re-scanned the whole
+   * list before the character appeared, and any unrelated re-render paid for the
+   * scan again. Deferring lets the typed character paint first; memoising stops
+   * the scan happening for reasons that have nothing to do with the search.
+   */
+  const deferredQuery = useDeferredValue(query);
+  const q = deferredQuery.trim().toLowerCase();
+  const filtered = useMemo(
+    () => (q ? data.filter((d) => searchOf(d).toLowerCase().includes(q)) : data),
+    [data, q, searchOf],
+  );
 
   const body = (
     <>
@@ -82,9 +95,14 @@ export function EntityListScreen<T>({
     return (
       <View style={{ flex: 1 }}>
         <View style={styles.embeddedSearchRow}>
-          <View style={styles.embeddedSearchBox}>
+          <Pressable
+            style={styles.embeddedSearchBox}
+            accessible={false}
+            onPress={() => embeddedSearchRef.current?.focus()}
+          >
             <Ionicons name="search" size={18} color={colors.grey600} />
             <TextInput
+              ref={embeddedSearchRef}
               style={styles.embeddedSearchInput}
               value={query}
               onChangeText={setQuery}
@@ -105,7 +123,7 @@ export function EntityListScreen<T>({
                 <Ionicons name="close-circle" size={18} color={colors.grey500} />
               </Pressable>
             )}
-          </View>
+          </Pressable>
           {q.length > 0 && (
             <Text style={styles.resultCount}>
               {filtered.length} of {data.length}

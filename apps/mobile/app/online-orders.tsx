@@ -6,7 +6,7 @@ import { useRouter, type Href } from "expo-router";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { colors, formatMoney } from "@/constants/theme";
 import { loadRecentWebOrders, useWebOrders } from "@/lib/web-orders";
-import { countDocs } from "@/lib/db";
+import { countDocs, runAtomic } from "@/lib/db";
 import { displayItemName, useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
@@ -51,21 +51,27 @@ export default function OnlineOrdersScreen() {
         {
           text: "Create receipt",
           onPress: () => {
-            const receipt = billWebOrder({
-              order,
-              storeName: store.name,
-              storeReference: store.reference,
-              servedBy: user?.name ?? "Staff",
+            // Receipt, stock movements, audit entry and the order's receipt link
+            // commit as one unit, so a web order can never end up billed without
+            // its stock moved (or the reverse).
+            const receipt = runAtomic(() => {
+              const billed = billWebOrder({
+                order,
+                storeName: store.name,
+                storeReference: store.reference,
+                servedBy: user?.name ?? "Staff",
+              });
+              recordSale(
+                order.lines.map((l) => ({
+                  productId: l.productId,
+                  variantId: l.variantId,
+                  qty: l.quantity,
+                })),
+                billed.id,
+              );
+              attachReceipt(order.id, billed.id);
+              return billed;
             });
-            recordSale(
-              order.lines.map((l) => ({
-                productId: l.productId,
-                variantId: l.variantId,
-                qty: l.quantity,
-              })),
-              receipt.id,
-            );
-            attachReceipt(order.id, receipt.id);
             feedbackSaleComplete();
             router.push({ pathname: "/receipt/[id]", params: { id: receipt.id } });
           },

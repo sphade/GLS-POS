@@ -1,10 +1,20 @@
 import * as Network from "expo-network";
 import { AppState } from "react-native";
 import { useCallback, useState } from "react";
-import type { StoreRole, SyncChange, SyncCollection, SyncPullResponse } from "@gls-pos/types";
+import type {
+  StoreRole,
+  SyncChange,
+  SyncCollection,
+  SyncPullResponse,
+  SyncPushResponse,
+} from "@gls-pos/types";
 import {
   readableSyncCollections,
+  roleCanReadProductCosts,
+  roleCanWriteSyncCollection,
+  syncWriteDisposition,
   SYNC_COLLECTIONS,
+  SYNC_PROTOCOL_VERSION,
   SYNC_READ_POLICY_VERSION,
 } from "@gls-pos/types";
 import {
@@ -12,6 +22,7 @@ import {
   onLocalWrite,
   storeScope,
   type ChangeRow,
+  type DirtyRow,
   type RemoteCollectionChange,
   type StoreScope,
 } from "./db";
@@ -132,6 +143,7 @@ export function prepareStoreSyncScope(storeId: string, role: StoreRole): void {
     replayHeadKey: replayHeadKey(storeId),
     nextScope: epoch.scope,
     nextReadable: readableSyncCollections(role),
+    retainProductCosts: roleCanReadProductCosts(role),
   });
 }
 
@@ -161,23 +173,38 @@ const UPLOADABLE_COLLECTIONS: readonly SyncCollection[] = SYNC_COLLECTIONS.filte
 
 /**
  * Number of durable local revisions still waiting to upload for one store.
+ *
  * Uses indexed COUNT queries through that store's explicit handle; payload JSON
  * is never loaded or parsed, and collections the sync engine never uploads are
  * deliberately excluded.
+ *
+ * Collections the signed-in role cannot write are excluded too. Rows like a
+ * manager's unsent catalog edit are kept on the device for whenever someone who
+ * may publish them signs in, but counting them told a cashier they had work
+ * pending that no amount of syncing on their account would ever clear.
  */
 export function getPendingSyncCount(storeId: string): number {
   if (!SYNC_ENABLED || !storeId || storeId === "bootstrap" || storeId === "store_unknown") {
     return 0;
   }
   const db = storeScope(storeId);
-  return UPLOADABLE_COLLECTIONS.reduce(
-    (total, collection) => total + db.countDirty(collection),
-    0,
-  );
+  const role = activeSyncEpochs.get(storeId)?.role;
+  return UPLOADABLE_COLLECTIONS.reduce((total, collection) => {
+    // Row-level rules (a discounted receipt, a stock-only product edit) cannot be
+    // judged without parsing, which this deliberately avoids. Collection-level is
+    // enough to stop the count showing work the role can never send.
+    if (role && !roleCanWriteSyncCollection(role, collection)) return total;
+    return total + db.countDirty(collection);
+  }, 0);
 }
 
 export type SyncAttemptResult =
-  | { ok: true; appliedCount: number }
+  | {
+      ok: true;
+      appliedCount: number;
+      /** Local revisions this attempt got accepted; drives backlog follow-ups. */
+      acknowledgedCount?: number;
+    }
   | {
       ok: false;
       kind:
@@ -210,17 +237,54 @@ export type SyncAttemptResult =
 const MAX_PUSH_BYTES = 512 * 1024;
 const MAX_PUSH_ROWS = 200;
 
+/**
+ * How much pending work one cycle looks at.
+ *
+ * A till on a bad connection falls behind, and every attempt used to read and
+ * parse the whole backlog before touching the network — so the deeper the queue,
+ * the more the JS thread paid per attempt, and taps queued behind it. Capping the
+ * scan makes that cost flat; the queue still drains, over more cycles.
+ *
+ * Collections are visited in the order below so a large stale catalog backlog can
+ * never starve the money data. Whatever does not fit stays dirty and goes next
+ * cycle, oldest first.
+ */
+const MAX_DIRTY_PER_COLLECTION = 150;
+const MAX_DIRTY_PER_CYCLE = 300;
+const DIRTY_PRIORITY: readonly SyncCollection[] = [
+  "receipts",
+  "returns",
+  "stock_movements",
+  "held_orders",
+  "web_orders",
+  "products",
+  "tables",
+  "customers",
+  "categories",
+  "modifiers",
+  "ingredients",
+  "staff",
+  "audit_log",
+];
+
 type DirtyRevision = Pick<SyncChange, "id" | "updatedAt">;
+/** A change plus its encoded size, so batching never re-serialises to measure. */
+type SizedChange = { change: SyncChange; bytes: number };
 type PushBatch = {
   changes: SyncChange[];
   revisionsByCollection: Record<string, DirtyRevision[]>;
 };
 
+const sizedChange = (change: SyncChange, bytes?: number): SizedChange => ({
+  change,
+  bytes: bytes ?? JSON.stringify(change).length,
+});
+
 /**
  * Split changes into batches that respect the upload budget. A single row over
  * the budget still gets its own batch — dropping it would mean it never syncs.
  */
-function batchChanges(changes: SyncChange[]): PushBatch[] {
+function batchChanges(changes: readonly SizedChange[]): PushBatch[] {
   const batches: PushBatch[] = [];
   let current: PushBatch = { changes: [], revisionsByCollection: {} };
   let bytes = 0;
@@ -232,8 +296,7 @@ function batchChanges(changes: SyncChange[]): PushBatch[] {
     bytes = 0;
   };
 
-  for (const change of changes) {
-    const size = JSON.stringify(change).length;
+  for (const { change, bytes: size } of changes) {
     if (current.changes.length > 0 && (bytes + size > MAX_PUSH_BYTES || current.changes.length >= MAX_PUSH_ROWS)) {
       flush();
     }
@@ -258,27 +321,80 @@ function batchChanges(changes: SyncChange[]): PushBatch[] {
  */
 function collectDirty(
   db: StoreScope,
+  role: StoreRole,
   onlyCollections?: readonly SyncCollection[],
-): { changes: SyncChange[]; idsByCollection: Record<string, string[]> } {
-  const changes: SyncChange[] = [];
-  const idsByCollection: Record<string, string[]> = {};
+): { allowed: SizedChange[]; conditional: SizedChange[]; truncated: boolean } {
+  const allowed: SizedChange[] = [];
+  const conditional: SizedChange[] = [];
+  const requested = new Set(onlyCollections ?? SYNC_COLLECTIONS);
+  // Priority order, restricted to what the caller asked for. Anything missing
+  // from the priority list still syncs, just after the named collections.
+  const scope = [
+    ...DIRTY_PRIORITY.filter((collection) => requested.has(collection)),
+    ...SYNC_COLLECTIONS.filter(
+      (collection) => requested.has(collection) && !DIRTY_PRIORITY.includes(collection),
+    ),
+  ];
 
-  for (const collection of onlyCollections ?? SYNC_COLLECTIONS) {
-    const dirty = db.loadDirty<unknown>(collection);
-    if (dirty.length === 0) continue;
-    idsByCollection[collection] = dirty.map((d) => d.id);
-    for (const d of dirty) {
-      changes.push({
-        collection,
-        id: d.id,
-        data: d.data,
-        updatedAt: d.updatedAt,
-        deleted: d.deleted,
-      });
+  const dirtyByCollection = new Map<SyncCollection, DirtyRow<unknown>[]>();
+  let budget = MAX_DIRTY_PER_CYCLE;
+  let truncated = false;
+
+  for (const collection of scope) {
+    if (budget <= 0) {
+      truncated = true;
+      break;
+    }
+    const limit = Math.min(MAX_DIRTY_PER_COLLECTION, budget);
+    const rows = db.loadDirty<unknown>(collection, limit);
+    if (rows.length === limit) truncated = true;
+    dirtyByCollection.set(collection, rows);
+    budget -= rows.length;
+  }
+
+  // A seller product row is only operationally necessary when this same cycle
+  // also carries its append-only sale movement. A privileged catalog edit left
+  // behind by a manager has no such movement and stays dirty without being
+  // retried every poll. The movement remains the server's stock authority.
+  const sellerProductIds = new Set<string>();
+  for (const row of dirtyByCollection.get("stock_movements") ?? []) {
+    const data = row.data as { productId?: unknown; reason?: unknown };
+    const movement: SyncChange = {
+      collection: "stock_movements",
+      id: row.id,
+      data: row.data,
+      updatedAt: row.updatedAt,
+      deleted: row.deleted,
+    };
+    if (
+      syncWriteDisposition(role, movement) === "allowed" &&
+      data?.reason === "sale" &&
+      typeof data.productId === "string"
+    ) {
+      sellerProductIds.add(data.productId);
     }
   }
 
-  return { changes, idsByCollection };
+  for (const collection of scope) {
+    for (const row of dirtyByCollection.get(collection) ?? []) {
+      const change: SyncChange = {
+        collection,
+        id: row.id,
+        data: row.data,
+        updatedAt: row.updatedAt,
+        deleted: row.deleted,
+      };
+      const disposition = syncWriteDisposition(role, change);
+      if (disposition === "allowed") {
+        allowed.push(sizedChange(change, row.bytes));
+      } else if (disposition === "conditional" && sellerProductIds.has(change.id)) {
+        conditional.push(sizedChange(change, row.bytes));
+      }
+      // Denied/inactive conditional rows remain dirty for a later authorized role.
+    }
+  }
+
+  return { allowed, conditional, truncated };
 }
 
 /**
@@ -297,6 +413,8 @@ export type SyncEvent = {
   appliedCount: number;
   pulledCollections: ReadonlySet<SyncCollection>;
   uploadedCollections: ReadonlySet<SyncCollection>;
+  /** Exact local ids whose revisions were acknowledged by this response. */
+  uploadedIds: ReadonlyMap<SyncCollection, readonly string[]>;
   /**
    * Ids applied per collection this cycle.
    *
@@ -387,6 +505,8 @@ export function getSyncActivity(): SyncActivity {
  */
 const APPLY_CHUNK = 40;
 const EMPTY_SYNC_COLLECTIONS: ReadonlySet<SyncCollection> = new Set<SyncCollection>();
+const EMPTY_SYNC_IDS: ReadonlyMap<SyncCollection, readonly string[]> =
+  new Map<SyncCollection, readonly string[]>();
 type FrozenReplayHead = number | "invalid";
 
 type PullAccumulator = {
@@ -438,6 +558,7 @@ async function applyPulled(
   notify = true,
   uploadedCollections: ReadonlySet<SyncCollection> = EMPTY_SYNC_COLLECTIONS,
   replayHead?: FrozenReplayHead,
+  uploadedIds: ReadonlyMap<SyncCollection, readonly string[]> = EMPTY_SYNC_IDS,
 ): Promise<ApplyPulledResult> {
   const db = storeScope(storeId);
   const prior = Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
@@ -457,7 +578,8 @@ async function applyPulled(
         appliedCount: 0,
         pulledCollections: EMPTY_SYNC_COLLECTIONS,
         uploadedCollections,
-        pulledIds: new Map<SyncCollection, string[]>(),
+        uploadedIds,
+        pulledIds: EMPTY_SYNC_IDS,
       }, epoch);
     }
     return { appliedCount: 0, cursor: 0, reset: true, cancelled: false };
@@ -522,6 +644,7 @@ async function applyPulled(
       appliedCount: backfill.appliedCount,
       pulledCollections: backfill.pulledCollections,
       uploadedCollections: EMPTY_SYNC_COLLECTIONS,
+      uploadedIds: EMPTY_SYNC_IDS,
       pulledIds: backfill.pulledIds,
     }, epoch);
   }
@@ -532,6 +655,7 @@ async function applyPulled(
       appliedCount: incremental.appliedCount,
       pulledCollections: incremental.pulledCollections,
       uploadedCollections,
+      uploadedIds,
       pulledIds: incremental.pulledIds,
     }, epoch);
   }
@@ -966,11 +1090,23 @@ async function performSync(
 
   if (!epochIsCurrent(epoch)) return cancelledSync();
 
-  // Never upload (or use an empty push as a pull) ahead of the current role's
-  // cursor-zero replay. The replay controller owns downloads until it drains.
-  if (!isBooted(storeId)) {
-    return { ok: true, appliedCount: 0 };
-  }
+  /**
+   * Uploads no longer wait for the initial download to finish.
+   *
+   * They used to: this returned success whenever the role's cursor-zero replay
+   * was still draining. On a good connection that window is seconds. On a bad
+   * one the replay can take a very long time or stall entirely, and for that
+   * whole period not one completed sale was even *attempted* — while the result
+   * said `ok: true`, so the banner looked healthy and nothing hinted that the
+   * money on that till was going nowhere.
+   *
+   * The original concern was real but narrower than the fix applied to it: a push
+   * response doubles as a pull, so committing its download half would advance the
+   * cursor past history the replay has not fetched yet. So during a replay we
+   * still send, and simply discard the download half — `applyDownload` below.
+   * The replay controller keeps sole ownership of the cursor.
+   */
+  const replayDraining = !isBooted(storeId);
 
   const cookie = authCookie();
   if (!cookie) {
@@ -988,25 +1124,84 @@ async function performSync(
       return { ok: false, kind: "offline", message: "This device is offline. Connect to the internet and retry." };
     }
 
-    // Photos never upload; every other collection remains dirty until the
-    // server acknowledges its exact revision.
+    // Photos never upload. Obvious role-ineligible rows stay dirty and out of
+    // this epoch's queue; seller product writes are isolated because only the
+    // server can compare them with its authoritative document.
     const scope = onlyCollections ?? UPLOADABLE_COLLECTIONS;
-    const { changes } = collectDirty(storeScope(storeId), scope);
-    const batches = batchChanges(changes);
-    const queue: PushBatch[] = batches.length > 0
-      ? batches
-      : [{ changes: [], revisionsByCollection: {} }];
+    const { allowed, conditional, truncated } = collectDirty(
+      storeScope(storeId),
+      epoch.role,
+      scope,
+    );
+    const queue: PushBatch[] = batchChanges([...allowed, ...conditional]);
+
+    // While the replay owns the cursor, an empty push would achieve nothing and
+    // still cost a request on a connection that is already struggling.
+    if (queue.length === 0) {
+      if (replayDraining) return { ok: true, appliedCount: 0 };
+      // Otherwise it is worth one: it catches the readable cursor up and reports
+      // a healthy sync state on a till with nothing of its own to send.
+      queue.push({ changes: [], revisionsByCollection: {} });
+    }
 
     let applied = 0;
-    for (const batch of queue) {
+    let acknowledged = 0;
+    let isolatedForLegacyServer = false;
+    for (let index = 0; index < queue.length; index += 1) {
       if (!epochIsCurrent(epoch)) return cancelledSync();
-      const result = await pushBatch(storeId, cookie, batch, epoch);
-      if (!result.ok) return result;
+      const batch = queue[index]!;
+      // The store now names the individual rows it refused (protocol v2), so a
+      // retained privileged edit no longer needs isolating by trial and error:
+      // pushBatch keeps exactly those rows pending and banks everything else.
+      const result = await pushBatch(storeId, cookie, batch, epoch, !replayDraining);
+
+      if (!result.ok) {
+        /**
+         * A 403 here means the server did not honour protocol v2 — it is still
+         * refusing whole batches. That happens only while the app is newer than
+         * the deployed Worker, and the app must not depend on deploy order: send
+         * each row on its own so the refused one is isolated and every valid
+         * sale alongside it still uploads. Done once per cycle, so a batch can
+         * never be split repeatedly.
+         */
+        const wholeBatchRefused =
+          result.status === 403 && result.code === "insufficient_permission";
+        if (
+          wholeBatchRefused &&
+          !isolatedForLegacyServer &&
+          batch.changes.length > 1
+        ) {
+          isolatedForLegacyServer = true;
+          queue.splice(
+            index + 1,
+            0,
+            ...batch.changes.map((change) => batchChanges([sizedChange(change)])[0]!),
+          );
+          continue;
+        }
+        // A refused single row stays dirty for a role that can publish it.
+        if (wholeBatchRefused && batch.changes.length === 1) continue;
+        return result;
+      }
+
       applied += result.appliedCount;
+      acknowledged += result.acknowledgedCount ?? 0;
     }
-    return epochIsCurrent(epoch)
-      ? { ok: true, appliedCount: applied }
-      : cancelledSync();
+
+    if (!epochIsCurrent(epoch)) return cancelledSync();
+
+    /**
+     * More was pending than one cycle looks at, so come back straight away rather
+     * than waiting for the next poll — a backlog then drains as fast as the link
+     * allows instead of one bounded chunk every 20 seconds.
+     *
+     * Gated on having actually banked something. A till holding more retained
+     * rows than the per-cycle cap (edits no current role may publish) would
+     * otherwise re-read the same rows every 250ms forever.
+     */
+    if (truncated && acknowledged > 0) scheduleImmediateFollowUp(epoch);
+
+    return { ok: true, appliedCount: applied, acknowledgedCount: acknowledged };
   } catch (error) {
     if (error instanceof SyncCancelledError || !epochIsCurrent(epoch)) {
       return cancelledSync();
@@ -1026,6 +1221,8 @@ async function pushBatch(
   cookie: string,
   batch: PushBatch,
   epoch: SyncEpoch,
+  /** False while a replay owns the cursor: upload, but discard what comes back. */
+  applyDownload = true,
 ): Promise<SyncAttemptResult> {
   const { changes, revisionsByCollection } = batch;
   const db = storeScope(storeId);
@@ -1033,7 +1230,23 @@ async function pushBatch(
     if (!epochIsCurrent(epoch)) return cancelledSync();
 
     // Re-read per batch: an earlier batch advances the cursor.
-    const cursor = Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
+    const storedCursor = Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
+
+    /**
+     * Mid-replay the response's download half is discarded, so asking for history
+     * would mean paying for a page — up to half a megabyte — and dropping it, on
+     * the very connection that is already too slow to get the sales out.
+     *
+     * Asking from the replay's frozen head instead returns an empty page, because
+     * the store has nothing past its own head. If no head has been frozen yet the
+     * stored cursor is used and the page is simply wasted, which is correct but
+     * cheap: that only happens before the first replay response lands.
+     */
+    const frozenHead = applyDownload ? null : readFrozenReplayHead(db, storeId);
+    const cursor =
+      typeof frozenHead === "number" && frozenHead >= storedCursor
+        ? frozenHead
+        : storedCursor;
     const res = await fetchWithTimeout(
       `${API_URL}/api/sync`,
       {
@@ -1042,6 +1255,8 @@ async function pushBatch(
           "Content-Type": "application/json",
           Cookie: cookie,
           "x-store-id": storeId,
+          // Opts into per-row refusals instead of an all-or-nothing 403.
+          "x-sync-protocol": String(SYNC_PROTOCOL_VERSION),
         },
         body: JSON.stringify({ cursor, changes }),
       },
@@ -1049,7 +1264,7 @@ async function pushBatch(
     );
 
     let body:
-      | { ok: true; data: SyncPullResponse }
+      | { ok: true; data: SyncPushResponse }
       | { ok: false; error: { code?: string; message?: string } };
     try {
       body = (await res.json()) as typeof body;
@@ -1110,28 +1325,96 @@ async function pushBatch(
     // A stale/aborted POST may already have committed remotely. Do not clear
     // anything unless this exact role epoch still owns the response.
     if (!epochIsCurrent(epoch)) return cancelledSync();
+
+    /**
+     * Rows the store refused stay dirty.
+     *
+     * Marking them clean would destroy work that no role has authorized yet —
+     * typically a catalog edit made before this account was narrowed. They are
+     * held until someone who may publish them signs in on this device, while
+     * everything else in the same batch is acknowledged normally.
+     */
+    const refused = new Set(
+      (Array.isArray(body.data.deniedIds) ? body.data.deniedIds : []).map(
+        (row) => `${row.collection}/${row.id}`,
+      ),
+    );
+    if (refused.size > 0) {
+      console.warn("[sync] store refused", refused.size, "row(s); kept pending");
+    }
     const acknowledged = Object.entries(revisionsByCollection).map(
       ([collection, revisions]) => ({
         collection: collection as SyncCollection,
-        revisions,
+        revisions: refused.size
+          ? revisions.filter((revision) => !refused.has(`${collection}/${revision.id}`))
+          : revisions,
       }),
     );
-    db.clearDirtyBatch(acknowledged);
+    const readable = new Set<SyncCollection>(readableSyncCollections(epoch.role));
+    const purgeCollections = SYNC_COLLECTIONS.filter(
+      (collection) => !readable.has(collection),
+    );
+    // Mark only exact accepted revisions clean, then remove newly-clean rows
+    // outside this role's projection in the same SQLite transaction. A newer
+    // or still-unsent offline write remains dirty and therefore survives.
+    db.clearDirtyBatch(
+      acknowledged,
+      purgeCollections,
+      !roleCanReadProductCosts(epoch.role),
+    );
 
     const uploadedCollections = new Set<SyncCollection>(
-      Object.keys(revisionsByCollection) as SyncCollection[],
+      acknowledged
+        .filter((batch) => batch.revisions.length > 0)
+        .map((batch) => batch.collection),
     );
+    const uploadedIds = new Map<SyncCollection, readonly string[]>(
+      acknowledged
+        .filter((batch) => batch.revisions.length > 0)
+        .map((batch): [SyncCollection, readonly string[]] => [
+          batch.collection,
+          batch.revisions.map((revision) => revision.id),
+        ]),
+    );
+    const acknowledgedCount = acknowledged.reduce(
+      (total, entry) => total + entry.revisions.length,
+      0,
+    );
+    // Mid-replay the cursor belongs to the replay, so the download half of this
+    // response is dropped on the floor. The upload half is already banked above;
+    // announce it so upload-status UI updates, then let the replay carry on.
+    if (!applyDownload) {
+      if (uploadedCollections.size > 0) {
+        emitSynced(
+          {
+            storeId,
+            source: "incremental",
+            appliedCount: 0,
+            pulledCollections: EMPTY_SYNC_COLLECTIONS,
+            uploadedCollections,
+            uploadedIds,
+            pulledIds: EMPTY_SYNC_IDS,
+          },
+          epoch,
+        );
+      }
+      return { ok: true, appliedCount: 0, acknowledgedCount };
+    }
+
     const pulled = await applyPulled(
       storeId,
       body.data,
       epoch,
       true,
       uploadedCollections,
+      undefined,
+      uploadedIds,
     );
     if (pulled.cancelled) return cancelledSync();
     return {
       ok: true,
       appliedCount: pulled.appliedCount,
+      acknowledgedCount,
     };
   } catch (error) {
     if (error instanceof SyncCancelledError || !epochIsCurrent(epoch)) {
@@ -1177,11 +1460,68 @@ function syncRequestKey(
 //    to the regain-flush + poll.
 const NETWORK_LADDER = [3_000, 6_000, 12_000, 24_000, 48_000];
 const OFFLINE_LADDER = [5_000, 5_000, 5_000];
+/**
+ * Cadence once the fast ladder is spent. Slow enough to be kind to a struggling
+ * link and to the battery, frequent enough that a shop's sales are never more
+ * than a couple of minutes behind the moment the connection recovers.
+ */
+const DEGRADED_RETRY_MS = 120_000;
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const retryAttempts = new Map<string, number>();
 type FailedSyncResult = Extract<SyncAttemptResult, { ok: false }>;
+/** Terminal failures only: retrying these on a timer cannot help. */
 const automaticSyncBlocks = new Map<string, FailedSyncResult>();
+/** Earliest next automatic attempt for an epoch whose fast ladder is spent. */
+const degradedRetryAt = new Map<string, number>();
 const retryKey = (epoch: SyncEpoch) => `${epoch.storeId}|${epoch.generation}`;
+
+/** The retry ladder for a failure, or null when the failure is terminal. */
+function transientLadder(result: FailedSyncResult): readonly number[] | null {
+  if (result.kind === "network" || result.kind === "timeout") return NETWORK_LADDER;
+  if (result.kind === "offline") return OFFLINE_LADDER;
+  if (
+    result.kind === "server" &&
+    (result.status === 408 || result.status === 429 || (result.status ?? 0) >= 500)
+  ) {
+    return NETWORK_LADDER;
+  }
+  return null;
+}
+
+/**
+ * Run another cycle as soon as this one returns.
+ *
+ * Used when a cycle uploaded all it was willing to look at but more is still
+ * pending, so a backlog drains at the speed of the connection instead of one
+ * bounded chunk per 20-second poll.
+ */
+/**
+ * Backlog continuations, kept apart from the failure timers on purpose.
+ *
+ * A follow-up is armed by a cycle that *succeeded* with work still pending, and
+ * the success handler immediately resets the retry state. Sharing one map meant
+ * that reset cancelled the continuation it had just scheduled, so a backlog fell
+ * back to draining one bounded chunk per 20-second poll — the exact slowness this
+ * is meant to remove.
+ */
+const followUpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleImmediateFollowUp(epoch: SyncEpoch): void {
+  const key = retryKey(epoch);
+  if (followUpTimers.has(key)) return;
+  const timer = setTimeout(() => {
+    followUpTimers.delete(key);
+    if (epochIsCurrent(epoch)) void syncNow(epoch.storeId);
+  }, 250);
+  followUpTimers.set(key, timer);
+}
+
+function cancelFollowUp(epoch: SyncEpoch): void {
+  const key = retryKey(epoch);
+  const timer = followUpTimers.get(key);
+  if (timer) clearTimeout(timer);
+  followUpTimers.delete(key);
+}
 
 function cancelRetry(epoch: SyncEpoch): void {
   const key = retryKey(epoch);
@@ -1194,24 +1534,19 @@ function clearRetryState(epoch: SyncEpoch): void {
   const key = retryKey(epoch);
   cancelRetry(epoch);
   retryAttempts.delete(key);
+  degradedRetryAt.delete(key);
 }
 
 function clearAllRetryState(): void {
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
+  for (const timer of followUpTimers.values()) clearTimeout(timer);
+  followUpTimers.clear();
   retryAttempts.clear();
+  // The connection just came back, so nothing is owed a cooldown.
+  degradedRetryAt.clear();
   for (const [key, result] of automaticSyncBlocks) {
-    const transientServer =
-      result.kind === "server" &&
-      (result.status === 408 || result.status === 429 || (result.status ?? 0) >= 500);
-    if (
-      result.kind === "network" ||
-      result.kind === "timeout" ||
-      result.kind === "offline" ||
-      transientServer
-    ) {
-      automaticSyncBlocks.delete(key);
-    }
+    if (transientLadder(result)) automaticSyncBlocks.delete(key);
   }
 }
 
@@ -1233,23 +1568,21 @@ function handleSyncOutcome(epoch: SyncEpoch, result: SyncAttemptResult): void {
     if (isBooted(epoch.storeId)) clearSyncErrorForEpoch(epoch);
     return;
   }
+
+  // Drop any queued backlog follow-up: the ladder below now owns the retry
+  // timing, and two timers racing would double the load on a failing link.
+  cancelFollowUp(epoch);
   setActivity({
     error: result.message,
     errorKind: result.kind,
     errorStoreId: epoch.storeId,
   });
 
-  const ladder =
-    result.kind === "network" || result.kind === "timeout"
-      ? NETWORK_LADDER
-      : result.kind === "offline"
-        ? OFFLINE_LADDER
-        : result.kind === "server" &&
-            (result.status === 408 || result.status === 429 || (result.status ?? 0) >= 500)
-          ? NETWORK_LADDER
-          : undefined;
+  const ladder = transientLadder(result);
 
   if (!ladder) {
+    // Terminal: signing in again, or a role/permission change, is the only thing
+    // that can help. Retrying on a timer would just burn battery and data.
     clearRetryState(epoch);
     automaticSyncBlocks.set(retryKey(epoch), result);
     return;
@@ -1257,8 +1590,31 @@ function handleSyncOutcome(epoch: SyncEpoch, result: SyncAttemptResult): void {
 
   const key = retryKey(epoch);
   const attempts = (retryAttempts.get(key) ?? 0) + 1;
+
+  /**
+   * A bad connection must never end in giving up.
+   *
+   * This used to latch the epoch into `automaticSyncBlocks` once the fast ladder
+   * ran out, which also short-circuits the 20-second poll — so after roughly 90
+   * seconds of poor signal a till stopped trying altogether and waited for a
+   * human to tap the banner, an `expo-network` reachability event that may never
+   * fire, or an app restart. Completed sales piled up behind that silence.
+   *
+   * Now the fast ladder still gives quick recovery from a blip, and after it is
+   * spent the device keeps trying indefinitely on a slow cadence.
+   */
   if (attempts > ladder.length) {
-    automaticSyncBlocks.set(key, result);
+    degradedRetryAt.set(key, Date.now() + DEGRADED_RETRY_MS);
+    if (!retryTimers.has(key)) {
+      const timer = setTimeout(() => {
+        retryTimers.delete(key);
+        if (epochIsCurrent(epoch)) void syncNow(epoch.storeId);
+        // Fires after the cooldown it just set, never a hair before it: an
+        // attempt rejected by its own throttle would schedule nothing further
+        // and the store would go quiet again.
+      }, DEGRADED_RETRY_MS + 1_000);
+      retryTimers.set(key, timer);
+    }
     return;
   }
   if (retryTimers.has(key)) return;
@@ -1303,6 +1659,18 @@ function requestSyncDetailed(
   if (manual) {
     clearRetryState(epoch);
     automaticSyncBlocks.delete(epochKey);
+  } else {
+    // Degraded cadence: the poll, nudges and push-on-write all still fire, they
+    // just do not hammer a connection that is already failing. Retrying never
+    // stops entirely, which is the whole point.
+    const notBefore = degradedRetryAt.get(epochKey);
+    if (notBefore !== undefined && Date.now() < notBefore) {
+      return Promise.resolve({
+        ok: false,
+        kind: "network",
+        message: "Waiting to retry — the last few attempts could not reach the server.",
+      });
+    }
   }
 
   // Bind once per app session: regaining internet retries the current role
@@ -1539,18 +1907,21 @@ export function startAutoSync(
     void syncNow(storeId);
   }
 
+  // The safety poll runs regardless of replay state. `performSync` decides what
+  // is safe to do mid-replay — it uploads, but leaves the cursor to the replay.
   const handle = setInterval(() => {
     if (!isCurrent() || AppState.currentState !== "active") return;
-    if (!isBooted(storeId)) return;
     void syncNow(storeId);
   }, intervalMs);
 
   let debounce: ReturnType<typeof setTimeout> | null = null;
-  onLocalWrite(() => {
+  // Push shortly after a sale rather than waiting for the poll. The replay no
+  // longer gates this: a completed sale uploads even while history downloads.
+  const unsubscribeLocalWrite = onLocalWrite(() => {
     if (!isCurrent()) return;
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {
-      if (isCurrent() && isBooted(storeId)) void syncNow(storeId);
+      if (isCurrent()) void syncNow(storeId);
     }, 1200);
   });
 
@@ -1562,7 +1933,8 @@ export function startAutoSync(
     }
     clearInterval(handle);
     if (debounce) clearTimeout(debounce);
-    onLocalWrite(null);
+    unsubscribeLocalWrite();
+    cancelFollowUp(epoch);
     clearRetryState(epoch);
     if (activeSyncEpochs.get(storeId) === epoch) retireSyncEpoch(epoch);
   };

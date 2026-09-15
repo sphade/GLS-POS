@@ -2,9 +2,8 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import type { StockMovement, StockMovementReason } from "@gls-pos/types";
 import type { Item } from "./cart";
 import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
-import { ITEM_IMAGES } from "./item-images";
-import { loadImageIds, saveImage } from "./image-store";
 import { getAuditActor, logAudit } from "./audit";
+import { uid } from "./ids";
 import { SYNC_ENABLED, onSynced } from "./sync";
 import {
   getActiveStore,
@@ -90,8 +89,8 @@ function movementActor(): Pick<
     : {};
 }
 
-const uid = (p: string) =>
-  `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+// Ids come from the shared device-scoped generator so two tills cannot mint the
+// same movement or catalog id while offline. See lib/ids.ts.
 
 const normalizeStock = (product: Pick<Item, "sellBy">, value: number): number => {
   const precision = product.sellBy === "fraction" ? 1000 : 1;
@@ -163,8 +162,6 @@ function seedStore() {
   if (!isRealStore()) return;
 
   seedOnce("catalog_seeded_gls_v3", () => {
-    // v3 moved photos out of the product document into `product_images`, so the
-    // old rows (which carried base64 inline) are cleared out entirely.
     (
       [
         "products",
@@ -174,7 +171,6 @@ function seedStore() {
         "tables",
         "customers",
         "staff",
-        "product_images",
       ] as const
     ).forEach(resetCollection);
     // Seeded rows are written DIRTY so the first sync uploads them to the store's
@@ -187,9 +183,8 @@ function seedStore() {
     DEFAULT_TABLES.forEach((t) => dbPut("tables", t));
     DEFAULT_CUSTOMERS.forEach((c) => dbPut("customers", c));
     DEFAULT_STAFF.forEach((s) => dbPut("staff", s));
-    // Attach the source image URL; first launch hydrates it into a stored image.
     mockItems.forEach((p) => {
-      dbPut("products", { ...p, imageUrl: ITEM_IMAGES[p.name] });
+      dbPut("products", p);
       // Opening stock is recorded as an "initial" movement. The server rebuilds
       // stock from the movement log (never from a product's absolute value), so
       // without this the seeded stock would reset to zero on first sync.
@@ -262,13 +257,6 @@ type CatalogState = {
     variant?: { id: string; name: string },
   ) => void;
 };
-
-/**
- * Products whose image we've already tried to fetch this session. Stops a
- * broken URL from being retried in a tight loop, while still allowing a fresh
- * attempt next launch (so a temporary network failure heals itself).
- */
-const attemptedImages = new Set<string>();
 
 /**
  * True once a genuine store is selected. `store_unknown` is the placeholder the
@@ -346,7 +334,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   // local mirror fills as history arrives.
   useEffect(() => {
     if (!SYNC_ENABLED) return;
-    return onSynced(({ pulledIds }) => {
+    return onSynced(({ pulledIds, uploadedIds }) => {
       /**
        * Merge only the rows that arrived.
        *
@@ -360,8 +348,10 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         collection: Parameters<typeof mergeInPlace>[1],
         setter: React.Dispatch<React.SetStateAction<T[]>>,
       ) => {
-        const ids = pulledIds.get(collection as never);
-        if (ids?.length) setter((prev) => mergeInPlace<T>(prev, collection, ids));
+        const pulled = pulledIds.get(collection as never) ?? [];
+        const uploaded = uploadedIds.get(collection as never) ?? [];
+        const ids = [...pulled, ...uploaded];
+        if (ids.length) setter((prev) => mergeInPlace<T>(prev, collection, ids));
       };
 
       merge<Item>("products", setProducts);
@@ -372,80 +362,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       merge<Customer>("customers", setCustomers);
       merge<StaffMember>("staff", setStaff);
     });
-  }, []);
-
-  /**
-   * One-time image hydration for the seeded menu: download each photo and store
-   * it in the `product_images` collection.
-   *
-   * Deliberately batched — an earlier version called setProducts once per image,
-   * which re-rendered the whole grid 60 times and made the Items screen crawl.
-   * Now the DB is written per image (so progress survives a kill) but React
-   * state is updated once at the end. Runs after first paint.
-   */
-  useEffect(() => {
-    if (!isRealStore()) return;
-    let cancelled = false;
-
-    /** Fetch to raw base64 (no data-URI prefix). */
-    const toBase64 = async (url: string): Promise<{ base64: string; mime: string } | null> => {
-      try {
-        const res = await fetch(url);
-        if (!res.ok) return null;
-        const mime = res.headers.get("content-type") ?? "image/jpeg";
-        const blob = await res.blob();
-        const dataUri = await new Promise<string | null>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : null);
-          reader.onerror = () => resolve(null);
-          reader.readAsDataURL(blob);
-        });
-        const base64 = dataUri?.split(",")[1];
-        return base64 ? { base64, mime } : null;
-      } catch {
-        return null;
-      }
-    };
-
-    void (async () => {
-      // Resumable by construction: the work list is "products whose photo isn't
-      // stored yet", so an interrupted or partly-failed run simply picks up the
-      // remainder next launch. (An earlier version set a done-flag after a
-      // partial run, which permanently stranded any image that failed once.)
-      const have = loadImageIds();
-      const targets = loadAll<Item>("products").filter(
-        (p) => p.imageUrl && !have.has(p.id) && !attemptedImages.has(p.id),
-      );
-      if (targets.length === 0) return;
-
-      const done: string[] = [];
-
-      /** Download a few at a time — sequential was slow over a phone connection. */
-      const CONCURRENCY = 4;
-      let cursor = 0;
-      const worker = async () => {
-        while (!cancelled) {
-          const p = targets[cursor++];
-          if (!p) return;
-          attemptedImages.add(p.id);
-          const img = await toBase64(p.imageUrl!);
-          if (!img) continue; // retried on next launch
-          saveImage(p.id, img.base64, img.mime);
-          dbPut("products", { ...p, hasImage: true });
-          done.push(p.id);
-        }
-      };
-      await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-
-      if (cancelled || done.length === 0) return;
-      // Single state update for the whole batch.
-      const flagged = new Set(done);
-      setProducts((prev) => prev.map((x) => (flagged.has(x.id) ? { ...x, hasImage: true } : x)));
-    })();
-
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   const value = useMemo<CatalogState>(() => {

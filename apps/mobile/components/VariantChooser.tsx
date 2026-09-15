@@ -2,7 +2,7 @@ import { memo } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, formatMoney } from "@/constants/theme";
-import { ItemImage } from "@/components/ItemImage";
+import { ProductAvatar } from "@/components/product-avatar";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 import {
   cartLineKey,
@@ -75,13 +75,10 @@ export function VariantChooser({
           </View>
 
           <View style={styles.itemStrip}>
-            <ItemImage
-              productId={item.id}
+            <ProductAvatar
               name={item.name}
               size={44}
               color={item.categoryColor ?? colors.primary}
-              hasImage={!!item.hasImage}
-              remoteUrl={item.imageUrl}
             />
             <View style={{ flex: 1 }}>
               <Text style={styles.itemName} numberOfLines={1}>

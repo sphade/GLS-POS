@@ -6,7 +6,6 @@ import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatAmount, formatMoney } from "@/constants/theme";
 import {
   isVoidReturn,
-  loadReturnById,
   reasonLabel,
   returnLineNetOf,
   useReturns,
@@ -31,10 +30,13 @@ import { feedbackError, feedbackTap } from "@/lib/feedback";
 export default function ReturnReceiptScreen() {
   const router = useRouter();
   const { id, fresh } = useLocalSearchParams<{ id: string; fresh?: string }>();
-  const { returnRevision } = useReturns();
+  const { returnById, returnRevision } = useReturns();
   const [busy, setBusy] = useState(false);
 
-  const ret = useMemo(() => loadReturnById(id), [id, returnRevision]);
+  const ret = useMemo(
+    () => returnById(id),
+    [id, returnById, returnRevision],
+  );
 
   const run = async (fn: () => Promise<void>) => {
     feedbackTap();
