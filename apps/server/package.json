@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler d1 migrations apply gls-pos-control --remote && wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",
@@ -14,8 +14,7 @@
     "db:migrate:local": "wrangler d1 migrations apply gls-pos-control --local",
     "db:migrate:remote": "wrangler d1 migrations apply gls-pos-control --remote",
     "db:migrate:staging": "wrangler d1 migrations apply gls-pos-control-staging --remote",
-    "deploy:staging": "wrangler deploy --env staging && wrangler d1 migrations apply gls-pos-control-staging --remote",
-    "deploy:prod": "wrangler deploy && wrangler d1 migrations apply gls-pos-control --remote",
+    "deploy:staging": "wrangler d1 migrations apply gls-pos-control-staging --remote --env staging && wrangler deploy --env staging",
     "lint": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "clean": "rimraf dist .turbo .wrangler"
