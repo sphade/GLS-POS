@@ -19,7 +19,7 @@ name: Deploy
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main, import-initial, staging]
   workflow_dispatch:
     inputs:
       environment:
@@ -49,7 +49,7 @@ jobs:
           # workflow_dispatch wins; otherwise derive from the pushed branch.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENVNAME="${{ inputs.environment }}"
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          elif [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/import-initial" ]; then
             ENVNAME="production"
           else
             ENVNAME="staging"
