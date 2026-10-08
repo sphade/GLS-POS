@@ -16,6 +16,7 @@ import { vip } from "./modules/vip/vip.routes.js";
 import { push } from "./modules/push/push.routes.js";
 import { v1 } from "./modules/integration/v1.routes.js";
 import { integrations } from "./modules/integration/integration.routes.js";
+import { inventory } from "./modules/inventory/inventory.routes.js";
 import { withApiKey } from "./middleware/api-key.js";
 
 /**
@@ -123,6 +124,11 @@ export function createApp() {
   api.use("/sync", requireAuth, withStore);
   api.use("/sync/*", requireAuth, withStore);
   api.route("/sync", sync);
+
+  // Centralized inventory distribution management.
+  api.use("/inventory", requireAuth);
+  api.use("/inventory/*", requireAuth);
+  api.route("/inventory", inventory);
 
   app.notFound(notFound);
   app.onError(onError);

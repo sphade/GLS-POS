@@ -1,6 +1,6 @@
 <script lang="ts">
   import { magnetic, progress, reveal } from '$lib/motion';
-  import { photo, site, src, srcset } from '$lib/site';
+  import { branches, photo, site, src, srcset } from '$lib/site';
 
   const year = new Date().getFullYear();
 </script>
@@ -23,6 +23,22 @@
         <span><span><em>hungry.</em></span></span>
       </h2>
     </div>
+  </div>
+
+  <div class="wrap branches" aria-labelledby="branches-title">
+    <div class="bhead" use:reveal>
+      <h3 id="branches-title" class="eyebrow">Our branches</h3>
+      <p>More GLS kitchens are on the way.</p>
+    </div>
+    <ul>
+      {#each branches as b, i}
+        <li class:soon={b.status === 'soon'} use:reveal={{ delay: i * 100 }}>
+          <span class="tag">{b.status === 'open' ? 'Open now' : 'Coming soon'}</span>
+          <span class="bn display">{b.name}</span>
+          <span class="ba">{b.area}</span>
+        </li>
+      {/each}
+    </ul>
   </div>
 
   <div class="wrap info">
@@ -119,11 +135,66 @@
     font-size: clamp(5rem, 18vw, 20rem);
     line-height: 0.82;
   }
-  h2 span:nth-child(2) {
-    padding-left: 12vw;
-  }
   h2 em {
     color: var(--lime);
+  }
+
+  .branches {
+    display: grid;
+    grid-template-columns: 1fr 3fr;
+    gap: 2.5rem;
+    padding-block: clamp(3.5rem, 9vh, 6rem);
+    border-top: 1px solid color-mix(in oklab, var(--cream) 14%, transparent);
+  }
+  .bhead h3 {
+    margin: 0 0 0.8rem;
+    color: var(--lime);
+  }
+  .bhead p {
+    margin: 0;
+    color: color-mix(in oklab, var(--cream) 70%, transparent);
+  }
+  .branches ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: color-mix(in oklab, var(--cream) 14%, transparent);
+  }
+  .branches li {
+    display: grid;
+    gap: 0.5rem;
+    align-content: start;
+    padding: 1.6rem 1.5rem 1.8rem;
+    background: var(--ink);
+  }
+  .tag {
+    width: fit-content;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    font-stretch: 110%;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    background: var(--lime);
+    color: var(--ink);
+  }
+  .soon .tag {
+    background: transparent;
+    color: var(--lime);
+    box-shadow: inset 0 0 0 1px var(--lime);
+  }
+  .bn {
+    font-size: clamp(2rem, 3.4vw, 3rem);
+  }
+  .soon .bn {
+    color: color-mix(in oklab, var(--cream) 60%, transparent);
+  }
+  .ba {
+    color: color-mix(in oklab, var(--cream) 65%, transparent);
+    font-size: 0.95rem;
   }
 
   .info {
@@ -233,8 +304,14 @@
     .info {
       grid-template-columns: 1fr 1fr;
     }
+    .branches {
+      grid-template-columns: 1fr;
+    }
   }
   @media (max-width: 640px) {
+    .branches ul {
+      grid-template-columns: 1fr;
+    }
     .info,
     .mark {
       grid-template-columns: 1fr;

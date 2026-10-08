@@ -1,5 +1,6 @@
 {
   "name": "gls-pos-server",
+  "account_id": "00c5ba709f84513b16806922d366e631",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -8,6 +9,14 @@
     "BETTER_AUTH_URL": "https://gls-pos-server.sphade012.workers.dev",
     "ENVIRONMENT": "production"
   },
+  // Production custom domain for the API. ADDITIVE: the original
+  // gls-pos-server.sphade012.workers.dev URL keeps serving, so mobile apps
+  // already in the field (which hard-code that URL) are unaffected. New builds
+  // can point at api.glskitchenandbakery.com. BETTER_AUTH_URL is intentionally
+  // left on the .workers.dev host so existing sessions keep validating.
+  "routes": [
+    { "pattern": "api.glskitchenandbakery.com", "custom_domain": true }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -28,5 +37,42 @@
   // Allow importing Drizzle's generated .sql migrations as text modules
   // (used by the Store Durable Object's migrator).
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  "dev": { "port": 8787 }
+  "dev": { "port": 8787 },
+
+  // ── Staging environment ──────────────────────────────────────────────
+  // A fully separate Worker (gls-pos-server-staging) with its OWN D1 database
+  // and its OWN Durable Object namespace, so testing never touches production
+  // data. Deploy with:  wrangler deploy --env staging
+  // Migrate its DB with: wrangler d1 migrations apply gls-pos-control-staging --remote
+  "env": {
+    "staging": {
+      "name": "gls-pos-server-staging",
+      "vars": {
+        "BETTER_AUTH_URL": "https://staging-api.glskitchenandbakery.com",
+        "ENVIRONMENT": "staging"
+      },
+      "routes": [
+        { "pattern": "staging-api.glskitchenandbakery.com", "custom_domain": true }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "gls-pos-control-staging",
+          "database_id": "918de0ba-d928-4c91-a217-3defb3f02583",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [{ "name": "STORE", "class_name": "StoreDurableObject" }]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["StoreDurableObject"]
+        }
+      ],
+      "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+      "observability": { "enabled": true }
+    }
+  }
 }

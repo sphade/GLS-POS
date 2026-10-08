@@ -9,19 +9,28 @@ export const site = {
   established: 2018,
   tagline: 'Freshly made. Beautifully served.',
   currency: 'NGN',
-  // PLACEHOLDER — international format, digits only (used for wa.me + tel:)
-  whatsapp: '2340000000000',
-  phoneDisplay: '+234 000 000 0000', // PLACEHOLDER
-  email: 'hello@glskitchen.example', // PLACEHOLDER
-  address: ['GLS Kitchen & Bakery', 'Street address', 'City, Nigeria'], // PLACEHOLDER
-  mapsUrl: 'https://maps.google.com/?q=GLS+Kitchen+and+Bakery', // PLACEHOLDER
+  // International format, digits only (used for wa.me + tel:)
+  whatsapp: '2348105615458',
+  phoneDisplay: '0810 561 5458',
+  email: 'glskitchenandbakery@gmail.com',
+  address: ['GLS Kitchen & Bakery', 'Poka, Epe', 'Lagos, Nigeria'],
+  mapsUrl: 'https://maps.google.com/?q=6.6167567,3.9862417',
   instagram: 'https://instagram.com/', // PLACEHOLDER
   hours: [
-    { days: 'Mon – Fri', time: '8:00 – 21:00' },
-    { days: 'Saturday', time: '9:00 – 22:00' },
-    { days: 'Sunday', time: '12:00 – 20:00' }
-  ] // PLACEHOLDER
+    { days: 'Mon – Sat', time: '9:30 – 21:00' },
+    { days: 'Sunday', time: '10:00 – 21:00' }
+  ]
 } as const;
+
+/**
+ * Branches. Open ones show their address; "soon" ones tell customers a new
+ * location is on the way. TODO(owner): confirm names/areas — only Poka is known
+ * from the POS menu data; the coming-soon entries are placeholders.
+ */
+export const branches = [
+  { name: 'Poka', area: 'Our first kitchen & bakery', status: 'open' },
+  { name: 'Odoshola', area: 'Our new branch, opening soon', status: 'soon' }
+] as const;
 
 /**
  * Editorial photography. Hot-linked from Unsplash (their licence asks for

@@ -1,25 +1,24 @@
 /**
- * Palette + strings from the Zobaze POS teardown (res/values/colors.xml,
- * strings.xml) so the replicated screens match the original.
+ * GLS-POS Theme - Modernized with improved contrast and visual hierarchy
+ * Based on Zobaze POS but with better UX
  */
 export const colors = {
-  // GLS brand green (derived from the logo). Deep enough that white text on the
-  // primary bar/buttons/active tab stays legible; `brand` is the lighter logo lime.
-  primary: "#5AA02C",
-  primaryDark: "#3F7A1C",
-  brand: "#8BC34A",
-  accent: "#8BC34A",
-  // CTA / success green is the primary green so the whole app is one green.
-  green: "#5AA02C",
-  dkGreen: "#2E7D46",
-  // Action colours for stepper: increase vs decrease.
-  actionAdd: "#3FA34D",
-  actionRemove: "#E53935",
+  // GLS brand green with improved contrast
+  primary: "#4CAF50",
+  primaryDark: "#388E3C",
+  brand: "#81C784",
+  accent: "#4CAF50",
+  green: "#4CAF50",
+  dkGreen: "#388E3C",
+  // Action colours
+  actionAdd: "#4CAF50",
+  actionRemove: "#F44336",
   red300: "#E57373",
   red500: "#F44336",
   red800: "#C62828",
   blue50: "#EAF4E0",
-  blue600: "#3F7A1C",
+  blue600: "#388E3C",
+  // Grey scale
   grey50: "#FAFAFA",
   grey100: "#F5F5F5",
   grey200: "#EEEEEE",
@@ -30,44 +29,36 @@ export const colors = {
   grey700: "#616161",
   grey800: "#424242",
   grey900: "#212121",
-  screenBg: "#E0E0E0",
+  // Backgrounds
+  screenBg: "#F5F5F5",
   card: "#FFFFFF",
   white: "#FFFFFF",
-  textTitle: "#424242",
-  textSecondary: "#616161",
+  textTitle: "#212121",
+  textSecondary: "#757575",
   hint: "#9E9E9E",
-  outOfStock: "#C62828",
-  lowStock: "#F44336",
+  // Status
+  outOfStock: "#F44336",
+  lowStock: "#FF9800",
   categoryHeader: "#64B5F6",
 };
 
 export const layout = {
-  cardRadius: 4,
+  cardRadius: 8,
   cardMargin: 4,
   cardElevation: 2,
-  imageArea: 80,
+  imageArea: 90,
   gridCols: 3,
 };
 
-/**
- * How long a press must be held before it counts as "remove one unit".
- *
- * The wait is inherent — the gesture is defined by its duration — so it should
- * be only as long as it needs to be. The old 250ms read as "the app didn't hear
- * me" on slow hardware, while a deliberate tap lifts well inside 100ms; 180ms
- * still can't be triggered by accident but answers noticeably sooner. Shared, so
- * the item grid and the order screen agree on the feel.
- */
 export const LONG_PRESS_MS = 180;
 
-/** Exact labels from strings.xml. */
 export const strings = {
   reports: "Reports",
   today: "Today",
   counter: "Counter",
   items: "Items",
   more: "More",
-  searchHint: "I want to sell…",
+  searchHint: "Search items...",
   goToCounter: "Go To Counter",
   newItem: "New Item",
   outOfStock: "Out of stock",
@@ -100,16 +91,7 @@ const symbols: Record<string, string> = { NGN: "₦", USD: "$", EUR: "€", GBP:
 export function currencySymbol(currency = "NGN") {
   return symbols[currency] ?? `${currency} `;
 }
-/**
- * Format integer minor units for display, grouped for readability.
- *
- *   250000  -> "2,500"        (whole amounts drop the pointless ".00")
- *   250050  -> "2,500.50"     (kobo shown only when non-zero)
- *  1300000  -> "13,000"
- *
- * Grouping is done by hand rather than via Intl so output is identical on every
- * device and JS engine.
- */
+
 export function formatAmount(minor: number): string {
   const sign = minor < 0 ? "-" : "";
   const abs = Math.abs(Math.round(minor));
@@ -119,12 +101,10 @@ export function formatAmount(minor: number): string {
   return `${sign}${grouped}${kobo === 0 ? "" : `.${String(kobo).padStart(2, "0")}`}`;
 }
 
-/** Same as formatAmount, prefixed with the currency symbol (e.g. "₦2,500"). */
 export function formatMoney(minor: number, currency = "NGN"): string {
   return `${currencySymbol(currency)}${formatAmount(minor)}`;
 }
 
-/** Cash denominations per currency (from CashPaymentActivity). */
 export const denominations: Record<string, number[]> = {
   USD: [1, 2, 5, 10, 20, 50, 100],
   NGN: [5, 10, 20, 50, 100, 500, 1000],

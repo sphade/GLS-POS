@@ -171,3 +171,7 @@ export const member = sqliteTable("member", {
   role: text("role").notNull().default("owner"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
+
+// --- Import inventory schema tables (from separate file) ---
+
+export * from "./inventory.schema.js";

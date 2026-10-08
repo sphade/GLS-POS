@@ -167,9 +167,10 @@
   }
   .l {
     display: block;
-    overflow: clip;
-    padding-bottom: 0.1em;
-    margin-bottom: -0.1em;
+    /* mask vertically only: a horizontal clip shaves italic overhangs */
+    overflow: visible clip;
+    padding-bottom: 0.2em;
+    margin-bottom: -0.2em;
   }
   .l > span {
     display: block;
@@ -181,7 +182,6 @@
       rotate 1.5s var(--ease);
   }
   .l2 {
-    padding-left: clamp(2rem, 14vw, 16rem);
     color: var(--lime);
   }
   .l1 > span {
@@ -317,9 +317,6 @@
     }
     .cue {
       display: none;
-    }
-    .l2 {
-      padding-left: 1.5rem;
     }
     .frame img {
       object-position: 55% 40%;

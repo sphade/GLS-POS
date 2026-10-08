@@ -1,0 +1,23 @@
+{
+  // GLS Kitchen & Bakery landing page.
+  // Served as a Cloudflare Worker with STATIC ASSETS (no server code) — the
+  // SvelteKit adapter-static output in build/ is uploaded as the asset bundle.
+  // Push-to-deploy is wired via Workers Builds (GitHub integration) in the
+  // Cloudflare dashboard; the build command is `pnpm --filter @gls-pos/web build`.
+  "name": "gls-kitchen-web",
+  "account_id": "00c5ba709f84513b16806922d366e631",
+  "compatibility_date": "2025-06-01",
+  "assets": {
+    "directory": "./build",
+    // SPA/static fallback: unknown paths 404 against the prerendered build
+    // rather than serving index.html, since every route is prerendered.
+    "not_found_handling": "404-page"
+  },
+  // Custom domains. These require glskitchenandbakery.com to be an active zone
+  // in THIS Cloudflare account; wrangler creates the DNS + cert on deploy.
+  "routes": [
+    { "pattern": "glskitchenandbakery.com", "custom_domain": true },
+    { "pattern": "www.glskitchenandbakery.com", "custom_domain": true }
+  ],
+  "observability": { "enabled": true }
+}

@@ -151,9 +151,10 @@ button {
 }
 .rv.lines > span {
   display: block;
-  overflow: clip;
-  padding-bottom: 0.08em;
-  margin-bottom: -0.08em;
+  /* vertical mask only — a horizontal clip shaves italic overhangs */
+  overflow: visible clip;
+  padding-bottom: 0.2em;
+  margin-bottom: -0.2em;
 }
 .rv.lines > span > span {
   display: block;

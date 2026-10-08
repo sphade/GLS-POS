@@ -11,21 +11,11 @@ import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
- * Custom bottom tab bar. React Navigation's `tabBarActiveBackgroundColor` only
- * tints the inner item box (leaving white gaps), so we render each tab as one
- * full-height pressable and paint the active cell edge-to-edge in primary blue —
- * including the bottom safe-area strip.
+ * Custom bottom tab bar for GLS-POS.
+ * Updated for improved visual hierarchy and better touch feedback.
  */
 type TabMeta = {
   label: string;
-  /**
-   * Hidden unless the signed-in role holds this permission.
-   *
-   * The gate has to live here, not in the navigator. `_layout.tsx` sets
-   * `href: null` for these tabs, but that only suppresses the *default* tab bar
-   * — this component renders straight from `state.routes`, so it saw every route
-   * regardless and cashiers got a Reports tab anyway.
-   */
   needs?: Permission;
   render: (color: string) => React.ReactNode;
 };
@@ -34,14 +24,12 @@ const TABS: Record<string, TabMeta> = {
   reports: {
     label: "Reports",
     needs: "reports:view",
-    render: (c) => <MaterialCommunityIcons name="chart-box" size={24} color={c} />,
+    render: (c) => <MaterialCommunityIcons name="chart-bar" size={24} color={c} />,
   },
   today: {
     label: "Today",
-    // Individual receipts are also available to supervisors, while aggregate
-    // Reports stays limited to owners and managers.
     needs: "receipts:view",
-    render: (c) => <MaterialCommunityIcons name="cash-multiple" size={24} color={c} />,
+    render: (c) => <MaterialCommunityIcons name="calendar-today" size={24} color={c} />,
   },
   counter: {
     label: "Counter",
@@ -49,7 +37,7 @@ const TABS: Record<string, TabMeta> = {
   },
   index: {
     label: "Items",
-    render: (c) => <MaterialCommunityIcons name="format-list-bulleted-square" size={24} color={c} />,
+    render: (c) => <MaterialCommunityIcons name="format-list-bulleted" size={24} color={c} />,
   },
   more: {
     label: "More",
@@ -57,19 +45,18 @@ const TABS: Record<string, TabMeta> = {
   },
 };
 
-/**
- * The cart count, isolated in its own component.
- *
- * The bar is mounted on every screen, so subscribing to the count up in
- * `PosTabBar` meant all five tabs re-rendered on every item added — work on the
- * exact path that has to feel instant. Only this badge cares about the number.
- */
 function CounterBadge() {
   const count = useCartCount();
   if (count === 0) return null;
+  
+  const badgeSize = count >= 10 ? 20 : 18;
+  const fontSize = count >= 10 ? 10 : 11;
+  
   return (
-    <View style={styles.badge}>
-      <Text style={styles.badgeText}>{String(count)}</Text>
+    <View style={[styles.badge, { width: badgeSize, height: badgeSize }]}>
+      <Text style={[styles.badgeText, { fontSize }]} numberOfLines={1}>
+        {count > 99 ? "99+" : String(count)}
+      </Text>
     </View>
   );
 }
@@ -80,22 +67,22 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
   const { can } = useAuth();
 
   return (
-    <View style={[styles.bar, { height: 58 + insets.bottom }]}>
+    <View style={[styles.bar, { height: 64 + insets.bottom }]}>
       {state.routes.map((route, index) => {
         const meta = TABS[route.name];
         if (!meta) return null;
         if (meta.needs && !can(meta.needs)) return null;
 
         const focused = state.index === index;
-        const tint = focused ? colors.white : colors.primary;
-
+        const isFocused = focused;
+        
         return (
           <Pressable
             key={route.key}
             accessibilityRole="button"
-            accessibilityState={focused ? { selected: true } : {}}
+            accessibilityState={isFocused ? { selected: true } : {}}
             accessibilityLabel={meta.label}
-            android_ripple={{ color: focused ? "#FFFFFF22" : "#5AA02C22", borderless: false }}
+            android_ripple={{ color: isFocused ? "#4CAF5022" : "#4CAF5011", borderless: false }}
             onPress={() => {
               feedbackTap();
               const event = navigation.emit({
@@ -103,28 +90,30 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
                 target: route.key,
                 canPreventDefault: true,
               });
-              if (!focused && !event.defaultPrevented) {
+              if (!isFocused && !event.defaultPrevented) {
                 navigation.navigate(route.name as never);
               }
-              // Every tab switch quietly checks the server for deltas from other
-              // devices — local data renders instantly either way. Deferred
-              // until after the switch has actually happened: starting a sync
-              // job flips the status bar's state, and doing that *before*
-              // navigating put a re-render in front of the transition.
               InteractionManager.runAfterInteractions(() => quietPull(store.id));
             }}
-            style={[
-              styles.tab,
-              { backgroundColor: focused ? colors.primary : colors.white, paddingBottom: insets.bottom },
-            ]}
+            style={styles.tabContainer}
           >
-            <View style={styles.iconWrap}>
-              {meta.render(tint)}
-              {route.name === "counter" && <CounterBadge />}
+            <View
+              style={[
+                styles.tab,
+                {
+                  backgroundColor: isFocused ? colors.primary : "transparent",
+                  marginBottom: insets.bottom + 8,
+                },
+              ]}
+            >
+              <View style={styles.iconWrap}>
+                {meta.render(isFocused ? colors.white : colors.primary)}
+                {route.name === "counter" && <CounterBadge />}
+              </View>
+              <Text style={[styles.label, { color: isFocused ? colors.white : colors.grey600 }]}>
+                {meta.label}
+              </Text>
             </View>
-            <Text style={[styles.label, { color: tint }]} numberOfLines={1}>
-              {meta.label}
-            </Text>
           </Pressable>
         );
       })}
@@ -135,33 +124,40 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
 const styles = StyleSheet.create({
   bar: {
     flexDirection: "row",
-    backgroundColor: colors.white,
+    backgroundColor: colors.screenBg,
+    paddingTop: 8,
+    paddingBottom: 8,
+    paddingLeft: 8,
+    paddingRight: 8,
     elevation: 8,
     shadowColor: "#000",
-    shadowOpacity: 0.12,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -4 },
   },
-  tab: {
+  tabContainer: {
     flex: 1,
     alignItems: "center",
+    justifyContent: "flex-end",
+  },
+  tab: {
+    alignItems: "center",
     justifyContent: "center",
-    paddingTop: 8,
-    overflow: "hidden",
+    paddingBottom: 6,
+    paddingHorizontal: 8,
+    borderRadius: 8,
   },
   iconWrap: { position: "relative" },
   badge: {
     position: "absolute",
-    top: -5,
-    right: -10,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
-    paddingHorizontal: 4,
-    backgroundColor: "#2E9E4F",
+    top: -4,
+    right: -4,
+    borderRadius: 10,
+    paddingHorizontal: 5,
+    backgroundColor: colors.red500,
     alignItems: "center",
     justifyContent: "center",
   },
   badgeText: { color: colors.white, fontSize: 11, fontWeight: "700" },
-  label: { fontSize: 12, fontWeight: "600", marginTop: 3, includeFontPadding: false },
+  label: { fontSize: 11, fontWeight: "500", marginTop: 4, includeFontPadding: false },
 });
