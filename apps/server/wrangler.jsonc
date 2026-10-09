@@ -1,5 +1,8 @@
 {
   "name": "gls-pos-server",
+  // REQUIRED: apps in the field call gls-pos-server.sphade012.workers.dev.
+  // Adding `routes` makes wrangler disable workers.dev unless this is explicit.
+  "workers_dev": true,
   "account_id": "00c5ba709f84513b16806922d366e631",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",

@@ -17,6 +17,7 @@ import { push } from "./modules/push/push.routes.js";
 import { v1 } from "./modules/integration/v1.routes.js";
 import { integrations } from "./modules/integration/integration.routes.js";
 import { inventory } from "./modules/inventory/inventory.routes.js";
+import { admin } from "./modules/admin/admin.routes.js";
 import { withApiKey } from "./middleware/api-key.js";
 
 /**
@@ -61,6 +62,9 @@ export function createApp() {
    */
   app.use("/v1/*", withApiKey);
   app.route("/v1", v1);
+
+  // Operator-only environment copy, bearer ADMIN_TOKEN. Inert without the secret.
+  app.route("/admin", admin);
 
   // Resolve the per-request auth instance + session for every route.
   app.use("*", withAuth);

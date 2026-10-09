@@ -21,4 +21,6 @@ export interface Env {
    * sign-in works; local dev origins are always trusted.
    */
   WEB_ORIGIN?: string;
+  /** Operator secret for the prod -> staging copy routes. Unset = routes 404. */
+  ADMIN_TOKEN?: string;
 }

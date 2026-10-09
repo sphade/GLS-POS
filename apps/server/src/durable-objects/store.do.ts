@@ -1608,4 +1608,57 @@ export class StoreDurableObject extends DurableObject<Env> {
 
     return { collections, rows: total };
   }
+
+  // --- Admin copy (prod -> staging) ------------------------------------------
+
+  /**
+   * One page of raw rows, oldest first, for a full-fidelity copy of this store
+   * to another environment. Read-only. Rows keep their server_seq so devices
+   * syncing against the copy see a consistent oplog.
+   */
+  adminExportPage(afterSeq: number, limit: number) {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT collection, id, data, updated_at, deleted, server_seq FROM documents WHERE server_seq > ? ORDER BY server_seq ASC LIMIT ?",
+        afterSeq,
+        Math.min(Math.max(limit, 1), 500),
+      )
+      .toArray() as Array<{
+        collection: string;
+        id: string;
+        data: string;
+        updated_at: number;
+        deleted: number;
+        server_seq: number;
+      }>;
+    return { rows, head: this.currentSeq() };
+  }
+
+  /**
+   * Write rows exported from another environment, verbatim. `reset` clears
+   * this store's documents first (used on the first page of a copy). Only the
+   * staging Worker exposes the route that calls this.
+   */
+  adminImportPage(
+    rows: Array<{ collection: string; id: string; data: string; updated_at: number; deleted: number; server_seq: number }>,
+    reset: boolean,
+  ) {
+    const sqlApi = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      if (reset) sqlApi.exec("DELETE FROM documents");
+      for (const r of rows) {
+        sqlApi.exec(
+          "INSERT OR REPLACE INTO documents (collection, id, data, updated_at, deleted, server_seq) VALUES (?, ?, ?, ?, ?, ?)",
+          r.collection,
+          r.id,
+          r.data,
+          r.updated_at,
+          r.deleted ? 1 : 0,
+          r.server_seq,
+        );
+      }
+    });
+    return { imported: rows.length, head: this.currentSeq() };
+  }
+
 }
