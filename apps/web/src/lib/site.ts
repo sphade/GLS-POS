@@ -37,29 +37,33 @@ export const branches = [
  * hot-linking). Swap for GLS's own photography when it exists — only this map
  * needs to change.
  */
-const U = (id: string) => `https://images.unsplash.com/photo-${id}`;
+// GLS's own food photos, from their Azumi listing. Keys kept stable.
+const G = (file: string) => `https://bucket.azumi.com.ng/${file}`;
 export const photo = {
-  croissants: U('1555507036-ab1f4038808a'),
-  jollof: U('1512058564366-18510be2db19'),
-  suya: U('1599487488170-d11ec9c172f0'),
-  pepperedChicken: U('1604908176997-125f25cc6f3d'),
-  spread: U('1504674900247-0877df9cc836'),
-  chefFlame: U('1600565193348-f74bd3c7ccdf'),
-  chopping: U('1551218808-94e220e084d2'),
-  sourdough: U('1509440159596-0249088772ff'),
-  chocolateCake: U('1578985545062-69928b1d9587'),
-  raspberrySlice: U('1565958011703-44f9829ba187'),
-  breadBasket: U('1608198093002-ad4e005484ec'),
-  cookies: U('1558961363-fa8fdf82db35'),
-  orangeCake: U('1542826438-bd32f43d626f'),
-  bakeryShelf: U('1517433670267-08bbd4be890f'),
-  dining: U('1414235077428-338989a2e8c0')
+  croissants: G('1775174163580-l1amx3.jpg'), // chicken pie (hero)
+  jollof: G('1771670543965-ctc38d.png'),
+  suya: G('1775211983191-sgfgqz.png'), // double sausage shawarma
+  pepperedChicken: G('1783242853769-qwu8ep.jpg'), // special pizza
+  spread: G('1775166318323-xm469u.jpg'), // village rice
+  chefFlame: G('1783242778978-16ay0v.jpg'), // beef pizza
+  chopping: G('1775168095158-13fpkn.jpg'), // ofada rice
+  sourdough: G('1775213647512-8qn5bq.png'), // butter bread
+  chocolateCake: G('1775172952116-wcglkb.jpg'), // cake parfait
+  raspberrySlice: G('1775173192164-eyascz.jpg'), // fruit parfait
+  breadBasket: G('1775213531849-qh6izm.png'), // sardine bread
+  cookies: G('1775215073166-clzhna.png'), // chin-chin
+  orangeCake: G('1775174475456-y8og5e.jpg'), // foil cake
+  bakeryShelf: G('1771671158381-8uohgz.png'), // meat pie
+  dining: G('1775167957946-hatm1o.jpg') // coconut rice
 } as const;
 
-/** Build a responsive srcset for an Unsplash base URL. */
+const resize = (base: string, w: number) =>
+  `https://azumi.com.ng/cdn-cgi/image/format=auto,width=${w},quality=82,fit=scale-down,onerror=redirect/${base}`;
+
+/** Responsive srcset for a photo. */
 export function srcset(base: string, widths = [640, 960, 1400, 2000]) {
-  return widths.map((w) => `${base}?auto=format&fit=crop&w=${w}&q=72 ${w}w`).join(', ');
+  return widths.map((w) => `${resize(base, w)} ${w}w`).join(', ');
 }
 export function src(base: string, w = 1400) {
-  return `${base}?auto=format&fit=crop&w=${w}&q=72`;
+  return resize(base, w);
 }

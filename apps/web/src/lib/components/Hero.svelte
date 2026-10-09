@@ -28,7 +28,7 @@
       src={src(photo.croissants, 2000)}
       srcset={srcset(photo.croissants, [800, 1200, 1800, 2600])}
       sizes="100vw"
-      alt="Golden croissants dusted with flour on a dark board"
+      alt="A freshly baked GLS chicken pie"
       fetchpriority="high"
       decoding="async"
     />

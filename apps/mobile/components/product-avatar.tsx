@@ -1,145 +1,59 @@
+import { memo } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { MaterialIcons } from "@expo/vector-icons";
-import { colors } from "@/constants/theme";
-import { formatMoney } from "@/constants/theme";
 
+/**
+ * Round product avatar: the item's initials on a tint of its category colour.
+ *
+ * `size` accepts a pixel number (what the Items grid and variant sheet pass) or
+ * a preset. It previously looked the number up in the preset table, got
+ * `undefined`, and crashed with "Cannot read property 'padding' of undefined".
+ */
 interface ProductAvatarProps {
-  product?: { name: string; price: number; categoryId?: string; image?: string; stockQuantity?: number };
+  product?: { name: string; categoryId?: string };
   name?: string;
-  price?: number;
   size?: "small" | "medium" | "large" | number;
-  showPrice?: boolean;
   color?: string;
+  /** Kept for API compatibility; the avatar no longer renders a price. */
+  price?: number;
+  showPrice?: boolean;
 }
 
-export function ProductAvatar({
-  product,
-  name,
-  price,
-  size = "medium",
-  showPrice = true,
-  color,
-}: ProductAvatarProps) {
-  // Handle both product object and individual props
-  const productName = product?.name || name || "";
-  const productPrice = product?.price || price || 0;
-  const productStockQuantity = product?.stockQuantity;
-  const isOutOfStock = productStockQuantity === 0;
-  
-  const categoryColor = color || (product?.categoryId ? getCategoryColor(product.categoryId) : colors.primary);
+const PRESETS = { small: 40, medium: 70, large: 100 } as const;
 
-  // Normalize size to number
-  const sizeValue = typeof size === "number" ? size : getSizes(size).image;
-  
-  const sizes = getSizes(size as "small" | "medium" | "large");
+function initialsOf(name: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[1][0]).toUpperCase();
+}
+
+function hashColor(key: string) {
+  const palette = ["#E65100", "#1565C0", "#6A1B9A", "#C62828", "#2E7D32", "#00838F"];
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = key.charCodeAt(i) + ((hash << 5) - hash);
+  return palette[Math.abs(hash) % palette.length];
+}
+
+export const ProductAvatar = memo(function ProductAvatar({ product, name, size = "medium", color }: ProductAvatarProps) {
+  const label = product?.name ?? name ?? "";
+  const px = typeof size === "number" ? size : PRESETS[size] ?? PRESETS.medium;
+  const tone = color ?? (product?.categoryId ? hashColor(product.categoryId) : hashColor(label));
 
   return (
     <View
       style={[
-        styles.container,
-        { padding: sizes.padding, borderRadius: 8, backgroundColor: isOutOfStock ? "#FFF5F5" : colors.card },
+        styles.circle,
+        { width: px, height: px, borderRadius: px / 2, backgroundColor: `${tone}1F`, borderColor: `${tone}40` },
       ]}
     >
-      <View style={styles.content}>
-        <View
-          style={[
-            styles.imageContainer,
-            { width: sizeValue, height: sizeValue, borderRadius: 6 },
-          ]}
-        >
-          <View style={[styles.placeholder, { backgroundColor: `${categoryColor}20` }]}>
-            <MaterialIcons name="inventory" size={sizeValue / 2.5} color={categoryColor} />
-          </View>
-        </View>
-
-        <View style={styles.info}>
-          <Text style={[styles.name, { fontSize: sizes.fontSize, fontWeight: "600" }]} numberOfLines={2}>
-            {productName}
-          </Text>
-
-          {showPrice && (
-            <Text style={[styles.price, { fontSize: sizes.fontSize }]}>
-              {formatMoney(productPrice)}
-            </Text>
-          )}
-        </View>
-      </View>
-
-      {isOutOfStock && (
-        <View style={styles.overlay}>
-          <Text style={styles.outOfStockText}>Out of stock</Text>
-        </View>
-      )}
+      <Text style={[styles.text, { color: tone, fontSize: Math.max(11, Math.round(px * 0.34)) }]} numberOfLines={1}>
+        {initialsOf(label)}
+      </Text>
     </View>
   );
-}
-
-function getSizes(size: "small" | "medium" | "large") {
-  return {
-    small: { image: 40, fontSize: 10, padding: 4 },
-    medium: { image: 70, fontSize: 12, padding: 8 },
-    large: { image: 100, fontSize: 14, padding: 12 },
-  }[size];
-}
-
-function getCategoryColor(catName: string) {
-  const catColors = ["#FF9800", "#2196F3", "#9C27B0", "#FF5722", "#4CAF50"];
-  let hash = 0;
-  for (let i = 0; i < catName.length; i++) {
-    hash = catName.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return catColors[Math.abs(hash) % catColors.length];
-}
+});
 
 const styles = StyleSheet.create({
-  container: {
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: colors.grey300,
-  },
-  content: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-  },
-  imageContainer: {
-    position: "relative",
-    marginRight: 8,
-    backgroundColor: colors.grey300,
-  },
-  placeholder: {
-    width: "100%",
-    height: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  info: {
-    flex: 1,
-    paddingVertical: 2,
-  },
-  name: {
-    color: colors.textTitle,
-    marginBottom: 2,
-    lineHeight: 14,
-  },
-  price: {
-    color: colors.primary,
-    fontWeight: "700",
-    marginBottom: 1,
-    lineHeight: 12,
-  },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(255, 255, 255, 0.8)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  outOfStockText: {
-    color: colors.red500,
-    fontWeight: "700",
-    fontSize: 12,
-    paddingVertical: 4,
-    paddingHorizontal: 12,
-    backgroundColor: colors.red500,
-    borderRadius: 4,
-  },
+  circle: { alignItems: "center", justifyContent: "center", borderWidth: 1.5, overflow: "hidden" },
+  text: { fontWeight: "800", letterSpacing: 0.5, includeFontPadding: false },
 });

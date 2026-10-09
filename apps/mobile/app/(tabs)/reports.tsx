@@ -1,5 +1,5 @@
-﻿import { useMemo, useState } from "react";
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+﻿import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { ActivityIndicator, Animated, InteractionManager, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
@@ -13,7 +13,7 @@ import { loadReceiptsInRange, useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { isVoidReturn, loadReturnsInRange, useReturns } from "@/lib/returns";
 import { useStore } from "@/lib/store";
-import { useServerRefresh } from "@/lib/sync";
+import { getSyncActivity, subscribeSyncActivity, useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 import { stockSummaryOf } from "@/lib/stock";
 
@@ -159,9 +159,28 @@ function ReportsScreen() {
   const customIsOneDay = !!custom && startOfDay(custom.from) === startOfDay(custom.to - 1);
   const customIsSpan = !!custom && !customIsOneDay;
 
+  /**
+   * Paint the screen first, crunch the numbers second. The receipt scan is a
+   * synchronous SQLite read, so doing it during the first render held the tab
+   * on a blank frame. Now the skeleton shows instantly and the figures land a
+   * frame later.
+   */
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => setReady(true));
+    return () => task.cancel();
+  }, []);
+
+  /** True while the device is pulling from the server (first open, refresh). */
+  const syncing = useSyncExternalStore(subscribeSyncActivity, () => getSyncActivity().busy);
+
+  // `from`/`to` for "Today" etc. move every render (Date.now()), so key the
+  // reads on the day + preset instead, or every render re-scanned receipts.
+  const fromKey = custom ? custom.from : startOfDay(presetBounds.from);
   const scoped = useMemo(
-    () => loadReceiptsInRange(from, to),
-    [from, to, receiptRevision],
+    () => (ready ? loadReceiptsInRange(from, to) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ready, fromKey, rangeIndex, custom, receiptRevision],
   );
 
   /**
@@ -170,9 +189,20 @@ function ReportsScreen() {
    * report. Voids never moved money, so they're excluded from the figures.
    */
   const scopedReturns = useMemo(
-    () => loadReturnsInRange(from, to).filter((ret) => !isVoidReturn(ret)),
-    [from, to, returnRevision],
+    () => (ready ? loadReturnsInRange(from, to).filter((ret) => !isVoidReturn(ret)) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ready, fromKey, rangeIndex, custom, returnRevision],
   );
+
+  /** Stock doesn't depend on the date range, so it isn't recomputed with it. */
+  const stock = useMemo(() => {
+    if (!ready) return { lowStock: 0, remaining: 0 };
+    const inventory = products.map(stockSummaryOf);
+    return {
+      lowStock: inventory.filter((summary) => summary.low).length,
+      remaining: inventory.reduce((sum, summary) => sum + summary.totalQuantity, 0),
+    };
+  }, [ready, products]);
 
   const stats = useMemo(() => {
     const grossSales = scoped.reduce((s, r) => s + r.total, 0);
@@ -206,7 +236,6 @@ function ReportsScreen() {
       .filter(([, value]) => value > 0)
       .sort((a, b) => b[1] - a[1])[0];
     const netSales = grossSales - refunded;
-    const inventory = products.map(stockSummaryOf);
     return {
       grossSales,
       refunded,
@@ -218,10 +247,10 @@ function ReportsScreen() {
       avg: scoped.length ? Math.round(netSales / scoped.length) : 0,
       topItem,
       topMode,
-      lowStock: inventory.filter((summary) => summary.low).length,
-      remaining: inventory.reduce((sum, summary) => sum + summary.totalQuantity, 0),
+      lowStock: stock.lowStock,
+      remaining: stock.remaining,
     };
-  }, [scoped, scopedReturns, products]);
+  }, [scoped, scopedReturns, stock]);
 
   const hasData = scoped.length > 0 || scopedReturns.length > 0;
 
@@ -401,10 +430,34 @@ function ReportsScreen() {
         onApply={applyRange}
       />
 
-      {!hasData ? (
-        <View style={styles.emptyWrap}>
-          <EmptyState text="No sales in this period" />
+      {syncing && ready && hasData ? (
+        <View style={styles.syncBar}>
+          <ActivityIndicator size="small" color={colors.primaryDark} />
+          <Text style={styles.syncText}>Updating with the latest sales…</Text>
         </View>
+      ) : null}
+
+      {!ready || (!hasData && syncing) ? (
+        <ScrollView contentContainerStyle={{ paddingBottom: 24 }} scrollEnabled={false}>
+          <View style={styles.loadingNote}>
+            <ActivityIndicator size="small" color={colors.primaryDark} />
+            <Text style={styles.syncText}>
+              {syncing ? "Loading sales from the server…" : "Loading report…"}
+            </Text>
+          </View>
+          {[0, 1, 2, 3, 4].map((i) => (
+            <SkeletonCard key={i} />
+          ))}
+        </ScrollView>
+      ) : !hasData ? (
+        <ScrollView
+          contentContainerStyle={styles.emptyWrap}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
+          }
+        >
+          <EmptyState text={"No sales in this period\nPull down to check for new sales"} />
+        </ScrollView>
       ) : (
         <ScrollView
           contentContainerStyle={{ paddingBottom: 24 }}
@@ -488,6 +541,29 @@ function ReportsScreen() {
   );
 }
 
+/** Grey placeholder in the shape of a metric card, shown while loading. */
+function SkeletonCard() {
+  const pulse = useRef(new Animated.Value(0.5)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 650, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.5, duration: 650, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+  return (
+    <Animated.View style={[styles.metricCard, { opacity: pulse }]}>
+      <View style={{ flex: 1 }}>
+        <View style={[styles.skel, { width: 110, height: 12 }]} />
+        <View style={[styles.skel, { width: 160, height: 22, marginTop: 10 }]} />
+      </View>
+    </Animated.View>
+  );
+}
+
 function MetricCard({
   label,
   value,
@@ -558,7 +634,18 @@ const styles = StyleSheet.create({
     borderColor: colors.primary,
   },
 
-  emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 80 },
+  emptyWrap: { flexGrow: 1, alignItems: "center", justifyContent: "center", paddingBottom: 80 },
+  syncBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: "#E3F2E4",
+  },
+  loadingNote: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, paddingTop: 14 },
+  syncText: { fontSize: 13, color: colors.primaryDark, fontWeight: "600" },
+  skel: { backgroundColor: colors.grey200, borderRadius: 4 },
 
   metricCard: {
     flexDirection: "row",

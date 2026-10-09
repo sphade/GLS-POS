@@ -144,9 +144,10 @@ function EmptyCounter({
           android_ripple={{ color: "#00000010" }}
         >
           <View style={styles.plusCircle}>
-            <Ionicons name="add" size={26} color={colors.white} />
+            <Ionicons name="add" size={28} color={colors.white} />
           </View>
-          <Text style={styles.actionTitle}>NEW ORDER</Text>
+          <Text style={styles.actionTitle}>New order</Text>
+          <Text style={styles.actionHint}>Pick items from the menu to start a bill</Text>
         </Pressable>
       )}
 
@@ -159,8 +160,11 @@ function EmptyCounter({
           }}
           android_ripple={{ color: "#00000010" }}
         >
-          <MaterialCommunityIcons name="hand-coin" size={26} color={colors.green} />
-          <Text style={styles.expenseTitle}>ADD NEW EXPENSE</Text>
+          <View style={styles.expenseIcon}>
+            <MaterialCommunityIcons name="hand-coin-outline" size={22} color={colors.primaryDark} />
+          </View>
+          <Text style={styles.expenseTitle}>Add an expense</Text>
+          <Ionicons name="chevron-forward" size={20} color={colors.grey400} />
         </Pressable>
       )}
 
@@ -240,8 +244,12 @@ function ActiveCounter({
 
       {/* Counter totals require selling access. Reports and receipt history use
           their own, stricter permissions. */}
-      {canSell && <CounterTotals canDiscount={canDiscount} />}
-      {canSell && <CounterActions editing={editing} onEditingChange={onEditingChange} />}
+      {canSell && (
+        <View style={styles.checkout}>
+          <CounterTotals canDiscount={canDiscount} />
+          <CounterActions editing={editing} onEditingChange={onEditingChange} />
+        </View>
+      )}
     </>
   );
 }
@@ -261,7 +269,7 @@ function BillHeader({
   return (
     <View style={styles.billHeader}>
       <Text style={styles.billHeaderText}>
-        {editing ? `Editing: ${editing.label}` : `${count} item(s)`}
+        {editing ? `Editing: ${editing.label}` : `${count} item${count === 1 ? "" : "s"} in this bill`}
       </Text>
       {canSell && (
         <Pressable
@@ -271,7 +279,7 @@ function BillHeader({
             feedbackTap();
           }}
         >
-          <Text style={styles.clear}>CLEAR</Text>
+          <Text style={styles.clear}>Clear all</Text>
         </Pressable>
       )}
     </View>
@@ -302,10 +310,10 @@ const CartLineRow = memo(function CartLineRow({
     <View style={styles.row}>
       <View style={{ flex: 1 }}>
         <Text style={styles.name}>{name}</Text>
-        <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)}</Text>
+        <Text style={styles.unitPrice}>{formatMoney(unitPrice, entry.item.currency)} each</Text>
         {canDiscount && (
           <Pressable
-            style={styles.lineDiscountBtn}
+            style={[styles.lineDiscountBtn, entry.discount && styles.lineDiscountOn]}
             hitSlop={6}
             onPress={() => {
               feedbackTap();
@@ -315,51 +323,61 @@ const CartLineRow = memo(function CartLineRow({
             <MaterialCommunityIcons
               name="tag-outline"
               size={13}
-              color={entry.discount ? colors.red500 : colors.primary}
+              color={entry.discount ? colors.red800 : colors.primaryDark}
             />
             <Text
-              style={[styles.lineDiscountText, entry.discount && { color: colors.red500 }]}
+              style={[styles.lineDiscountText, entry.discount && { color: colors.red800 }]}
               numberOfLines={1}
             >
               {entry.discount
                 ? `${discountLabel(entry.discount)} off · -${formatMoney(discount, entry.item.currency)}`
-                : "Add discount"}
+                : "Discount"}
             </Text>
           </Pressable>
         )}
       </View>
-      {editable ? (
-        <View style={styles.stepper}>
-          <Pressable
-            style={[styles.stepBtn, styles.stepMinus]}
-            onPress={() => {
-              remove(lineId);
-              feedbackTap();
-            }}
-          >
-            <Ionicons name="remove" size={22} color={colors.white} />
-          </Pressable>
-          <Text style={styles.qty}>{entry.qty}</Text>
-          <Pressable
-            style={[styles.stepBtn, styles.stepPlus]}
-            onPress={() => {
-              add(entry.item, entry.variant);
-              feedbackAddItem();
-            }}
-          >
-            <Ionicons name="add" size={22} color={colors.white} />
-          </Pressable>
+      <View style={styles.rowRight}>
+        <View style={styles.lineAmounts}>
+          {discount > 0 && (
+            <Text style={styles.lineWas}>{formatMoney(gross, entry.item.currency)}</Text>
+          )}
+          <Text style={[styles.lineTotal, discount > 0 && styles.lineTotalDiscounted]}>
+            {formatMoney(net, entry.item.currency)}
+          </Text>
         </View>
-      ) : (
-        <Text style={[styles.qty, { minWidth: 40 }]}>x{entry.qty}</Text>
-      )}
-      <View style={styles.lineAmounts}>
-        {discount > 0 && (
-          <Text style={styles.lineWas}>{formatMoney(gross, entry.item.currency)}</Text>
+        {editable ? (
+          <View style={styles.stepper}>
+            <Pressable
+              style={styles.stepBtn}
+              hitSlop={4}
+              accessibilityLabel={entry.qty === 1 ? "Remove item" : "Decrease quantity"}
+              onPress={() => {
+                remove(lineId);
+                feedbackTap();
+              }}
+            >
+              <Ionicons
+                name={entry.qty === 1 ? "trash-outline" : "remove"}
+                size={18}
+                color={entry.qty === 1 ? colors.red500 : colors.grey800}
+              />
+            </Pressable>
+            <Text style={styles.qty}>{entry.qty}</Text>
+            <Pressable
+              style={[styles.stepBtn, styles.stepPlus]}
+              hitSlop={4}
+              accessibilityLabel="Increase quantity"
+              onPress={() => {
+                add(entry.item, entry.variant);
+                feedbackAddItem();
+              }}
+            >
+              <Ionicons name="add" size={18} color={colors.white} />
+            </Pressable>
+          </View>
+        ) : (
+          <Text style={styles.qtyReadOnly}>x{entry.qty}</Text>
         )}
-        <Text style={[styles.lineTotal, discount > 0 && styles.lineTotalDiscounted]}>
-          {formatMoney(net, entry.item.currency)}
-        </Text>
       </View>
 
       <DiscountSheet
@@ -495,7 +513,7 @@ function CounterActions({
             size={20}
             color={colors.primary}
           />
-          <Text style={styles.holdText}>{editing ? "KEEP BILL" : "HOLD"}</Text>
+          <Text style={styles.holdText}>{editing ? "Keep bill" : "Hold"}</Text>
         </Pressable>
         <Pressable
           style={styles.charge}
@@ -573,104 +591,139 @@ const styles = StyleSheet.create({
 
   actionCard: {
     backgroundColor: colors.card,
-    borderRadius: 3,
-    paddingVertical: 26,
+    borderRadius: 16,
+    paddingVertical: 28,
+    paddingHorizontal: 20,
     alignItems: "center",
-    marginBottom: 8,
-    elevation: 1,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: colors.grey200,
   },
   plusCircle: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: colors.green,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: colors.primaryDark,
     alignItems: "center",
     justifyContent: "center",
   },
-  actionTitle: { fontSize: 18, fontWeight: "700", color: colors.grey900, marginTop: 18 },
+  actionTitle: { fontSize: 19, fontWeight: "800", color: colors.grey900, marginTop: 14 },
+  actionHint: { fontSize: 13, color: colors.grey600, marginTop: 4, textAlign: "center" },
 
   expenseCard: {
     backgroundColor: colors.card,
-    borderRadius: 3,
-    paddingVertical: 20,
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
     gap: 12,
-    marginBottom: 16,
-    elevation: 1,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: colors.grey200,
   },
-  expenseTitle: { fontSize: 17, fontWeight: "600", color: colors.grey900 },
+  expenseIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "#E3F2E4",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  expenseTitle: { flex: 1, fontSize: 16, fontWeight: "700", color: colors.grey900 },
 
-  openBillsTitle: { fontSize: 12, fontWeight: "800", color: colors.grey600, letterSpacing: 0.6, marginLeft: 4, marginBottom: 8 },
+  openBillsTitle: { fontSize: 12, fontWeight: "800", color: colors.grey600, letterSpacing: 0.8, marginLeft: 4, marginBottom: 8 },
   openBillsHint: { fontSize: 12, color: colors.grey500, textAlign: "center", marginTop: 6 },
   billCard: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
     backgroundColor: colors.card,
-    borderRadius: 4,
+    borderRadius: 14,
     padding: 12,
     marginBottom: 8,
-    elevation: 1,
+    borderWidth: 1,
+    borderColor: colors.grey200,
   },
   billIcon: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: colors.blue50,
+    backgroundColor: "#E3F2E4",
     alignItems: "center",
     justifyContent: "center",
   },
   billName: { fontSize: 16, fontWeight: "700", color: colors.grey900 },
   billMeta: { fontSize: 12, color: colors.grey600, marginTop: 2 },
-  billTotal: { fontSize: 16, fontWeight: "800", color: colors.primary },
+  billTotal: { fontSize: 16, fontWeight: "800", color: colors.grey900 },
 
   billHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 14,
-    paddingTop: 10,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 2,
   },
-  billHeaderText: { fontSize: 14, color: colors.grey600, fontWeight: "600" },
+  billHeaderText: { fontSize: 13, color: colors.grey600, fontWeight: "700" },
   clear: { color: colors.red500, fontWeight: "700", fontSize: 13 },
 
   row: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: colors.card,
-    borderRadius: 3,
-    padding: 12,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     marginBottom: 8,
-    gap: 10,
-    elevation: 1,
+    gap: 12,
+    borderWidth: 1,
+    borderColor: colors.grey200,
   },
-  name: { fontSize: 15, color: colors.grey900, fontWeight: "600" },
-  unitPrice: { fontSize: 13, color: colors.grey600, marginTop: 2 },
-  stepper: { flexDirection: "row", alignItems: "center", gap: 12 },
+  name: { fontSize: 15.5, color: colors.grey900, fontWeight: "700" },
+  unitPrice: { fontSize: 12.5, color: colors.grey600, marginTop: 2 },
+  rowRight: { alignItems: "flex-end", gap: 8 },
+  stepper: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.grey100,
+    borderRadius: 20,
+    padding: 3,
+    gap: 4,
+  },
   stepBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 6,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
-    elevation: 1,
+    backgroundColor: colors.white,
   },
-  stepMinus: { backgroundColor: colors.actionRemove },
-  stepPlus: { backgroundColor: colors.actionAdd },
-  qty: { minWidth: 24, textAlign: "center", fontSize: 16, fontWeight: "800", color: colors.grey900 },
-  lineAmounts: { width: 82, alignItems: "flex-end" },
-  lineTotal: { textAlign: "right", fontWeight: "700", color: colors.grey900 },
-  lineTotalDiscounted: { color: colors.primary },
+  stepPlus: { backgroundColor: colors.primaryDark },
+  qty: { minWidth: 26, textAlign: "center", fontSize: 15, fontWeight: "800", color: colors.grey900 },
+  qtyReadOnly: { fontSize: 15, fontWeight: "800", color: colors.grey700 },
+  lineAmounts: { alignItems: "flex-end" },
+  lineTotal: { textAlign: "right", fontSize: 15.5, fontWeight: "800", color: colors.grey900 },
+  lineTotalDiscounted: { color: colors.primaryDark },
   lineWas: {
     fontSize: 11,
     color: colors.grey500,
     textDecorationLine: "line-through",
     marginBottom: 1,
   },
-  lineDiscountBtn: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 5 },
-  lineDiscountText: { fontSize: 12, fontWeight: "600", color: colors.primary, flexShrink: 1 },
+  lineDiscountBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 4,
+    marginTop: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: "#E3F2E4",
+  },
+  lineDiscountOn: { backgroundColor: "#FDECEA" },
+  lineDiscountText: { fontSize: 12, fontWeight: "700", color: colors.primaryDark, flexShrink: 1 },
   discountRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -682,38 +735,46 @@ const styles = StyleSheet.create({
   discountLabel: { fontSize: 14, color: colors.primary, fontWeight: "600" },
   totalNegative: { color: colors.red500, fontWeight: "700" },
 
-  totalsCard: { backgroundColor: colors.card, margin: 8, marginTop: 0, borderRadius: 3, padding: 12, elevation: 1 },
+  /** Bottom checkout panel: totals + Hold / Charge, lifted off the list. */
+  checkout: {
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 6,
+    elevation: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -4 },
+  },
+  totalsCard: { paddingHorizontal: 18, paddingTop: 10, paddingBottom: 6 },
   totalRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },
   totalLabel: { color: colors.grey600, fontSize: 14 },
   totalValue: { color: colors.grey800, fontSize: 14, fontWeight: "600" },
-  totalBold: { fontSize: 17, fontWeight: "800", color: colors.primary },
-  divider: { height: 1, backgroundColor: colors.grey300, marginVertical: 6 },
+  totalBold: { fontSize: 18, fontWeight: "800", color: colors.grey900 },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300, marginVertical: 8 },
 
-  actionRow: { flexDirection: "row", gap: 8, margin: 8, marginTop: 0 },
+  actionRow: { flexDirection: "row", gap: 10, paddingHorizontal: 12, paddingTop: 6, paddingBottom: 12 },
   hold: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 6,
-    height: 52,
+    height: 54,
     paddingHorizontal: 18,
-    borderRadius: 4,
-    backgroundColor: colors.white,
-    borderWidth: 1.5,
-    borderColor: colors.primary,
-    elevation: 1,
+    borderRadius: 14,
+    backgroundColor: "#E3F2E4",
   },
-  holdText: { color: colors.primary, fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
+  holdText: { color: colors.primaryDark, fontSize: 16, fontWeight: "800" },
   charge: {
     flex: 1,
-    height: 52,
-    borderRadius: 4,
-    backgroundColor: colors.green,
+    height: 54,
+    borderRadius: 14,
+    backgroundColor: colors.primaryDark,
     alignItems: "center",
     justifyContent: "center",
-    elevation: 3,
   },
-  chargeText: { color: colors.white, fontSize: 18, fontWeight: "700" },
+  chargeText: { color: colors.white, fontSize: 18, fontWeight: "800" },
 
   modalBackdrop: { flex: 1, backgroundColor: "#00000066", alignItems: "center", justifyContent: "center", padding: 24 },
   modalCard: { width: "100%", maxWidth: 380, backgroundColor: colors.white, borderRadius: 10, padding: 18 },

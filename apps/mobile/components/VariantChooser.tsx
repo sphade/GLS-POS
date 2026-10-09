@@ -16,13 +16,14 @@ import {
 /**
  * Variant picker for an item sold in more than one size/option.
  *
- * Styled to match the rest of the POS: green app bar, caps title, white cards
- * on the grey sheet. Every row carries the same plus/minus stepper used on the
- * Counter, so one sheet both adds and removes and the running quantity is
- * always visible — no separate "add mode" to reason about.
+ * A bottom sheet: grab handle, item header, one card per variant, and a single
+ * full-width confirm button carrying the running count and total. Every row
+ * that is in the cart shows a stepper, so any variant can be sold in any
+ * quantity. "Choose one" items keep radio semantics (picking an option clears
+ * the others) but the chosen option still gets a stepper.
  *
- * Like the Items grid, this sheet subscribes per-variant-line instead of to
- * the whole cart: a tap re-renders only the touched row and the footer.
+ * Rows subscribe per-variant-line, so a tap re-renders only the touched row
+ * and the footer.
  */
 export function VariantChooser({
   item,
@@ -40,13 +41,7 @@ export function VariantChooser({
 
   const chooseOne = !!item.chooseOne;
 
-  /**
-   * Radio behaviour: whatever else was picked for this item is dropped, the
-   * tapped option becomes the selection, and the sheet closes. `remove` takes
-   * one unit at a time, so a line is cleared by repeating — normally a single
-   * call, but an item switched to choose-one after a cart was built could carry
-   * more.
-   */
+  /** Radio behaviour: drop other options of this item, select the tapped one. */
   const chooseOnly = (variant: Variant) => {
     for (const other of variants) {
       if (other.id === variant.id) continue;
@@ -55,29 +50,21 @@ export function VariantChooser({
         remove(otherLine);
       }
     }
-    // Re-tapping the current selection just confirms it; don't stack a second.
     const mine = cartLineKey(item.id, variant.id);
     if ((getLine(mine)?.qty ?? 0) === 0) add(item, variant);
     feedbackAddItem();
-    onClose();
   };
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={styles.sheet} onPress={(event) => event.stopPropagation()}>
-          {/* App bar, same green as every other editor sheet. */}
-          <View style={styles.appBar}>
-            <Text style={styles.appBarTitle}>SELECT VARIANT</Text>
-            <Pressable onPress={onClose} hitSlop={10}>
-              <Ionicons name="close" size={24} color={colors.white} />
-            </Pressable>
-          </View>
+          <View style={styles.handle} />
 
-          <View style={styles.itemStrip}>
+          <View style={styles.header}>
             <ProductAvatar
               name={item.name}
-              size={44}
+              size={48}
               color={item.categoryColor ?? colors.primary}
             />
             <View style={{ flex: 1 }}>
@@ -85,9 +72,18 @@ export function VariantChooser({
                 {item.name}
               </Text>
               <Text style={styles.itemHint}>
-                {chooseOne ? "Pick one" : "Pick the option you're selling"}
+                {chooseOne ? "Choose one option, then set the quantity" : "Set a quantity for each option"}
               </Text>
             </View>
+            <Pressable
+              onPress={onClose}
+              hitSlop={10}
+              style={styles.closeBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+            >
+              <Ionicons name="close" size={20} color={colors.grey900} />
+            </Pressable>
           </View>
 
           <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
@@ -104,12 +100,7 @@ export function VariantChooser({
             ))}
           </ScrollView>
 
-          <View style={styles.footer}>
-            <VariantFooter key={item.id} item={item} />
-            <Pressable style={styles.done} onPress={onClose} android_ripple={{ color: "#FFFFFF22" }}>
-              <Text style={styles.doneText}>DONE</Text>
-            </Pressable>
-          </View>
+          <VariantFooter key={item.id} item={item} onDone={onClose} />
         </Pressable>
       </Pressable>
     </Modal>
@@ -136,77 +127,67 @@ const VariantRow = memo(function VariantRow({
   const qty = entry?.qty ?? 0;
   const available = variantAvailable(variant);
   const atMax = variant.stock != null && qty >= variant.stock;
+  const selected = qty > 0;
 
-  if (chooseOne) {
-    const selected = qty > 0;
-    return (
-      <Pressable
-        style={[styles.card, !available && styles.cardOut]}
-        disabled={!available}
-        accessibilityRole="radio"
-        accessibilityState={{ selected, disabled: !available }}
-        onPress={onChoose}
-        android_ripple={{ color: "#00000010" }}
-      >
-        <View style={[styles.swatch, { backgroundColor: variant.color || colors.primary }]} />
-        <View style={{ flex: 1 }}>
-          <Text style={styles.variantName} numberOfLines={2}>
-            {variant.name}
-          </Text>
-          <Text style={styles.variantPrice}>{formatMoney(variant.price, item.currency)}</Text>
-        </View>
-        {available ? (
-          <Ionicons
-            name={selected ? "radio-button-on" : "radio-button-off"}
-            size={26}
-            color={selected ? colors.primary : colors.grey400}
-          />
-        ) : (
-          <View style={styles.oosTag}>
-            <Text style={styles.oosTagText}>SOLD OUT</Text>
-          </View>
-        )}
-      </Pressable>
-    );
-  }
+  const stockText = !available
+    ? "Sold out"
+    : variant.stock == null
+      ? null
+      : `${variant.stock} left`;
+
+  // Tapping the card body: choose-one selects it; otherwise adds one when empty.
+  const onCardPress = () => {
+    if (!available) return;
+    if (chooseOne) onChoose();
+    else if (!selected) {
+      onAdd();
+      feedbackAddItem();
+    }
+  };
 
   return (
-    <View style={[styles.card, !available && styles.cardOut]}>
-      <View style={[styles.swatch, { backgroundColor: variant.color || colors.primary }]} />
+    <Pressable
+      style={[styles.card, selected && styles.cardSelected, !available && styles.cardOut]}
+      disabled={!available || (selected && !chooseOne)}
+      onPress={onCardPress}
+      accessibilityRole={chooseOne ? "radio" : "button"}
+      accessibilityState={{ selected, disabled: !available }}
+      android_ripple={{ color: "#00000010" }}
+    >
+      <View style={[styles.dot, { backgroundColor: variant.color || colors.primary }]} />
 
       <View style={{ flex: 1 }}>
-        <Text style={styles.variantName} numberOfLines={1}>
+        <Text style={styles.variantName} numberOfLines={2}>
           {variant.name}
         </Text>
-        <Text style={styles.variantPrice}>{formatMoney(variant.price, item.currency)}</Text>
-        <Text style={[styles.variantStock, !available && styles.variantStockOut]}>
-          {!available
-            ? "OUT OF STOCK"
-            : variant.stock == null
-              ? "Stock not tracked"
-              : `${variant.stock} in stock`}
-        </Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.variantPrice}>{formatMoney(variant.price, item.currency)}</Text>
+          {stockText ? (
+            <Text style={[styles.variantStock, !available && styles.variantStockOut]}>
+              · {stockText}
+            </Text>
+          ) : null}
+        </View>
       </View>
 
-      {/* Same stepper as the Counter: minus, live qty, plus. */}
-      {available ? (
+      {!available ? null : selected ? (
         <View style={styles.stepper}>
           <Pressable
-            style={[styles.stepBtn, styles.stepMinus, qty === 0 && styles.stepDisabled]}
-            disabled={qty === 0}
+            style={styles.stepBtn}
+            hitSlop={6}
+            accessibilityLabel={`Remove one ${variant.name}`}
             onPress={() => {
               feedbackTap();
               onRemove();
             }}
           >
-            <Ionicons name="remove" size={21} color={colors.white} />
+            <Ionicons name={qty === 1 ? "trash-outline" : "remove"} size={18} color={colors.grey900} />
           </Pressable>
-
-          <Text style={[styles.qty, qty > 0 && { color: colors.primary }]}>{qty}</Text>
-
+          <Text style={styles.qty}>{qty}</Text>
           <Pressable
-            style={[styles.stepBtn, styles.stepPlus, atMax && styles.stepDisabled]}
-            disabled={atMax}
+            style={[styles.stepBtn, styles.stepBtnPlus, atMax && styles.stepDisabled]}
+            hitSlop={6}
+            accessibilityLabel={`Add one ${variant.name}`}
             onPress={() => {
               if (atMax) {
                 feedbackError();
@@ -216,36 +197,43 @@ const VariantRow = memo(function VariantRow({
               feedbackAddItem();
             }}
           >
-            <Ionicons name="add" size={21} color={colors.white} />
+            <Ionicons name="add" size={18} color={colors.white} />
           </Pressable>
         </View>
+      ) : chooseOne ? (
+        <Ionicons name="radio-button-off" size={24} color={colors.grey400} />
       ) : (
-        <View style={styles.oosTag}>
-          <Text style={styles.oosTagText}>SOLD OUT</Text>
+        <View style={styles.addPill}>
+          <Ionicons name="add" size={18} color={colors.primary} />
+          <Text style={styles.addPillText}>Add</Text>
         </View>
       )}
-    </View>
+    </Pressable>
   );
 });
 
-/** Running total for the sheet; subscribes to every variant's line. */
-function VariantFooter({ item }: { item: Item }) {
+/** Confirm button with running count + total; subscribes to every variant's line. */
+function VariantFooter({ item, onDone }: { item: Item; onDone: () => void }) {
   const variants = item.variants ?? [];
   const lineIds = variants.map((v) => cartLineKey(item.id, v.id));
-  // Re-render on any of this item's lines changing.
   const entries = lineIds.map((lineId) => useCartLine(lineId));
-  const selected = entries.reduce((sum, e) => sum + (e?.qty ?? 0), 0);
-  const selectedTotal = entries.reduce(
-    (sum, e, i) => sum + (e?.qty ?? 0) * variants[i]!.price,
-    0,
-  );
+  const count = entries.reduce((sum, e) => sum + (e?.qty ?? 0), 0);
+  const total = entries.reduce((sum, e, i) => sum + (e?.qty ?? 0) * variants[i]!.price, 0);
 
   return (
-    <View style={{ flex: 1 }}>
-      <Text style={styles.footerLabel}>
-        {selected} item{selected === 1 ? "" : "s"} selected
-      </Text>
-      <Text style={styles.footerTotal}>{formatMoney(selectedTotal, item.currency)}</Text>
+    <View style={styles.footer}>
+      <Pressable
+        style={[styles.done, count === 0 && styles.doneEmpty]}
+        onPress={onDone}
+        android_ripple={{ color: "#FFFFFF22" }}
+      >
+        <Text style={[styles.doneText, count === 0 && styles.doneTextEmpty]}>
+          {count === 0 ? "Close" : `Done · ${count} item${count === 1 ? "" : "s"}`}
+        </Text>
+        {count > 0 ? (
+          <Text style={styles.doneTotal}>{formatMoney(total, item.currency)}</Text>
+        ) : null}
+      </Pressable>
     </View>
   );
 }
@@ -253,93 +241,110 @@ function VariantFooter({ item }: { item: Item }) {
 const styles = StyleSheet.create({
   backdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "#00000066" },
   sheet: {
-    maxHeight: "82%",
-    backgroundColor: colors.screenBg,
-    borderTopLeftRadius: 6,
-    borderTopRightRadius: 6,
+    maxHeight: "85%",
+    backgroundColor: colors.card,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
     overflow: "hidden",
   },
-
-  appBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: colors.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+  handle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.grey300,
+    marginTop: 8,
   },
-  appBarTitle: { color: colors.white, fontSize: 16, fontWeight: "700", letterSpacing: 0.5 },
 
-  itemStrip: {
+  header: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: colors.card,
-    paddingHorizontal: 12,
-    paddingVertical: 11,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.grey300,
   },
-  itemName: { fontSize: 17, fontWeight: "700", color: colors.grey900 },
-  itemHint: { fontSize: 12, color: colors.grey600, marginTop: 2 },
+  itemName: { fontSize: 18, fontWeight: "700", color: colors.grey900 },
+  itemHint: { fontSize: 13, color: colors.grey600, marginTop: 2 },
+  closeBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.screenBg,
+  },
 
-  list: { maxHeight: 400 },
-  listContent: { padding: 8, paddingBottom: 4 },
+  list: { maxHeight: 420 },
+  listContent: { padding: 12, gap: 8 },
 
   card: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
+    minHeight: 64,
     backgroundColor: colors.card,
-    borderRadius: 3,
-    padding: 10,
-    marginBottom: 8,
-    elevation: 1,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: colors.grey300,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
-  cardOut: { opacity: 0.55 },
-  swatch: { width: 8, alignSelf: "stretch", minHeight: 46, borderRadius: 4 },
+  cardSelected: { borderColor: colors.primary },
+  cardOut: { opacity: 0.5 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
 
   variantName: { fontSize: 16, fontWeight: "600", color: colors.grey900 },
-  variantPrice: { fontSize: 15, fontWeight: "700", color: colors.primary, marginTop: 3 },
-  variantStock: { fontSize: 11, color: colors.grey600, marginTop: 3 },
-  variantStockOut: { color: colors.outOfStock, fontWeight: "800" },
+  metaRow: { flexDirection: "row", alignItems: "center", marginTop: 3, gap: 4 },
+  variantPrice: { fontSize: 14, fontWeight: "700", color: colors.primary },
+  variantStock: { fontSize: 12, color: colors.grey600 },
+  variantStockOut: { color: colors.outOfStock, fontWeight: "700" },
 
-  stepper: { flexDirection: "row", alignItems: "center", gap: 10 },
+  stepper: { flexDirection: "row", alignItems: "center", gap: 6 },
   stepBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 6,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    elevation: 1,
+    backgroundColor: colors.screenBg,
   },
-  stepMinus: { backgroundColor: colors.actionRemove },
-  stepPlus: { backgroundColor: colors.actionAdd },
-  stepDisabled: { backgroundColor: colors.grey400, elevation: 0 },
-  qty: { minWidth: 22, textAlign: "center", fontSize: 17, fontWeight: "800", color: colors.grey900 },
+  stepBtnPlus: { backgroundColor: colors.primary },
+  stepDisabled: { backgroundColor: colors.grey400 },
+  qty: { minWidth: 26, textAlign: "center", fontSize: 17, fontWeight: "800", color: colors.grey900 },
 
-  oosTag: { backgroundColor: colors.outOfStock, borderRadius: 3, paddingHorizontal: 9, paddingVertical: 6 },
-  oosTagText: { color: colors.white, fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
-
-  footer: {
+  addPill: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    backgroundColor: colors.card,
-    paddingHorizontal: 14,
+    gap: 2,
+    borderRadius: 17,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    paddingHorizontal: 12,
+    height: 34,
+  },
+  addPillText: { color: colors.primary, fontSize: 14, fontWeight: "700" },
+
+  footer: {
+    paddingHorizontal: 12,
     paddingTop: 10,
-    paddingBottom: 20,
+    paddingBottom: 22,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderColor: colors.grey300,
   },
-  footerLabel: { fontSize: 12, color: colors.grey600, fontWeight: "600" },
-  footerTotal: { fontSize: 18, fontWeight: "800", color: colors.grey900, marginTop: 2 },
   done: {
-    minWidth: 128,
-    height: 46,
-    borderRadius: 4,
-    backgroundColor: colors.green,
+    height: 52,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    elevation: 2,
+    justifyContent: "space-between",
+    paddingHorizontal: 18,
   },
-  doneText: { color: colors.white, fontSize: 16, fontWeight: "700", letterSpacing: 0.5 },
+  doneEmpty: { backgroundColor: colors.screenBg, justifyContent: "center" },
+  doneText: { color: colors.white, fontSize: 16, fontWeight: "700" },
+  doneTextEmpty: { color: colors.grey900 },
+  doneTotal: { color: colors.white, fontSize: 16, fontWeight: "800" },
 });

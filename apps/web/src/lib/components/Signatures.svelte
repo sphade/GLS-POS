@@ -5,32 +5,32 @@
 
   const dishes = [
     {
-      name: 'Party Jollof',
-      line: 'Smoke from the bottom of the pot',
-      body: 'Long-fried tomato and pepper base, parboiled long-grain, finished low so the smoke gets in. Served with dodo.',
+      name: 'Jollof Rice',
+      line: 'Smoky, red, served by the spoon',
+      body: 'Our everyday jollof, cooked fresh each morning. Pair it with fried rice, coconut rice or village rice.',
       img: photo.jollof,
-      alt: 'A pan of rich red rice with herbs and lemon'
+      alt: 'A plate of GLS jollof rice'
     },
     {
-      name: 'Beef Suya',
-      line: 'Yaji, open flame, no shortcuts',
-      body: 'Thin-cut beef rubbed in our own yaji blend and grilled over open heat. Raw onion, tomato, a little more pepper.',
+      name: 'Sausage Shawarma',
+      line: 'Single or double, wrapped hot',
+      body: 'Loaded wraps with sausage, cabbage and cream, rolled and toasted to order.',
       img: photo.suya,
-      alt: 'Skewers of spiced grilled meat over charcoal'
+      alt: 'A GLS double sausage shawarma'
     },
     {
-      name: 'Peppered Chicken',
-      line: 'Grilled first, then drowned in rodo',
-      body: 'Seasoned overnight, grilled for char, then tossed in a scotch-bonnet sauce that will make you reach for water.',
+      name: 'Special Pizza',
+      line: 'Baked fresh, worth the 45 minutes',
+      body: 'Beef, chicken or our loaded special, baked to order in small and large.',
       img: photo.pepperedChicken,
-      alt: 'Chicken pieces in a glossy pepper sauce with basil'
+      alt: 'A GLS special pizza'
     },
     {
-      name: 'Small Chops & Trays',
-      line: 'For when everyone is coming',
-      body: 'Puff-puff, samosa, spring rolls, gizdodo and grills — boxed for the office or trayed for the owambe.',
+      name: 'Village Rice',
+      line: 'One pot, local taste',
+      body: 'Delicious single-pot village rice with a tasty garnish, alongside ofada rice and porridges.',
       img: photo.spread,
-      alt: 'A table spread of plated dishes and herbs, seen from above'
+      alt: 'A plate of GLS village rice'
     }
   ];
 

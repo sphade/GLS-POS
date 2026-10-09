@@ -4,11 +4,11 @@
   import { photo, src, srcset } from '$lib/site';
 
   const shots = [
-    { k: 'a', img: photo.chocolateCake, cap: 'Dark chocolate cake', alt: 'A chocolate cake with ganache drip and piped chocolate rosettes', s: -8, w: 1000 },
-    { k: 'b', img: photo.raspberrySlice, cap: 'Raspberry cream slice', alt: 'A slice of layered sponge cake topped with fresh raspberries', s: 14, w: 700 },
-    { k: 'c', img: photo.sourdough, cap: 'Morning loaves', alt: 'Rustic round loaves of bread with ears of wheat', s: 6, w: 1100 },
-    { k: 'd', img: photo.cookies, cap: 'Chocolate chip cookies', alt: 'Chocolate chip cookies in a paper-lined basket', s: -12, w: 700 },
-    { k: 'e', img: photo.orangeCake, cap: 'Celebration cakes', alt: 'An orange glazed celebration cake topped with strawberries', s: 10, w: 800 },
+    { k: 'a', img: photo.chocolateCake, cap: 'Cake parfait', alt: 'A GLS cake parfait cup', s: -8, w: 1000 },
+    { k: 'b', img: photo.raspberrySlice, cap: 'Fruit parfait', alt: 'A GLS fruit parfait cup', s: 14, w: 700 },
+    { k: 'c', img: photo.sourdough, cap: 'Butter bread', alt: 'A loaf of GLS butter bread', s: 6, w: 1100 },
+    { k: 'd', img: photo.cookies, cap: 'Chin-chin', alt: 'A pack of GLS chin-chin', s: -12, w: 700 },
+    { k: 'e', img: photo.orangeCake, cap: 'Foil cake', alt: 'A GLS milky foil cake', s: 10, w: 800 },
     { k: 'f', img: photo.bakeryShelf, cap: 'The bread wall', alt: 'Shelves of fresh bread and pastries in a bakery', s: -6, w: 900 }
   ];
 </script>
