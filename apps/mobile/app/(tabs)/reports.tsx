@@ -174,6 +174,34 @@ function ReportsScreen() {
   /** True while the device is pulling from the server (first open, refresh). */
   const syncing = useSyncExternalStore(subscribeSyncActivity, () => getSyncActivity().busy);
 
+  /**
+   * The sync engine is busy constantly (realtime pulls, uploads of every sale,
+   * retries, network changes), so `syncing` alone made the "Updating" strip
+   * flicker forever. Only show it for the FIRST sync after opening Reports,
+   * and only once that sync has run for over a second. Background syncs after
+   * that update the figures silently; pull-to-refresh has its own spinner.
+   */
+  const [firstLoad, setFirstLoad] = useState(true);
+  const sawSync = useRef(false);
+  useEffect(() => {
+    if (!firstLoad) return;
+    if (syncing) sawSync.current = true;
+    else if (sawSync.current) setFirstLoad(false);
+  }, [syncing, firstLoad]);
+  useEffect(() => {
+    const cap = setTimeout(() => setFirstLoad(false), 20_000);
+    return () => clearTimeout(cap);
+  }, []);
+  const [showSyncStrip, setShowSyncStrip] = useState(false);
+  useEffect(() => {
+    if (!(firstLoad && syncing)) {
+      setShowSyncStrip(false);
+      return;
+    }
+    const t = setTimeout(() => setShowSyncStrip(true), 1_000);
+    return () => clearTimeout(t);
+  }, [firstLoad, syncing]);
+
   // `from`/`to` for "Today" etc. move every render (Date.now()), so key the
   // reads on the day + preset instead, or every render re-scanned receipts.
   const fromKey = custom ? custom.from : startOfDay(presetBounds.from);
@@ -430,14 +458,14 @@ function ReportsScreen() {
         onApply={applyRange}
       />
 
-      {syncing && ready && hasData ? (
+      {showSyncStrip && ready && hasData ? (
         <View style={styles.syncBar}>
           <ActivityIndicator size="small" color={colors.primaryDark} />
           <Text style={styles.syncText}>Updating with the latest sales…</Text>
         </View>
       ) : null}
 
-      {!ready || (!hasData && syncing) ? (
+      {!ready || (!hasData && syncing && firstLoad) ? (
         <ScrollView contentContainerStyle={{ paddingBottom: 24 }} scrollEnabled={false}>
           <View style={styles.loadingNote}>
             <ActivityIndicator size="small" color={colors.primaryDark} />
