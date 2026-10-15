@@ -43,6 +43,13 @@
       "when": 1791202014361,
       "tag": "0005_curly_gertrude_yorkes",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792010054952,
+      "tag": "0006_secret_iron_monger",
+      "breakpoints": true
     }
   ]
 }

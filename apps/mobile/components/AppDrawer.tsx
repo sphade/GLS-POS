@@ -36,6 +36,8 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
     entries: [
       { label: "VIP Orders (QR)", icon: "qrcode-scan", route: "/online-orders", needs: "sale:create" },
       { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory", needs: "catalog:write" },
+      { label: "Central Stock", icon: "warehouse", route: "/central-stock", needs: "inventory:adjust" },
+      { label: "Incoming Deliveries", icon: "truck-delivery-outline", route: "/incoming-stock", needs: "inventory:adjust" },
       { label: "Table Management", icon: "table-furniture", route: "/tables", needs: "tables:manage" },
       { label: "Customers Management", icon: "account-group-outline", route: "/customers", needs: "customers:manage" },
       { label: "Staff Management", icon: "account-tie-outline", route: "/staff", needs: "staff:manage" },

@@ -68,6 +68,51 @@ export type AttachableStaff = {
   shops: number;
 };
 
+/** Central-warehouse stock item (global inventory). Quantities are whole base units. */
+export type CentralItem = {
+  id: string;
+  name: string;
+  unit: string;
+  totalStock: number;
+  minStock: number;
+  description: string | null;
+  createdAt?: string | number;
+  updatedAt?: string | number;
+};
+
+export type CentralAllocationStatus = "pending" | "fulfilled" | "cancelled";
+
+/** A send from the centre to a branch, enriched with names for list screens. */
+export type CentralAllocation = {
+  id: string;
+  globalItemId: string;
+  fromStoreId: string;
+  toStoreId: string;
+  productId: string | null;
+  quantity: number;
+  status: CentralAllocationStatus;
+  allocatedAt: string | number;
+  fulfilledAt?: string | number | null;
+  notes: string | null;
+  allocatedByUserId?: string | null;
+  allocatedByName?: string | null;
+  fulfilledByUserId?: string | null;
+  fulfilledByName?: string | null;
+  itemName: string;
+  itemUnit: string;
+  fromStoreName: string;
+  toStoreName: string;
+};
+
+export type StoreProductOption = {
+  id: string;
+  name: string;
+  stock: number | null;
+  stockState: string;
+};
+
+export const CENTRAL_UNITS = ["kg", "liters", "pieces", "bags", "boxes", "cans"] as const;
+
 export const api = {
   /** Stores the signed-in user belongs to. */
   listStores: () => request<StoreMembership[]>("/stores"),
@@ -138,4 +183,34 @@ export const api = {
       headers: { "x-store-id": storeId },
       body: JSON.stringify(body),
     }),
+
+  // --- Central stock hub (warehouse -> branches) ---------------------------
+  //
+  // Control-plane API: needs network + an owner/manager role. Every caller
+  // already handles a failed result, so offline screens show the message
+  // instead of hanging.
+  listCentralItems: () => request<CentralItem[]>("/inventory"),
+  createCentralItem: (body: { name: string; unit: string; totalStock?: number; minStock?: number; description?: string }) =>
+    request<CentralItem>("/inventory", { method: "POST", body: JSON.stringify(body) }),
+  updateCentralItem: (id: string, body: { name?: string; unit?: string; totalStock?: number; minStock?: number; description?: string }) =>
+    request<CentralItem[]>(`/inventory/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteCentralItem: (id: string) =>
+    request<{ message: string }>(`/inventory/${id}`, { method: "DELETE" }),
+
+  listAllocations: (query?: { toStoreId?: string; fromStoreId?: string; status?: CentralAllocationStatus }) => {
+    const params = new URLSearchParams();
+    if (query?.toStoreId) params.set("toStoreId", query.toStoreId);
+    if (query?.fromStoreId) params.set("fromStoreId", query.fromStoreId);
+    if (query?.status) params.set("status", query.status);
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return request<CentralAllocation[]>(`/inventory/allocations${suffix}`);
+  },
+  createAllocation: (body: { globalItemId: string; fromStoreId: string; toStoreId: string; productId?: string; quantity: number; notes?: string }) =>
+    request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }),
+  fulfillAllocation: (id: string) =>
+    request<{ success: boolean; allocationId: string }>(`/inventory/allocations/${id}/fulfill`, { method: "POST" }),
+  cancelAllocation: (id: string) =>
+    request<{ success: boolean; allocationId: string }>(`/inventory/allocations/${id}/cancel`, { method: "POST" }),
+  listStoreProducts: (storeId: string) =>
+    request<StoreProductOption[]>(`/inventory/store-products?storeId=${encodeURIComponent(storeId)}`),
 };

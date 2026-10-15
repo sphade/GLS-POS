@@ -1261,6 +1261,122 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   /**
+   * Receive a central-warehouse delivery into this store's stock.
+   *
+   * Called server-side by the inventory allocation fulfill path (never by
+   * devices directly). It raises one tracked simple product by an integer
+   * quantity and logs a `restock` movement with the allocation as its
+   * reference, so the delivery shows in the product's history timeline and
+   * syncs to every till like any other stock change.
+   *
+   * Product resolution: explicit `productId` wins; otherwise the first live
+   * product whose name matches `globalItemName` case-insensitively is used.
+   * Products with variants are refused — the caller must name the variant —
+   * because raising the parent's simple balance would misstate what can sell.
+   */
+  async receiveCentralDelivery(input: {
+    productId?: string;
+    globalItemName: string;
+    quantity: number;
+    ref: string;
+    note?: string;
+    actor: { id: string; name: string; email?: string; role?: string };
+  }): Promise<
+    | { ok: true; productId: string; productName: string; previousStock: number; stock: number }
+    | { ok: false; error: "unknown_product" | "untracked_product" | "product_has_variants" | "invalid_quantity" }
+  > {
+    const quantity = Math.round(input.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return { ok: false, error: "invalid_quantity" };
+    }
+
+    const live = this.db
+      .select({ id: schema.documents.id, data: schema.documents.data })
+      .from(schema.documents)
+      .where(
+        and(eq(schema.documents.collection, "products"), eq(schema.documents.deleted, false)),
+      )
+      .all();
+
+    let match: { id: string; product: StoredProduct } | null = null;
+    if (input.productId) {
+      const row = live.find((r) => r.id === input.productId);
+      if (row) match = { id: row.id, product: JSON.parse(row.data) as StoredProduct };
+    } else {
+      const wanted = input.globalItemName.trim().toLowerCase();
+      for (const row of live) {
+        const product = JSON.parse(row.data) as StoredProduct;
+        if (product.name.trim().toLowerCase() === wanted) {
+          match = { id: row.id, product };
+          break;
+        }
+      }
+    }
+
+    if (!match) return { ok: false, error: "unknown_product" };
+    const { product } = match;
+    if (product.variants?.length) return { ok: false, error: "product_has_variants" };
+    const previous = product.stockQuantity;
+    if (previous === null || previous === undefined) {
+      return { ok: false, error: "untracked_product" };
+    }
+
+    const next = previous + quantity;
+    const updated: StoredProduct = { ...product, stockQuantity: next };
+    let seq = this.currentSeq();
+    const now = Date.now();
+
+    seq += 1;
+    this.db
+      .insert(schema.documents)
+      .values({
+        collection: "products",
+        id: product.id,
+        data: JSON.stringify(updated),
+        updatedAt: now,
+        deleted: false,
+        serverSeq: seq,
+      })
+      .onConflictDoUpdate({
+        target: [schema.documents.collection, schema.documents.id],
+        set: { data: JSON.stringify(updated), updatedAt: now, serverSeq: seq },
+      })
+      .run();
+
+    seq += 1;
+    const movementId = `mov_central_${input.ref}_${now}_${Math.floor(Math.random() * 1e4)}`;
+    this.db
+      .insert(schema.documents)
+      .values({
+        collection: "stock_movements",
+        id: movementId,
+        data: JSON.stringify({
+          id: movementId,
+          productId: product.id,
+          productName: product.name,
+          reason: "restock",
+          delta: quantity,
+          baseStock: previous,
+          resulting: next,
+          at: now,
+          ref: `central:${input.ref}`,
+          note: (input.note ?? `Central delivery of ${quantity} × ${input.globalItemName}`).slice(0, 240),
+          actorId: input.actor.id,
+          actorName: input.actor.name,
+          actorEmail: input.actor.email,
+          actorRole: input.actor.role,
+        }),
+        updatedAt: now,
+        deleted: false,
+        serverSeq: seq,
+      })
+      .run();
+
+    this.broadcast("changes");
+    return { ok: true, productId: product.id, productName: product.name, previousStock: previous, stock: next };
+  }
+
+  /**
    * Raw document changes since a sequence, for the public events feed. Reuses
    * the same monotonic `server_seq` the device sync uses, so integrators get an
    * exactly-resumable cursor for free.

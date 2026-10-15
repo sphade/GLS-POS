@@ -41,6 +41,12 @@ export const inventoryAllocations = sqliteTable("inventory_allocations", {
     .notNull(),
   toStoreId: text("to_store_id") // The destination (branch)
     .notNull(),
+  /**
+   * Destination product in the receiving store whose DO stock is raised on
+   * fulfill. Nullable so rows created before the picker existed stay valid;
+   * when null the server matches by global-item name instead.
+   */
+  productId: text("product_id"),
   quantity: integer("quantity").notNull(), // Amount allocated
   status: text("status", { 
     enum: ["pending", "fulfilled", "cancelled"] 
@@ -48,6 +54,14 @@ export const inventoryAllocations = sqliteTable("inventory_allocations", {
   allocatedAt: integer("allocated_at", { mode: "timestamp" }).notNull(),
   fulfilledAt: integer("fulfilled_at", { mode: "timestamp" }), // When received
   notes: text("notes"), // Optional: reason, order reference, etc.
+  /**
+   * Audit trail: who sent / confirmed each movement. Nullable so the existing
+   * staging rows (written before attribution existed) stay valid.
+   */
+  allocatedByUserId: text("allocated_by_user_id"),
+  allocatedByName: text("allocated_by_name"),
+  fulfilledByUserId: text("fulfilled_by_user_id"),
+  fulfilledByName: text("fulfilled_by_name"),
 });
 
 // --- Store-level conversion rates (bulk → portion) ---

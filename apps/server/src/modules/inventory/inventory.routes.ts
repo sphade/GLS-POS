@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { z } from "zod";
 import type { AppEnv } from "../../context.js";
 import { ok } from "../../lib/response.js";
 import { validate } from "../../lib/validator.js";
@@ -12,32 +13,51 @@ import {
   createAllocation,
   fulfillAllocation,
   cancelAllocation,
-  getConversionRate,
+  listStoreProducts,
   upsertConversionRate,
   listConversionRates,
   recordConversion,
   listConversions,
   listStoresForUser,
+  requireCentralSender,
+  requireMembership,
+  requireInventoryAdjust,
 } from "./inventory.service.js";
-import { createGlobalInventoryItemSchema, updateGlobalInventoryItemSchema, createAllocationSchema } from "./inventory.schema.js";
+import {
+  createGlobalInventoryItemSchema,
+  updateGlobalInventoryItemSchema,
+  createAllocationSchema,
+  listAllocationsQuerySchema,
+  upsertConversionRateSchema,
+  recordConversionSchema,
+} from "./inventory.schema.js";
 
 /**
  * Centralized inventory distribution management routes.
- * 
+ *
+ * The centre holds bulk stock in `global_inventory_items`; sending stock to a
+ * branch writes a `inventory_allocations` row and — on confirm — raises that
+ * branch's Durable Object product stock with a `restock` movement, so every
+ * till sees the delivery on its next sync.
+ *
  * Endpoints:
- * - /inventory - Global inventory items (CRUD)
- * - /inventory/allocations - Allocations between stores
+ * - /inventory - Global inventory items (CRUD, owners/managers only)
+ * - /inventory/allocations - Sends between stores (send + confirm)
+ * - /inventory/store-products - Destination catalog for the Send picker
  * - /inventory/conversion-rates - Store-level conversion rates
  * - /inventory/conversions - Track bulk-to-portions conversions
  */
 
 export const inventory = new Hono<AppEnv>();
 
+const storeIdQuerySchema = z.object({ storeId: z.string().min(1) });
+
 // --- Global Inventory Items ---
 
 inventory.get("/", async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
+  await requireCentralSender(c.env, user.id);
   const items = await listGlobalInventoryItems(c.env);
   return ok(c, items);
 });
@@ -45,23 +65,25 @@ inventory.get("/", async (c) => {
 inventory.post("/", validate("json", createGlobalInventoryItemSchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const stores = await listStoresForUser(c.env, user.id);
-  
-  if (stores.length === 0) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
+  await requireCentralSender(c.env, user.id);
 
   const item = await createGlobalInventoryItem(c.env, c.req.valid("json"));
   return ok(c, item, 201);
 });
 
 inventory.put("/:id", validate("json", updateGlobalInventoryItemSchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  await requireCentralSender(c.env, user.id);
   const itemId = c.req.param("id");
   const item = await updateGlobalInventoryItem(c.env, itemId, c.req.valid("json"));
   return ok(c, item);
 });
 
 inventory.delete("/:id", async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  await requireCentralSender(c.env, user.id);
   const itemId = c.req.param("id");
   await deleteGlobalInventoryItem(c.env, itemId);
   return ok(c, { message: "Item deleted" });
@@ -69,28 +91,31 @@ inventory.delete("/:id", async (c) => {
 
 // --- Allocations ---
 
-inventory.get("/allocations", async (c) => {
+inventory.get("/allocations", validate("query", listAllocationsQuerySchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const stores = await listStoresForUser(c.env, user.id);
-  
-  if (stores.length === 0) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
+  const query = c.req.valid("query");
 
-  const firstStore = stores[0];
-  if (!firstStore) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
+  if (query.toStoreId) await requireMembership(c.env, user.id, query.toStoreId);
+  if (query.fromStoreId) await requireMembership(c.env, user.id, query.fromStoreId);
 
-  const allocations = await listAllocations(c.env, firstStore.id);
+  const memberStoreIds =
+    query.toStoreId || query.fromStoreId
+      ? undefined
+      : (await listStoresForUser(c.env, user.id)).map((s) => s.id);
+
+  const allocations = await listAllocations(c.env, { ...query, memberStoreIds });
   return ok(c, allocations);
 });
 
 inventory.post("/allocations", validate("json", createAllocationSchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const allocation = await createAllocation(c.env, c.req.valid("json"));
+  const allocation = await createAllocation(c.env, c.req.valid("json"), {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+  });
   return ok(c, allocation, 201);
 });
 
@@ -98,7 +123,11 @@ inventory.post("/allocations/:id/fulfill", async (c) => {
   const allocationId = c.req.param("id");
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const fulfillment = await fulfillAllocation(c.env, allocationId, user.id);
+  const fulfillment = await fulfillAllocation(c.env, allocationId, {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+  });
   return ok(c, fulfillment);
 });
 
@@ -106,97 +135,79 @@ inventory.post("/allocations/:id/cancel", async (c) => {
   const allocationId = c.req.param("id");
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const cancellation = await cancelAllocation(c.env, allocationId);
+  const cancellation = await cancelAllocation(c.env, allocationId, user.id);
   return ok(c, cancellation);
+});
+
+// --- Destination catalog for the Send-to-store picker ---
+
+inventory.get("/store-products", validate("query", storeIdQuerySchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { storeId } = c.req.valid("query");
+  await requireMembership(c.env, user.id, storeId);
+  return ok(c, await listStoreProducts(c.env, storeId));
 });
 
 // --- Conversion Rates ---
 
+async function resolveRateStoreId(c: Context<AppEnv>): Promise<string> {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const storeId = c.req.query("storeId");
+  if (storeId) {
+    await requireMembership(c.env, user.id, storeId);
+    return storeId;
+  }
+  const stores = await listStoresForUser(c.env, user.id);
+  if (stores.length === 0) {
+    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
+  }
+  const firstStore = stores[0];
+  if (!firstStore) {
+    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
+  }
+  return firstStore.id;
+}
+
 inventory.get("/conversion-rates", async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const stores = await listStoresForUser(c.env, user.id);
-  
-  if (stores.length === 0) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
-
-  const firstStore = stores[0];
-  if (!firstStore) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
-
-  const rates = await listConversionRates(c.env, firstStore.id);
+  const storeId = await resolveRateStoreId(c);
+  const rates = await listConversionRates(c.env, storeId);
   return ok(c, rates);
 });
 
-inventory.post("/conversion-rates", async (c) => {
+inventory.post("/conversion-rates", validate("json", upsertConversionRateSchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const stores = await listStoresForUser(c.env, user.id);
-  
-  if (stores.length === 0) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
+  const storeId = await resolveRateStoreId(c);
+  await requireInventoryAdjust(c.env, user.id, storeId);
 
-  const firstStore = stores[0];
-  if (!firstStore) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
-
-  const body = await c.req.json();
-  const { globalItemId, portionName, quantityPerPortion } = body;
-
-  if (!globalItemId || !portionName || quantityPerPortion === undefined) {
-    throw HttpError.badRequest("Missing required fields: globalItemId, portionName, quantityPerPortion", "missing_fields");
-  }
-
-  const rate = await upsertConversionRate(c.env, firstStore.id, globalItemId, portionName, quantityPerPortion);
+  const { globalItemId, portionName, quantityPerPortion } = c.req.valid("json");
+  const rate = await upsertConversionRate(c.env, storeId, globalItemId, portionName, quantityPerPortion);
   return ok(c, rate, 201);
 });
 
 // --- Conversions (bulk to portions) ---
 
-inventory.post("/conversions", async (c) => {
+inventory.post("/conversions", validate("json", recordConversionSchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const stores = await listStoresForUser(c.env, user.id);
-  
-  if (stores.length === 0) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
+  const storeId = await resolveRateStoreId(c);
+  await requireInventoryAdjust(c.env, user.id, storeId);
 
-  const firstStore = stores[0];
-  if (!firstStore) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
-
-  const body = await c.req.json();
-  const { globalItemId, bulkQuantityUsed, portionsProduced, notes } = body;
-
-  if (!globalItemId || bulkQuantityUsed === undefined || portionsProduced === undefined) {
-    throw HttpError.badRequest("Missing required fields: globalItemId, bulkQuantityUsed, portionsProduced", "missing_fields");
-  }
-
-  const conversion = await recordConversion(c.env, firstStore.id, globalItemId, bulkQuantityUsed, portionsProduced, notes);
+  const { globalItemId, bulkQuantityUsed, portionsProduced, notes } = c.req.valid("json");
+  const conversion = await recordConversion(c.env, storeId, globalItemId, bulkQuantityUsed, portionsProduced, notes);
   return ok(c, conversion, 201);
 });
 
 inventory.get("/conversions", async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  const stores = await listStoresForUser(c.env, user.id);
-  
-  if (stores.length === 0) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
+  const storeId = await resolveRateStoreId(c);
 
-  const firstStore = stores[0];
-  if (!firstStore) {
-    throw HttpError.forbidden("You do not have access to any stores", "no_stores");
-  }
-
-  const limit = parseInt(c.req.query("limit") || "50");
-  const conversions = await listConversions(c.env, firstStore.id, limit);
+  const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 100);
+  const conversions = await listConversions(c.env, storeId, limit);
   return ok(c, conversions);
 });
