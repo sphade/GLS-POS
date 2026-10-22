@@ -94,7 +94,11 @@ export type StockMovementReason =
   | "initial"
   | "restock"
   | "return"
-  | "waste";
+  | "waste"
+  /** Input product consumed by a production run. */
+  | "production_out"
+  /** Output product created by a production run. */
+  | "production_in";
 
 /**
  * Append-only inventory operation. The product document stores the materialized
@@ -451,6 +455,9 @@ function syncMovementPermission(change: SyncChange): Permission | null {
   }
   if (movement.reason === "waste") {
     return movement.delta <= 0 ? "inventory:adjust" : null;
+  }
+  if (movement.reason === "production_out" || movement.reason === "production_in") {
+    return "inventory:adjust";
   }
   if (
     movement.reason === "adjustment" ||

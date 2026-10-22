@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 /**
  * Global inventory schema for centralized distribution management.
@@ -104,3 +104,38 @@ export const inventoryConversions = sqliteTable("inventory_conversions", {
   convertedAt: integer("converted_at", { mode: "timestamp" }).notNull(),
   notes: text("notes"), // Optional: batch reference
 });
+
+// --- Production rules (branch product -> branch product) ---
+
+/**
+ * An owner-defined yield rule between two products in the same store's
+ * catalog: `inputQty` units of the input are used up to make `outputQty` units
+ * of the output. Example: 1 bag of rice -> 5 plates of jollof rice.
+ *
+ * The rule is a *default* for the production screen, not a hard constraint:
+ * the person running the batch records what they actually used and made, so
+ * real yield can drift from the recipe and be calibrated later. Stock itself
+ * lives in the store Durable Object; this table only stores the recipe.
+ */
+export const inventoryProductionRules = sqliteTable(
+  "inventory_production_rules",
+  {
+    id: text("id").primaryKey(),
+    storeId: text("store_id").notNull(),
+    inputProductId: text("input_product_id").notNull(),
+    outputProductId: text("output_product_id").notNull(),
+    inputQty: integer("input_qty").notNull(),
+    outputQty: integer("output_qty").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+  },
+  (table) => [
+    index("inventory_production_rules_store_idx").on(table.storeId),
+    // One rule per pair per store; saving the same pair updates its numbers.
+    uniqueIndex("inventory_production_rules_pair_idx").on(
+      table.storeId,
+      table.inputProductId,
+      table.outputProductId,
+    ),
+  ],
+);

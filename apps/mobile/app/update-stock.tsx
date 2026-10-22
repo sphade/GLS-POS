@@ -35,6 +35,8 @@ const REASON: Record<StockMovement["reason"], { label: string; icon: keyof typeo
   restock: { label: "Added", icon: "add-circle-outline" },
   return: { label: "Returned", icon: "return-down-back-outline" },
   waste: { label: "Waste", icon: "trash-outline" },
+  production_out: { label: "Used to produce", icon: "flask-outline" },
+  production_in: { label: "Produced", icon: "checkmark-done-outline" },
 };
 
 export default function UpdateStockScreen() {

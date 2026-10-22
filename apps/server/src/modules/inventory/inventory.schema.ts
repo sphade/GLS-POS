@@ -68,3 +68,31 @@ export const recordConversionSchema = z.object({
 });
 
 export type RecordConversionInput = z.infer<typeof recordConversionSchema>;
+
+// --- Production rules (branch product -> branch product) ---
+
+export const upsertProductionRuleSchema = z.object({
+  storeId: z.string().min(1, "Store ID is required"),
+  inputProductId: z.string().min(1, "Product used is required"),
+  outputProductId: z.string().min(1, "Product made is required"),
+  inputQty: z.number().int().min(1, "Quantity used must be at least 1"),
+  outputQty: z.number().int().min(1, "Quantity made must be at least 1"),
+});
+
+export type UpsertProductionRuleInput = z.infer<typeof upsertProductionRuleSchema>;
+
+export const produceStockSchema = z.object({
+  storeId: z.string().min(1, "Store ID is required"),
+  ruleId: z.string().min(1, "Production rule is required"),
+  inputQty: z.number().int().min(1, "Quantity used must be at least 1"),
+  outputQty: z.number().int().min(1, "Quantity made must be at least 1"),
+  /** Client-generated idempotency key; repeating it must not produce twice. */
+  ref: z
+    .string()
+    .min(4)
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]+$/, "Reference must be letters, numbers, - or _"),
+  note: z.string().max(240).optional(),
+});
+
+export type ProduceStockInput = z.infer<typeof produceStockSchema>;

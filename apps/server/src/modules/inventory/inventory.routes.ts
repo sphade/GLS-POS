@@ -18,6 +18,10 @@ import {
   listConversionRates,
   recordConversion,
   listConversions,
+  listProductionRules,
+  upsertProductionRule,
+  deleteProductionRule,
+  produceStock,
   listStoresForUser,
   requireCentralSender,
   requireMembership,
@@ -30,6 +34,8 @@ import {
   listAllocationsQuerySchema,
   upsertConversionRateSchema,
   recordConversionSchema,
+  upsertProductionRuleSchema,
+  produceStockSchema,
 } from "./inventory.schema.js";
 
 /**
@@ -46,6 +52,8 @@ import {
  * - /inventory/store-products - Destination catalog for the Send picker
  * - /inventory/conversion-rates - Store-level conversion rates
  * - /inventory/conversions - Track bulk-to-portions conversions
+ * - /inventory/production-rules - Owner-defined branch yield rules
+ * - /inventory/produce - Run one batch (consume input, add output)
  */
 
 export const inventory = new Hono<AppEnv>();
@@ -210,4 +218,47 @@ inventory.get("/conversions", async (c) => {
   const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 100);
   const conversions = await listConversions(c.env, storeId, limit);
   return ok(c, conversions);
+});
+
+// --- Production (branch product -> branch product) ---
+
+inventory.get("/production-rules", validate("query", storeIdQuerySchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { storeId } = c.req.valid("query");
+  await requireMembership(c.env, user.id, storeId);
+  return ok(c, await listProductionRules(c.env, storeId));
+});
+
+inventory.post("/production-rules", validate("json", upsertProductionRuleSchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { storeId, ...rule } = c.req.valid("json");
+  await requireInventoryAdjust(c.env, user.id, storeId);
+  return ok(c, await upsertProductionRule(c.env, storeId, rule), 201);
+});
+
+inventory.delete("/production-rules/:id", validate("query", storeIdQuerySchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { storeId } = c.req.valid("query");
+  await requireInventoryAdjust(c.env, user.id, storeId);
+  return ok(c, await deleteProductionRule(c.env, storeId, c.req.param("id")));
+});
+
+inventory.post("/produce", validate("json", produceStockSchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { storeId, ruleId, inputQty, outputQty, ref, note } = c.req.valid("json");
+  await requireInventoryAdjust(c.env, user.id, storeId);
+  return ok(
+    c,
+    await produceStock(
+      c.env,
+      storeId,
+      { ruleId, inputQty, outputQty, ref, note },
+      { id: user.id, name: user.name, email: user.email },
+    ),
+    201,
+  );
 });
