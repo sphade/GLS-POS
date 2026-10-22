@@ -9,7 +9,7 @@ import { OFFLINE_MODE } from "./offline";
  */
 const REQUEST_TIMEOUT_MS = 12_000;
 
-async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
+async function request<T>(path: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ApiResult<T>> {
   // Offline builds never touch the network; every caller already handles a
   // failed result, so screens degrade with a truthful message instead of
   // hanging on a fetch that can never succeed.
@@ -20,7 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort();
   init?.signal?.addEventListener("abort", abortFromCaller, { once: true });
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${API_URL}/api${path}`, {
       ...init,
@@ -109,6 +109,29 @@ export type StoreProductOption = {
   name: string;
   stock: number | null;
   stockState: string;
+};
+
+/** Owner-defined yield between two branch products: inputQty of one makes outputQty of the other. */
+export type ProductionRule = {
+  id: string;
+  storeId: string;
+  inputProductId: string;
+  outputProductId: string;
+  inputQty: number;
+  outputQty: number;
+};
+
+/** Result of one production run, with the stocks after the writes. */
+export type ProductionResult = {
+  success: boolean;
+  ruleId: string;
+  duplicate: boolean;
+  inputProductId: string;
+  outputProductId: string;
+  inputName: string;
+  outputName: string;
+  inputStock: number;
+  outputStock: number;
 };
 
 export const CENTRAL_UNITS = ["kg", "liters", "pieces", "bags", "boxes", "cans"] as const;
@@ -208,9 +231,52 @@ export const api = {
   createAllocation: (body: { globalItemId: string; fromStoreId: string; toStoreId: string; productId?: string; quantity: number; notes?: string }) =>
     request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }),
   fulfillAllocation: (id: string) =>
-    request<{ success: boolean; allocationId: string }>(`/inventory/allocations/${id}/fulfill`, { method: "POST" }),
+    // Deliberately longer than the default: the server wakes the destination
+    // store's Durable Object and writes there before answering, which can
+    // outlast 12s on a cold store. Retrying is safe (the server dedupes).
+    request<{ success: boolean; allocationId: string }>(
+      `/inventory/allocations/${id}/fulfill`,
+      { method: "POST" },
+      30_000,
+    ),
   cancelAllocation: (id: string) =>
     request<{ success: boolean; allocationId: string }>(`/inventory/allocations/${id}/cancel`, { method: "POST" }),
   listStoreProducts: (storeId: string) =>
     request<StoreProductOption[]>(`/inventory/store-products?storeId=${encodeURIComponent(storeId)}`),
+
+  listProductionRules: (storeId: string) =>
+    request<ProductionRule[]>(
+      `/inventory/production-rules?storeId=${encodeURIComponent(storeId)}`,
+    ),
+  saveProductionRule: (body: {
+    storeId: string;
+    inputProductId: string;
+    outputProductId: string;
+    inputQty: number;
+    outputQty: number;
+  }) =>
+    request<ProductionRule>("/inventory/production-rules", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteProductionRule: (id: string, storeId: string) =>
+    request<{ success: boolean; id: string }>(
+      `/inventory/production-rules/${encodeURIComponent(id)}?storeId=${encodeURIComponent(storeId)}`,
+      { method: "DELETE" },
+    ),
+  produce: (body: {
+    storeId: string;
+    ruleId: string;
+    inputQty: number;
+    outputQty: number;
+    ref: string;
+    note?: string;
+  }) =>
+    // Same headroom as a delivery confirm: the store Durable Object wakes and
+    // commits two stock writes before answering. Retrying is safe.
+    request<ProductionResult>(
+      "/inventory/produce",
+      { method: "POST", body: JSON.stringify(body) },
+      30_000,
+    ),
 };

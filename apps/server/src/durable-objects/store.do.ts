@@ -1282,12 +1282,38 @@ export class StoreDurableObject extends DurableObject<Env> {
     note?: string;
     actor: { id: string; name: string; email?: string; role?: string };
   }): Promise<
-    | { ok: true; productId: string; productName: string; previousStock: number; stock: number }
+    | { ok: true; duplicate?: boolean; productId: string; productName: string; previousStock: number; stock: number }
     | { ok: false; error: "unknown_product" | "untracked_product" | "product_has_variants" | "invalid_quantity" }
   > {
     const quantity = Math.round(input.quantity);
     if (!Number.isFinite(quantity) || quantity <= 0) {
       return { ok: false, error: "invalid_quantity" };
+    }
+
+    // The allocation id is the idempotency key. A phone that timed out may
+    // retry while the first call is still in flight; without this, both would
+    // add the delivery and the branch would be overstocked. The movement id is
+    // therefore deterministic, and finding it means "already applied".
+    const movementId = `mov_central_${input.ref}`;
+    const already = this.db
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "stock_movements"),
+          eq(schema.documents.id, movementId),
+        ),
+      )
+      .get();
+    if (already) {
+      return {
+        ok: true,
+        duplicate: true,
+        productId: input.productId ?? "",
+        productName: input.globalItemName,
+        previousStock: 0,
+        stock: 0,
+      };
     }
 
     const live = this.db
@@ -1344,7 +1370,6 @@ export class StoreDurableObject extends DurableObject<Env> {
       .run();
 
     seq += 1;
-    const movementId = `mov_central_${input.ref}_${now}_${Math.floor(Math.random() * 1e4)}`;
     this.db
       .insert(schema.documents)
       .values({
@@ -1374,6 +1399,226 @@ export class StoreDurableObject extends DurableObject<Env> {
 
     this.broadcast("changes");
     return { ok: true, productId: product.id, productName: product.name, previousStock: previous, stock: next };
+  }
+
+  /**
+   * Record one production run: consume `inputQty` of one tracked product and
+   * add `outputQty` of another.
+   *
+   * Both stock writes happen in one SQLite transaction, so a failure can never
+   * leave the input consumed without the output credited. `ref` is the client's
+   * idempotency key: if the phone timed out after the write, repeating the same
+   * run returns `duplicate` instead of producing a second batch.
+   *
+   * Products are looked up by primary key rather than scanning the catalog —
+   * the branch may hold hundreds of products and this is on the hot path.
+   */
+  async produceFromStock(input: {
+    inputProductId: string;
+    outputProductId: string;
+    inputQty: number;
+    outputQty: number;
+    ref: string;
+    note?: string;
+    actor: { id: string; name: string; email?: string; role?: string };
+  }): Promise<
+    | {
+        ok: true;
+        duplicate?: boolean;
+        inputName: string;
+        outputName: string;
+        inputStock: number;
+        outputStock: number;
+      }
+    | {
+        ok: false;
+        error:
+          | "unknown_product"
+          | "untracked_product"
+          | "product_has_variants"
+          | "invalid_quantity"
+          | "same_product"
+          | "insufficient_stock";
+        available?: number;
+      }
+  > {
+    const inputQty = Math.round(input.inputQty);
+    const outputQty = Math.round(input.outputQty);
+    if (
+      !Number.isFinite(inputQty) ||
+      inputQty <= 0 ||
+      !Number.isFinite(outputQty) ||
+      outputQty <= 0
+    ) {
+      return { ok: false, error: "invalid_quantity" };
+    }
+    if (input.inputProductId === input.outputProductId) {
+      return { ok: false, error: "same_product" };
+    }
+
+    const loadProduct = (id: string): StoredProduct | null => {
+      const row = this.db
+        .select({ data: schema.documents.data })
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.collection, "products"),
+            eq(schema.documents.id, id),
+            eq(schema.documents.deleted, false),
+          ),
+        )
+        .get();
+      return row ? (JSON.parse(row.data) as StoredProduct) : null;
+    };
+
+    const outMovementId = `mov_prod_${input.ref}_out`;
+    const already = this.db
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "stock_movements"),
+          eq(schema.documents.id, outMovementId),
+        ),
+      )
+      .get();
+    if (already) {
+      return {
+        ok: true,
+        duplicate: true,
+        inputName: "",
+        outputName: "",
+        inputStock: 0,
+        outputStock: 0,
+      };
+    }
+
+    const from = loadProduct(input.inputProductId);
+    const to = loadProduct(input.outputProductId);
+    if (!from || !to) return { ok: false, error: "unknown_product" };
+    if (from.variants?.length || to.variants?.length) {
+      return { ok: false, error: "product_has_variants" };
+    }
+
+    const fromStock = from.stockQuantity;
+    const toStock = to.stockQuantity;
+    if (fromStock === null || fromStock === undefined || toStock === null || toStock === undefined) {
+      return { ok: false, error: "untracked_product" };
+    }
+    if (fromStock < inputQty) {
+      return { ok: false, error: "insufficient_stock", available: fromStock };
+    }
+
+    const nextFrom = fromStock - inputQty;
+    const nextTo = toStock + outputQty;
+    const now = Date.now();
+    const note = input.note?.trim().slice(0, 240) || `${inputQty} ${from.name} used to make ${outputQty} ${to.name}`;
+    let seq = this.currentSeq();
+
+    this.db.transaction((tx) => {
+      seq += 1;
+      tx.insert(schema.documents)
+        .values({
+          collection: "products",
+          id: from.id,
+          data: JSON.stringify({ ...from, stockQuantity: nextFrom }),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .onConflictDoUpdate({
+          target: [schema.documents.collection, schema.documents.id],
+          set: {
+            data: JSON.stringify({ ...from, stockQuantity: nextFrom }),
+            updatedAt: now,
+            serverSeq: seq,
+          },
+        })
+        .run();
+
+      seq += 1;
+      tx.insert(schema.documents)
+        .values({
+          collection: "stock_movements",
+          id: outMovementId,
+          data: JSON.stringify({
+            id: outMovementId,
+            productId: from.id,
+            productName: from.name,
+            reason: "production_out",
+            delta: -inputQty,
+            baseStock: fromStock,
+            resulting: nextFrom,
+            at: now,
+            ref: `production:${input.ref}`,
+            note: note.slice(0, 240),
+            actorId: input.actor.id,
+            actorName: input.actor.name,
+            actorEmail: input.actor.email,
+            actorRole: input.actor.role,
+          }),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .run();
+
+      seq += 1;
+      tx.insert(schema.documents)
+        .values({
+          collection: "products",
+          id: to.id,
+          data: JSON.stringify({ ...to, stockQuantity: nextTo }),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .onConflictDoUpdate({
+          target: [schema.documents.collection, schema.documents.id],
+          set: {
+            data: JSON.stringify({ ...to, stockQuantity: nextTo }),
+            updatedAt: now,
+            serverSeq: seq,
+          },
+        })
+        .run();
+
+      seq += 1;
+      tx.insert(schema.documents)
+        .values({
+          collection: "stock_movements",
+          id: `mov_prod_${input.ref}_in`,
+          data: JSON.stringify({
+            id: `mov_prod_${input.ref}_in`,
+            productId: to.id,
+            productName: to.name,
+            reason: "production_in",
+            delta: outputQty,
+            baseStock: toStock,
+            resulting: nextTo,
+            at: now,
+            ref: `production:${input.ref}`,
+            note: note.slice(0, 240),
+            actorId: input.actor.id,
+            actorName: input.actor.name,
+            actorEmail: input.actor.email,
+            actorRole: input.actor.role,
+          }),
+          updatedAt: now,
+          deleted: false,
+          serverSeq: seq,
+        })
+        .run();
+    });
+
+    this.broadcast("changes");
+    return {
+      ok: true,
+      inputName: from.name,
+      outputName: to.name,
+      inputStock: nextFrom,
+      outputStock: nextTo,
+    };
   }
 
   /**

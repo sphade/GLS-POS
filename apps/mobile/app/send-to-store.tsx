@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, PickerCard, formStyles } from "@/components/form";
+import { PickerSheet, type PickerOption } from "@/components/PickerSheet";
 import { api, type CentralItem, type StoreProductOption } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
@@ -38,7 +38,7 @@ export default function SendToStoreScreen() {
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
 
-  const [picker, setPicker] = useState<null | { title: string; options: { id: string; label: string; hint?: string }[]; onPick: (id: string) => void }>(null);
+  const [picker, setPicker] = useState<null | { title: string; options: PickerOption[]; onPick: (id: string) => void }>(null);
 
   useEffect(() => {
     void (async () => {
@@ -87,14 +87,12 @@ export default function SendToStoreScreen() {
   const valid =
     !!item && !!fromStoreId && !!toStoreId && fromStoreId !== toStoreId && validQty && !sending;
 
-  const openPicker = (
-    title: string,
-    options: { id: string; label: string; hint?: string }[],
-    onPick: (id: string) => void,
-  ) => {
+  const openPicker = (title: string, options: PickerOption[], onPick: (id: string) => void) => {
     feedbackTap();
     setPicker({ title, options, onPick });
   };
+
+  const closePicker = () => setPicker(null);
 
   const submit = async () => {
     if (!valid || !item || !fromStoreId || !toStoreId) return;
@@ -153,7 +151,7 @@ export default function SendToStoreScreen() {
                 items.map((i) => ({ id: i.id, label: i.name, hint: `${i.totalStock} ${i.unit}` })),
                 (id) => {
                   setItemId(id);
-                  setPicker(null);
+                  closePicker();
                 },
               )
             }
@@ -171,7 +169,7 @@ export default function SendToStoreScreen() {
                 (id) => {
                   setFromStoreId(id);
                   if (id === toStoreId) setToStoreId(undefined);
-                  setPicker(null);
+                  closePicker();
                 },
               )
             }
@@ -192,7 +190,7 @@ export default function SendToStoreScreen() {
               }
               openPicker("Receiving store", options, (id) => {
                 setToStoreId(id);
-                setPicker(null);
+                closePicker();
               });
             }}
           />
@@ -224,7 +222,7 @@ export default function SendToStoreScreen() {
                 ),
                 (id) => {
                   setProductId(id === "__none__" ? undefined : id);
-                  setPicker(null);
+                  closePicker();
                 },
               );
             }}
@@ -257,33 +255,13 @@ export default function SendToStoreScreen() {
         </ScrollView>
       )}
 
-      <Modal visible={!!picker} transparent animationType="fade" onRequestClose={() => setPicker(null)}>
-        <View style={styles.backdrop}>
-          <View style={styles.sheet}>
-            <View style={styles.sheetHead}>
-              <Text style={styles.sheetTitle}>{picker?.title.toUpperCase()}</Text>
-              <Pressable onPress={() => setPicker(null)} hitSlop={8}>
-                <Ionicons name="close" size={24} color={colors.primary} />
-              </Pressable>
-            </View>
-            <FlatList
-              data={picker?.options ?? []}
-              keyExtractor={(o) => o.id}
-              renderItem={({ item: option }) => (
-                <Pressable
-                  style={styles.option}
-                  onPress={() => picker?.onPick(option.id)}
-                  android_ripple={{ color: "#00000010" }}
-                >
-                  <Text style={styles.optionLabel}>{option.label}</Text>
-                  {!!option.hint && <Text style={styles.optionHint}>{option.hint}</Text>}
-                </Pressable>
-              )}
-              ListEmptyComponent={<Text style={styles.optionHint}>Nothing to choose</Text>}
-            />
-          </View>
-        </View>
-      </Modal>
+      <PickerSheet
+        visible={!!picker}
+        title={picker?.title ?? ""}
+        options={picker?.options ?? []}
+        onPick={(id) => picker?.onPick(id)}
+        onClose={closePicker}
+      />
     </SafeAreaView>
   );
 }
@@ -292,11 +270,4 @@ const styles = StyleSheet.create({
   warn: { color: colors.red500, fontSize: 12, fontWeight: "600", marginBottom: 8, marginLeft: 4 },
   blocked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30 },
   blockedText: { color: colors.grey600, textAlign: "center" },
-  backdrop: { flex: 1, backgroundColor: "#00000066", justifyContent: "flex-end" },
-  sheet: { backgroundColor: colors.white, borderTopLeftRadius: 12, borderTopRightRadius: 12, maxHeight: "70%", paddingBottom: 20 },
-  sheetHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 16 },
-  sheetTitle: { fontSize: 15, fontWeight: "800", color: colors.primary, letterSpacing: 0.5 },
-  option: { paddingHorizontal: 16, paddingVertical: 13, borderTopWidth: StyleSheet.hairlineWidth, borderColor: colors.grey300 },
-  optionLabel: { fontSize: 15, fontWeight: "600", color: colors.grey900 },
-  optionHint: { fontSize: 12, color: colors.grey500, marginTop: 2, paddingHorizontal: 16 },
 });

@@ -34,3 +34,27 @@ export function searchKeyOf(item: { name: string }): string {
 export function itemMatchesSearch(item: { name: string }, term: string): boolean {
   return term.length === 0 || searchKeyOf(item).includes(term);
 }
+
+/**
+ * Lenient match for short picker lists (choose a product, a store, an item).
+ *
+ * Starts with the same substring test, then falls back to "every character of
+ * the query appears in order" so a half-remembered label still finds its row —
+ * "rce" and "rice bag" both land on "Rice — 50kg bag". Order-sensitive on
+ * purpose: it is cheap, predictable, and good enough for a few hundred rows.
+ * `query` is expected to be trimmed and lower-cased by the caller.
+ */
+export function fuzzyMatches(text: string, query: string): boolean {
+  if (query.length === 0) return true;
+  const haystack = text.toLowerCase();
+  if (haystack.includes(query)) return true;
+
+  let cursor = 0;
+  for (const char of query) {
+    if (char === " ") continue;
+    const found = haystack.indexOf(char, cursor);
+    if (found === -1) return false;
+    cursor = found + 1;
+  }
+  return true;
+}

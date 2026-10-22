@@ -72,7 +72,12 @@ export default function IncomingStockScreen() {
               const res = await api.fulfillAllocation(allocation.id);
               setActing(null);
               if (!res.ok) {
-                Alert.alert("Could not confirm", res.error.message);
+                Alert.alert(
+                  "Could not confirm",
+                  res.error.code === "timeout"
+                    ? "The server is still working on it. Wait a moment and reopen this screen — confirming again is safe and won't double the stock."
+                    : res.error.message,
+                );
                 return;
               }
               feedbackTap();

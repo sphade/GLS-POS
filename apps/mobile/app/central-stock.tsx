@@ -128,11 +128,33 @@ export default function CentralStockScreen() {
                         title={item.name}
                         subtitle={`${item.totalStock} ${item.unit} in stock · alert below ${item.minStock}`}
                         trailing={
-                          low ? (
-                            <View style={styles.lowPill}>
-                              <Text style={styles.lowPillText}>LOW</Text>
-                            </View>
-                          ) : undefined
+                          <View style={styles.rowTrailing}>
+                            {low ? (
+                              <View style={styles.lowPill}>
+                                <Text style={styles.lowPillText}>LOW</Text>
+                              </View>
+                            ) : null}
+                            {/* The way out of the hub: sending was only reachable
+                                from the SENT tab, which nobody found. The row's
+                                own tap still opens the editor. */}
+                            <Pressable
+                              style={styles.sendBtn}
+                              hitSlop={6}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Send ${item.name} to a store`}
+                              onPress={(event) => {
+                                event.stopPropagation();
+                                feedbackTap();
+                                router.push({
+                                  pathname: "/send-to-store",
+                                  params: { globalItemId: item.id },
+                                } as never);
+                              }}
+                            >
+                              <Ionicons name="paper-plane-outline" size={13} color={colors.white} />
+                              <Text style={styles.sendText}>SEND</Text>
+                            </Pressable>
+                          </View>
                         }
                         onPress={() => router.push({ pathname: "/central-item-editor", params: { id: item.id } } as never)}
                       />
@@ -194,6 +216,17 @@ const styles = StyleSheet.create({
   toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
   lowPill: { backgroundColor: colors.red500, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
   lowPillText: { color: colors.white, fontSize: 10, fontWeight: "800" },
+  rowTrailing: { flexDirection: "row", alignItems: "center", gap: 8 },
+  sendBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.primary,
+    borderRadius: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  sendText: { color: colors.white, fontSize: 10, fontWeight: "800", letterSpacing: 0.5 },
   statusPill: { borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
   statusPillText: { color: colors.white, fontSize: 10, fontWeight: "800" },
   blocked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30, gap: 8 },

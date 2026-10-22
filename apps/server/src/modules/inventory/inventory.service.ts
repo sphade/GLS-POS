@@ -335,8 +335,13 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
     throw HttpError.notFound("Allocation not found", "allocation_not_found");
   }
 
+  if (allocation.status === "fulfilled") {
+    // Retry after a client timeout: the first call already applied it.
+    return { success: true, allocationId, alreadyFulfilled: true };
+  }
+
   if (allocation.status !== "pending") {
-    throw HttpError.badRequest("Allocation is not pending", "already_processed");
+    throw HttpError.badRequest("Allocation was cancelled", "already_processed");
   }
 
   // Confirming needs a sender role in the receiving store (or the sending one,
@@ -398,16 +403,13 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
   }
 
   // Central stock only moves once the branch actually received it.
-  await db
-    .update(schema.globalInventoryItems)
-    .set({
-      totalStock: sql`${schema.globalInventoryItems.totalStock} - ${allocation.quantity}`,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.globalInventoryItems.id, allocation.globalItemId));
-
+  //
+  // Claim the pending row first, so exactly one caller deducts: a phone that
+  // timed out may retry while this call is still running, and both would
+  // otherwise subtract the quantity. The DO itself is idempotent by allocation
+  // id, so a retry's stock raise is a no-op.
   const fulfilledAt = new Date();
-  await db
+  const claimed = await db
     .update(schema.inventoryAllocations)
     .set({
       status: "fulfilled",
@@ -415,7 +417,23 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
       fulfilledByUserId: actor.id,
       fulfilledByName: actor.name.slice(0, 120),
     })
-    .where(eq(schema.inventoryAllocations.id, allocationId));
+    .where(
+      and(
+        eq(schema.inventoryAllocations.id, allocationId),
+        eq(schema.inventoryAllocations.status, "pending"),
+      ),
+    )
+    .returning({ id: schema.inventoryAllocations.id });
+
+  if (claimed.length > 0) {
+    await db
+      .update(schema.globalInventoryItems)
+      .set({
+        totalStock: sql`${schema.globalInventoryItems.totalStock} - ${allocation.quantity}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.globalInventoryItems.id, allocation.globalItemId));
+  }
 
   return { success: true, allocationId, received };
 }
@@ -627,4 +645,198 @@ export async function listConversions(env: Env, storeId: string, limit: number =
     .where(eq(schema.inventoryConversions.storeId, storeId))
     .orderBy(desc(schema.inventoryConversions.convertedAt))
     .limit(Math.min(Math.max(limit, 1), 100));
+}
+
+// --- Production (branch product -> branch product) ---
+
+/**
+ * Owner-defined yield rules for a branch, newest first. Names and live stock
+ * are intentionally not joined here: the caller renders both against the
+ * store catalog, which is the only authoritative source for them.
+ */
+export async function listProductionRules(env: Env, storeId: string) {
+  const db = createDb(env.DB);
+  return db
+    .select({
+      id: schema.inventoryProductionRules.id,
+      storeId: schema.inventoryProductionRules.storeId,
+      inputProductId: schema.inventoryProductionRules.inputProductId,
+      outputProductId: schema.inventoryProductionRules.outputProductId,
+      inputQty: schema.inventoryProductionRules.inputQty,
+      outputQty: schema.inventoryProductionRules.outputQty,
+    })
+    .from(schema.inventoryProductionRules)
+    .where(eq(schema.inventoryProductionRules.storeId, storeId))
+    .orderBy(desc(schema.inventoryProductionRules.updatedAt));
+}
+
+/**
+ * Create or update the rule for one (input, output) pair.
+ *
+ * Upserting on the pair means tapping "New rule" twice for the same recipe
+ * corrects its numbers instead of leaving two competing defaults.
+ */
+export async function upsertProductionRule(
+  env: Env,
+  storeId: string,
+  input: {
+    inputProductId: string;
+    outputProductId: string;
+    inputQty: number;
+    outputQty: number;
+  },
+) {
+  const { inputProductId, outputProductId, inputQty, outputQty } = input;
+
+  if (inputProductId === outputProductId) {
+    throw HttpError.badRequest("Choose two different products", "same_product");
+  }
+  if (
+    !Number.isInteger(inputQty) ||
+    inputQty < 1 ||
+    !Number.isInteger(outputQty) ||
+    outputQty < 1
+  ) {
+    throw HttpError.badRequest("Quantities must be whole numbers of at least 1", "invalid_quantity");
+  }
+
+  const db = createDb(env.DB);
+  const now = new Date();
+  const [existing] = await db
+    .select({ id: schema.inventoryProductionRules.id })
+    .from(schema.inventoryProductionRules)
+    .where(
+      and(
+        eq(schema.inventoryProductionRules.storeId, storeId),
+        eq(schema.inventoryProductionRules.inputProductId, inputProductId),
+        eq(schema.inventoryProductionRules.outputProductId, outputProductId),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(schema.inventoryProductionRules)
+      .set({ inputQty, outputQty, updatedAt: now })
+      .where(eq(schema.inventoryProductionRules.id, existing.id));
+    return { id: existing.id, storeId, inputProductId, outputProductId, inputQty, outputQty };
+  }
+
+  const id = newId("prod_rule");
+  await db.insert(schema.inventoryProductionRules).values({
+    id,
+    storeId,
+    inputProductId,
+    outputProductId,
+    inputQty,
+    outputQty,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return { id, storeId, inputProductId, outputProductId, inputQty, outputQty };
+}
+
+export async function deleteProductionRule(env: Env, storeId: string, ruleId: string) {
+  const db = createDb(env.DB);
+  const deleted = await db
+    .delete(schema.inventoryProductionRules)
+    .where(
+      and(
+        eq(schema.inventoryProductionRules.id, ruleId),
+        eq(schema.inventoryProductionRules.storeId, storeId),
+      ),
+    )
+    .returning({ id: schema.inventoryProductionRules.id });
+
+  if (deleted.length === 0) {
+    throw HttpError.notFound("Production rule not found", "rule_not_found");
+  }
+  return { success: true, id: ruleId };
+}
+
+export async function getProductionRule(env: Env, storeId: string, ruleId: string) {
+  const db = createDb(env.DB);
+  const [rule] = await db
+    .select()
+    .from(schema.inventoryProductionRules)
+    .where(
+      and(
+        eq(schema.inventoryProductionRules.id, ruleId),
+        eq(schema.inventoryProductionRules.storeId, storeId),
+      ),
+    )
+    .limit(1);
+
+  if (!rule) throw HttpError.notFound("Production rule not found", "rule_not_found");
+  return rule;
+}
+
+/**
+ * Run one batch. The rule supplies the two product ids; the quantities are
+ * what actually moved, so a cook can record a short or bumper yield without
+ * first editing the recipe. `ref` makes retries after a timeout safe.
+ */
+export async function produceStock(
+  env: Env,
+  storeId: string,
+  input: {
+    ruleId: string;
+    inputQty: number;
+    outputQty: number;
+    ref: string;
+    note?: string;
+  },
+  actor: { id: string; name: string; email?: string; role?: string },
+) {
+  const rule = await getProductionRule(env, storeId, input.ruleId);
+  const result = await storeStub(env, storeId).produceFromStock({
+    inputProductId: rule.inputProductId,
+    outputProductId: rule.outputProductId,
+    inputQty: input.inputQty,
+    outputQty: input.outputQty,
+    ref: input.ref,
+    note: input.note,
+    actor,
+  });
+
+  if (!result.ok) {
+    switch (result.error) {
+      case "unknown_product":
+        throw HttpError.notFound("One of the products no longer exists", "unknown_product");
+      case "untracked_product":
+        throw HttpError.badRequest(
+          "Both products must have stock tracking turned on",
+          "untracked_product",
+        );
+      case "product_has_variants":
+        throw HttpError.badRequest(
+          "Production does not support products with variants",
+          "product_has_variants",
+        );
+      case "invalid_quantity":
+        throw HttpError.badRequest(
+          "Quantities must be whole numbers of at least 1",
+          "invalid_quantity",
+        );
+      case "same_product":
+        throw HttpError.badRequest("Choose two different products", "same_product");
+      case "insufficient_stock":
+        throw HttpError.badRequest(
+          `Not enough stock: only ${result.available ?? 0} left`,
+          "insufficient_stock",
+        );
+    }
+  }
+
+  return {
+    success: true,
+    ruleId: rule.id,
+    duplicate: result.duplicate ?? false,
+    inputProductId: rule.inputProductId,
+    outputProductId: rule.outputProductId,
+    inputName: result.inputName,
+    outputName: result.outputName,
+    inputStock: result.inputStock,
+    outputStock: result.outputStock,
+  };
 }
