@@ -10,23 +10,32 @@ import { api, type CentralAllocation, type CentralItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
-const TABS = ["STOCK", "SENT"];
+const TABS = ["STOCK", "TRANSFERS"];
 
 function statusTone(status: CentralAllocation["status"]): string {
   if (status === "fulfilled") return colors.dkGreen;
   if (status === "cancelled") return colors.grey500;
-  return colors.red500;
+  return colors.lowStock;
+}
+
+function statusLabel(status: CentralAllocation["status"]): string {
+  if (status === "fulfilled") return "RECEIVED";
+  if (status === "cancelled") return "CANCELLED";
+  return "IN TRANSIT";
 }
 
 /**
- * Central Stock hub: the warehouse-level bulk stock plus every send to a
- * branch. Owners/managers only — the server enforces the same rule, this just
- * keeps everyone else from opening a screen that would refuse them.
+ * The central store's home. It owns the bulk stock and every transfer to a
+ * branch. The source of a transfer is always this store, never another shop.
  */
 export default function CentralStockScreen() {
   const router = useRouter();
-  const { stores } = useAuth();
-  const canSend = stores.some((s) => s.role === "owner" || s.role === "manager");
+  const { stores, refresh } = useAuth();
+  const central = stores.find((s) => s.isCentral);
+  const canManage = central
+    ? central.role === "owner" || central.role === "manager"
+    : stores.some((s) => s.role === "owner");
+  const centralName = (central?.name ?? "Central Store").toUpperCase();
 
   const [items, setItems] = useState<CentralItem[]>([]);
   const [allocations, setAllocations] = useState<CentralAllocation[]>([]);
@@ -36,6 +45,17 @@ export default function CentralStockScreen() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+
+    if (!central) {
+      const ensured = await api.ensureCentralStore();
+      if (!ensured.ok) {
+        setError(ensured.error.message);
+        setLoading(false);
+        return;
+      }
+      await refresh();
+    }
+
     const [itemsRes, allocRes] = await Promise.all([api.listCentralItems(), api.listAllocations()]);
     if (!itemsRes.ok) {
       setError(itemsRes.error.message);
@@ -48,27 +68,29 @@ export default function CentralStockScreen() {
     setAllocations(allocRes.ok ? allocRes.data : []);
     if (!allocRes.ok) setError((prev) => prev ?? null);
     setLoading(false);
-  }, []);
+  }, [central, refresh]);
 
   useFocusEffect(
     useCallback(() => {
-      if (canSend) void load();
-    }, [canSend, load]),
+      if (canManage) void load();
+    }, [canManage, load]),
   );
 
-  if (!canSend) {
+  if (!canManage) {
     return (
       <SafeAreaView edges={["top"]} style={styles.root}>
         <View style={styles.toolbar}>
           <Pressable onPress={() => router.back()} style={styles.toolbarBtn} hitSlop={8}>
             <Ionicons name="arrow-back" size={24} color={colors.primary} />
           </Pressable>
-          <Text style={styles.toolbarTitle}>CENTRAL STOCK</Text>
+          <Text style={styles.toolbarTitle}>{centralName}</Text>
         </View>
         <View style={styles.blocked}>
           <Ionicons name="lock-closed" size={44} color={colors.grey400} />
-          <Text style={styles.blockedTitle}>Owners and managers only</Text>
-          <Text style={styles.blockedText}>Ask your manager to manage central stock and deliveries.</Text>
+          <Text style={styles.blockedTitle}>Central store owners only</Text>
+          <Text style={styles.blockedText}>
+            Only the owner or manager of the central store can view this stock.
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -80,7 +102,7 @@ export default function CentralStockScreen() {
         <Pressable onPress={() => router.back()} style={styles.toolbarBtn} hitSlop={8}>
           <Ionicons name="arrow-back" size={24} color={colors.primary} />
         </Pressable>
-        <Text style={styles.toolbarTitle}>CENTRAL STOCK</Text>
+        <Text style={styles.toolbarTitle}>{centralName}</Text>
         <Pressable
           onPress={() => {
             feedbackTap();
@@ -126,7 +148,7 @@ export default function CentralStockScreen() {
                         initial={item.name.charAt(0).toUpperCase()}
                         color={low ? colors.red500 : colors.dkGreen}
                         title={item.name}
-                        subtitle={`${item.totalStock} ${item.unit} in stock · alert below ${item.minStock}`}
+                        subtitle={`${item.totalStock} ${item.unit} in stock | alert below ${item.minStock}`}
                         trailing={
                           <View style={styles.rowTrailing}>
                             {low ? (
@@ -134,14 +156,11 @@ export default function CentralStockScreen() {
                                 <Text style={styles.lowPillText}>LOW</Text>
                               </View>
                             ) : null}
-                            {/* The way out of the hub: sending was only reachable
-                                from the SENT tab, which nobody found. The row's
-                                own tap still opens the editor. */}
                             <Pressable
                               style={styles.sendBtn}
                               hitSlop={6}
                               accessibilityRole="button"
-                              accessibilityLabel={`Send ${item.name} to a store`}
+                              accessibilityLabel={`Transfer ${item.name} to a shop`}
                               onPress={(event) => {
                                 event.stopPropagation();
                                 feedbackTap();
@@ -151,8 +170,8 @@ export default function CentralStockScreen() {
                                 } as never);
                               }}
                             >
-                              <Ionicons name="paper-plane-outline" size={13} color={colors.white} />
-                              <Text style={styles.sendText}>SEND</Text>
+                              <Ionicons name="arrow-forward-circle-outline" size={14} color={colors.white} />
+                              <Text style={styles.sendText}>TRANSFER</Text>
                             </Pressable>
                           </View>
                         }
@@ -166,22 +185,22 @@ export default function CentralStockScreen() {
             return (
               <EntityListScreen
                 embedded
-                title="Sent"
+                title="Transfers"
                 data={allocations}
                 keyExtractor={(a) => a.id}
                 searchOf={(a) => `${a.itemName} ${a.toStoreName} ${a.status} ${a.allocatedByName ?? ""}`}
-                emptyText="Nothing sent yet"
-                addLabel="Send to store"
+                emptyText="No transfers yet"
+                addLabel="New transfer"
                 onAdd={() => router.push("/send-to-store" as never)}
                 renderRow={(a) => (
                   <EntityRow
                     initial={a.itemName.charAt(0).toUpperCase()}
                     color={statusTone(a.status)}
                     title={`${a.quantity} ${a.itemUnit} ${a.itemName}`}
-                    subtitle={`To ${a.toStoreName} · ${a.status.toUpperCase()} · by ${a.allocatedByName ?? "staff"} · ${formatDate(a.allocatedAt)}`}
+                    subtitle={`To ${a.toStoreName} | ${statusLabel(a.status)} | by ${a.allocatedByName ?? "staff"} | ${formatDate(a.allocatedAt)}`}
                     trailing={
                       <View style={[styles.statusPill, { backgroundColor: statusTone(a.status) }]}>
-                        <Text style={styles.statusPillText}>{a.status.toUpperCase()}</Text>
+                        <Text style={styles.statusPillText}>{statusLabel(a.status)}</Text>
                       </View>
                     }
                   />

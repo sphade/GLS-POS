@@ -25,6 +25,8 @@ export type Store = {
   currency: string;
   /** Canonical membership role used for read-scope synchronization. */
   role: StoreRole;
+  /** True for the owner's parent/central store. */
+  isCentral: boolean;
   /** The signed-in user's role in this store, shown under the name. */
   reference?: string;
 };
@@ -49,6 +51,7 @@ const BOOTSTRAP_STORE: Store = {
   currency: "NGN",
   // Metadata-only placeholder; operational effects never run for this store.
   role: "owner",
+  isCentral: false,
 };
 
 /**
@@ -91,7 +94,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         initials: initialsOf(m.name),
         currency: m.currency,
         role: m.role,
-        reference: m.role.charAt(0).toUpperCase() + m.role.slice(1),
+        isCentral: !!m.isCentral,
+        reference: m.isCentral
+          ? "Central store"
+          : m.role.charAt(0).toUpperCase() + m.role.slice(1),
       })),
     [memberships],
   );

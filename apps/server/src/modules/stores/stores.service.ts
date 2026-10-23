@@ -1,10 +1,14 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
 import { createDb, schema } from "../../db/index.js";
 import { newId } from "../../lib/id.js";
 import { HttpError } from "../../lib/http-error.js";
 import type { Env } from "../../env.js";
-import type { CreateStoreInput, UpdateStoreInput } from "./stores.schema.js";
+import type {
+  CreateStoreInput,
+  EnsureCentralStoreInput,
+  UpdateStoreInput,
+} from "./stores.schema.js";
 
 /**
  * Control-plane store registry & membership logic (Cloudflare D1 via Drizzle).
@@ -12,7 +16,7 @@ import type { CreateStoreInput, UpdateStoreInput } from "./stores.schema.js";
  * answers ownership/identity questions and provisions the registry rows.
  */
 
-/** Stores the given user belongs to, with their role in each. */
+/** Stores the given user belongs to, with their role in each. Branches first. */
 export async function listStoresForUser(env: Env, userId: string): Promise<StoreMembership[]> {
   const db = createDb(env.DB);
   const rows = await db
@@ -21,12 +25,160 @@ export async function listStoresForUser(env: Env, userId: string): Promise<Store
       name: schema.store.name,
       currency: schema.store.currency,
       role: schema.member.role,
+      isCentral: schema.store.isCentral,
+    })
+    .from(schema.member)
+    .innerJoin(schema.store, eq(schema.member.storeId, schema.store.id))
+    .where(eq(schema.member.userId, userId))
+    .orderBy(asc(schema.store.isCentral), asc(schema.store.createdAt));
+
+  return rows.map((r) => ({ ...r, role: r.role as StoreRole, isCentral: !!r.isCentral }));
+}
+
+/** The central store the user is a member of, if it has been created. */
+export async function getCentralStoreForUser(env: Env, userId: string) {
+  const db = createDb(env.DB);
+  const [row] = await db
+    .select({ store: schema.store, role: schema.member.role })
+    .from(schema.member)
+    .innerJoin(schema.store, eq(schema.member.storeId, schema.store.id))
+    .where(and(eq(schema.member.userId, userId), eq(schema.store.isCentral, true)))
+    .limit(1);
+  return row?.store ?? null;
+}
+
+/**
+ * Attach pre-central-store items to the owner's centre.
+ *
+ * Prefer evidence: an item whose source shop belongs to this owner is theirs.
+ * If this deployment has only one owner, unlinked items are safe to claim too.
+ * With several owners, leave unlinked rows alone rather than leak stock.
+ */
+async function adoptLegacyCentralItems(env: Env, userId: string, centralId: string) {
+  const db = createDb(env.DB);
+  const now = new Date();
+
+  await db
+    .update(schema.globalInventoryItems)
+    .set({ ownerId: userId, storeId: centralId, updatedAt: now })
+    .where(
+      and(
+        isNull(schema.globalInventoryItems.ownerId),
+        sql`${schema.globalInventoryItems.id} IN (
+          SELECT a.global_item_id
+          FROM inventory_allocations a
+          JOIN store s ON s.id = a.from_store_id
+          WHERE s.owner_id = ${userId}
+        )`,
+      ),
+    );
+
+  const owners = await db
+    .selectDistinct({ ownerId: schema.store.ownerId })
+    .from(schema.store);
+  if (owners.length === 1) {
+    await db
+      .update(schema.globalInventoryItems)
+      .set({ ownerId: userId, storeId: centralId, updatedAt: now })
+      .where(isNull(schema.globalInventoryItems.ownerId));
+  }
+}
+
+/**
+ * Create the owner's central store, or return the existing one.
+ *
+ * The centre is a normal `store` row with `is_central` set, so it can own its
+ * own inventory and appear in the switcher, but it is the parent of every
+ * branch the owner has. Existing branches are re-parented, and legacy central
+ * items are adopted into it.
+ */
+export async function ensureCentralStore(
+  env: Env,
+  userId: string,
+  input: EnsureCentralStoreInput = {},
+): Promise<StoreMembership> {
+  const db = createDb(env.DB);
+
+  const memberships = await db
+    .select({
+      storeId: schema.member.storeId,
+      role: schema.member.role,
+      currency: schema.store.currency,
     })
     .from(schema.member)
     .innerJoin(schema.store, eq(schema.member.storeId, schema.store.id))
     .where(eq(schema.member.userId, userId));
 
-  return rows.map((r) => ({ ...r, role: r.role as StoreRole }));
+  if (memberships.length > 0 && !memberships.some((m) => m.role === "owner")) {
+    throw HttpError.forbidden("Only an owner can manage the central store", "owner_only");
+  }
+  if (memberships.length === 0) {
+    throw HttpError.forbidden("Create a shop before setting up the central store", "no_stores");
+  }
+
+  const existing = await getCentralStoreForUser(env, userId);
+  if (existing) {
+    await db
+      .update(schema.store)
+      .set({ parentStoreId: existing.id, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.store.ownerId, userId),
+          eq(schema.store.isCentral, false),
+          isNull(schema.store.parentStoreId),
+        ),
+      );
+    await adoptLegacyCentralItems(env, userId, existing.id);
+    return {
+      id: existing.id,
+      name: existing.name,
+      currency: existing.currency,
+      role: (await memberRole(env, userId, existing.id)) ?? "owner",
+      isCentral: true,
+    };
+  }
+
+  const now = new Date();
+  const currency =
+    input.currency ??
+    memberships.find((m) => m.role === "owner")?.currency ??
+    memberships[0]?.currency ??
+    "NGN";
+  const centralId = newId("store");
+
+  await db.insert(schema.store).values({
+    id: centralId,
+    name: input.name?.trim() || "Central Store",
+    currency,
+    ownerId: userId,
+    isCentral: true,
+    parentStoreId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await db.insert(schema.member).values({
+    id: newId("mbr"),
+    userId,
+    storeId: centralId,
+    role: "owner",
+    createdAt: now,
+  });
+
+  await db
+    .update(schema.store)
+    .set({ parentStoreId: centralId, updatedAt: now })
+    .where(and(eq(schema.store.ownerId, userId), eq(schema.store.isCentral, false)));
+
+  await adoptLegacyCentralItems(env, userId, centralId);
+
+  return {
+    id: centralId,
+    name: input.name?.trim() || "Central Store",
+    currency,
+    role: "owner",
+    isCentral: true,
+  };
 }
 
 /**
@@ -76,12 +228,15 @@ export async function createStore(
 
   const now = new Date();
   const storeId = newId("store");
+  const central = await getCentralStoreForUser(env, userId);
 
   await db.insert(schema.store).values({
     id: storeId,
     name: input.name,
     currency: input.currency,
     ownerId: userId,
+    isCentral: false,
+    parentStoreId: central?.id ?? null,
     createdAt: now,
     updatedAt: now,
   });
@@ -94,7 +249,13 @@ export async function createStore(
     createdAt: now,
   });
 
-  return { id: storeId, name: input.name, currency: input.currency, role: "owner" };
+  return {
+    id: storeId,
+    name: input.name,
+    currency: input.currency,
+    role: "owner",
+    isCentral: false,
+  };
 }
 
 /** The business profile shown in Business Settings. */

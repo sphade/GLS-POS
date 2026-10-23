@@ -41,14 +41,13 @@ import {
 /**
  * Centralized inventory distribution management routes.
  *
- * The centre holds bulk stock in `global_inventory_items`; sending stock to a
- * branch writes a `inventory_allocations` row and — on confirm — raises that
- * branch's Durable Object product stock with a `restock` movement, so every
- * till sees the delivery on its next sync.
+ * The central store owns the bulk items in `global_inventory_items`. A
+ * transfer deducts the centre at dispatch, writes an `inventory_allocations`
+ * row, and raises the branch's Durable Object stock when the branch confirms.
  *
  * Endpoints:
- * - /inventory - Global inventory items (CRUD, owners/managers only)
- * - /inventory/allocations - Sends between stores (send + confirm)
+ * - /inventory - Central-store items (CRUD, central owner/manager only)
+ * - /inventory/allocations - Central -> branch transfers (send + confirm)
  * - /inventory/store-products - Destination catalog for the Send picker
  * - /inventory/conversion-rates - Store-level conversion rates
  * - /inventory/conversions - Track bulk-to-portions conversions
@@ -65,35 +64,35 @@ const storeIdQuerySchema = z.object({ storeId: z.string().min(1) });
 inventory.get("/", async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  await requireCentralSender(c.env, user.id);
-  const items = await listGlobalInventoryItems(c.env);
+  const { central } = await requireCentralSender(c.env, user.id);
+  const items = await listGlobalInventoryItems(c.env, central);
   return ok(c, items);
 });
 
 inventory.post("/", validate("json", createGlobalInventoryItemSchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  await requireCentralSender(c.env, user.id);
+  const { central } = await requireCentralSender(c.env, user.id);
 
-  const item = await createGlobalInventoryItem(c.env, c.req.valid("json"));
+  const item = await createGlobalInventoryItem(c.env, central, c.req.valid("json"));
   return ok(c, item, 201);
 });
 
 inventory.put("/:id", validate("json", updateGlobalInventoryItemSchema), async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  await requireCentralSender(c.env, user.id);
+  const { central } = await requireCentralSender(c.env, user.id);
   const itemId = c.req.param("id");
-  const item = await updateGlobalInventoryItem(c.env, itemId, c.req.valid("json"));
+  const item = await updateGlobalInventoryItem(c.env, central, itemId, c.req.valid("json"));
   return ok(c, item);
 });
 
 inventory.delete("/:id", async (c) => {
   const user = c.get("user");
   if (!user) throw HttpError.unauthorized();
-  await requireCentralSender(c.env, user.id);
+  const { central } = await requireCentralSender(c.env, user.id);
   const itemId = c.req.param("id");
-  await deleteGlobalInventoryItem(c.env, itemId);
+  await deleteGlobalInventoryItem(c.env, central, itemId);
   return ok(c, { message: "Item deleted" });
 });
 

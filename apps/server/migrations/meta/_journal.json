@@ -57,6 +57,13 @@
       "when": 1792655815508,
       "tag": "0007_sparkling_titanium_man",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792668285845,
+      "tag": "0008_central_store",
+      "breakpoints": true
     }
   ]
 }

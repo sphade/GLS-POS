@@ -13,7 +13,13 @@ import { feedbackTap } from "@/lib/feedback";
 function statusTone(status: CentralAllocation["status"]): string {
   if (status === "fulfilled") return colors.dkGreen;
   if (status === "cancelled") return colors.grey500;
-  return colors.red500;
+  return colors.lowStock;
+}
+
+function statusLabel(status: CentralAllocation["status"]): string {
+  if (status === "fulfilled") return "RECEIVED";
+  if (status === "cancelled") return "CANCELLED";
+  return "IN TRANSIT";
 }
 
 function formatDate(at: string | number): string {
@@ -24,8 +30,8 @@ function formatDate(at: string | number): string {
 
 /**
  * Incoming-stock view for one branch: every central delivery sent here, with
- * confirm-on-arrival for owners/managers. Confirming raises this store's own
- * stock (synced to every till) and lowers central stock.
+ * confirm-on-arrival for owners/managers. Central stock already left on
+ * dispatch; confirming raises this store's own stock (synced to every till).
  */
 export default function IncomingStockScreen() {
   const router = useRouter();
@@ -91,7 +97,7 @@ export default function IncomingStockScreen() {
 
   const cancel = (allocation: CentralAllocation) => {
     if (!canConfirm || acting) return;
-    Alert.alert("Cancel this delivery?", "The centre keeps the stock. This can't be undone.", [
+    Alert.alert("Cancel this delivery?", "The stock returns to the Central Store. This can't be undone.", [
       { text: "Keep", style: "cancel" },
       {
         text: "Cancel delivery",
@@ -156,7 +162,7 @@ export default function IncomingStockScreen() {
               initial={a.itemName.charAt(0).toUpperCase()}
               color={statusTone(a.status)}
               title={`${a.quantity} ${a.itemUnit} ${a.itemName}`}
-              subtitle={`From ${a.fromStoreName} · by ${a.allocatedByName ?? "staff"} · ${formatDate(a.allocatedAt)}${a.status === "fulfilled" ? ` · confirmed by ${a.fulfilledByName ?? "staff"}` : ""}`}
+              subtitle={`From ${a.fromStoreName} | ${statusLabel(a.status)} | ${formatDate(a.allocatedAt)}${a.status === "fulfilled" ? ` | received by ${a.fulfilledByName ?? "staff"}` : ""}`}
               trailing={
                 pending && canConfirm ? (
                   <Pressable
@@ -172,7 +178,7 @@ export default function IncomingStockScreen() {
                   </Pressable>
                 ) : (
                   <View style={[styles.statusPill, { backgroundColor: statusTone(a.status) }]}>
-                    <Text style={styles.statusPillText}>{a.status.toUpperCase()}</Text>
+                    <Text style={styles.statusPillText}>{statusLabel(a.status)}</Text>
                   </View>
                 )
               }

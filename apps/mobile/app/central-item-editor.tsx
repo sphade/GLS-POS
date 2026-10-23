@@ -17,7 +17,10 @@ export default function CentralItemEditorScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { stores } = useAuth();
-  const canSend = stores.some((s) => s.role === "owner" || s.role === "manager");
+  const central = stores.find((s) => s.isCentral);
+  const canManage = central
+    ? central.role === "owner" || central.role === "manager"
+    : stores.some((s) => s.role === "owner");
 
   const [existing, setExisting] = useState<CentralItem | null>(null);
   const [loading, setLoading] = useState(!!id);
@@ -51,12 +54,14 @@ export default function CentralItemEditorScreen() {
     })();
   }, [id]);
 
-  if (!canSend) {
+  if (!canManage) {
     return (
       <SafeAreaView edges={["top"]} style={formStyles.screen}>
         <EditorToolbar title="Central item" onClose={() => router.back()} onSave={() => {}} />
         <View style={styles.blocked}>
-          <Text style={styles.blockedText}>Only owners and managers can edit central stock.</Text>
+          <Text style={styles.blockedText}>
+            Only the central store owner or manager can edit this stock.
+          </Text>
         </View>
       </SafeAreaView>
     );

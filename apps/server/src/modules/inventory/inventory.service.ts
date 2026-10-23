@@ -1,29 +1,17 @@
-import { and, eq, desc, inArray, or, sql } from "drizzle-orm";
-import type { StoreMembership, StoreRole } from "@gls-pos/types";
+import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import type { StoreRole } from "@gls-pos/types";
 import { roleCan } from "@gls-pos/types";
 import type { Env } from "../../env.js";
 import type { StoreDurableObject } from "../../durable-objects/store.do.js";
 import { createDb, schema } from "../../db/index.js";
 import { newId } from "../../lib/id.js";
 import { HttpError } from "../../lib/http-error.js";
+import {
+  getCentralStoreForUser,
+  listStoresForUser,
+} from "../stores/stores.service.js";
 
-// --- Stores service (copied from stores.service.ts for inventory module) ---
-
-export async function listStoresForUser(env: Env, userId: string): Promise<StoreMembership[]> {
-  const db = createDb(env.DB);
-  const rows = await db
-    .select({
-      id: schema.store.id,
-      name: schema.store.name,
-      currency: schema.store.currency,
-      role: schema.member.role,
-    })
-    .from(schema.member)
-    .innerJoin(schema.store, eq(schema.member.storeId, schema.store.id))
-    .where(eq(schema.member.userId, userId));
-
-  return rows.map((r) => ({ ...r, role: r.role as StoreRole }));
-}
+export { listStoresForUser };
 
 /** The caller's role in one store, or null when they aren't a member. */
 export async function roleInStore(
@@ -64,13 +52,21 @@ export async function requireMembership(env: Env, userId: string, storeId: strin
   return role;
 }
 
-/** Throw unless the user is an owner/manager in at least one store (central hub access). */
-export async function requireCentralSender(env: Env, userId: string): Promise<StoreMembership[]> {
-  const stores = await listStoresForUser(env, userId);
-  if (!stores.some((s) => SENDER_ROLES.includes(s.role))) {
-    throw HttpError.forbidden("Only owners and managers can manage central stock", "sender_role_required");
+/**
+ * The central store and the caller's role in it. Only its owner/manager can
+ * see or move its stock; being a manager in a branch is not enough.
+ */
+export async function requireCentralSender(env: Env, userId: string) {
+  const central = await getCentralStoreForUser(env, userId);
+  if (!central) {
+    throw new HttpError(
+      409,
+      "central_store_required",
+      "Set up the central store before managing central stock.",
+    );
   }
-  return stores;
+  const role = await requireSenderRole(env, userId, central.id);
+  return { central, role };
 }
 
 /** Throw unless the user's role in this store may adjust inventory. */
@@ -88,29 +84,49 @@ export type AllocationActor = {
   email?: string;
 };
 
-// --- Global Inventory Items ---
+// --- Central inventory items ---
 
-export async function listGlobalInventoryItems(env: Env) {
+type CentralStore = NonNullable<Awaited<ReturnType<typeof getCentralStoreForUser>>>;
+
+function centralItemScope(central: CentralStore) {
+  return and(
+    eq(schema.globalInventoryItems.ownerId, central.ownerId),
+    or(
+      eq(schema.globalInventoryItems.storeId, central.id),
+      isNull(schema.globalInventoryItems.storeId),
+    ),
+  );
+}
+
+export async function listGlobalInventoryItems(env: Env, central: CentralStore) {
   const db = createDb(env.DB);
-  return db.select().from(schema.globalInventoryItems).orderBy(schema.globalInventoryItems.name);
+  return db
+    .select()
+    .from(schema.globalInventoryItems)
+    .where(centralItemScope(central))
+    .orderBy(schema.globalInventoryItems.name);
 }
 
 export async function createGlobalInventoryItem(
   env: Env,
+  central: CentralStore,
   input: { name: string; unit: string; totalStock?: number; minStock?: number; description?: string },
 ) {
   const db = createDb(env.DB);
   const id = newId("inv");
+  const now = new Date();
 
   await db.insert(schema.globalInventoryItems).values({
     id,
+    ownerId: central.ownerId,
+    storeId: central.id,
     name: input.name,
     unit: input.unit,
     totalStock: input.totalStock ?? 0,
     minStock: input.minStock ?? 0,
     description: input.description ?? null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: now,
+    updatedAt: now,
   });
 
   return { id, name: input.name, unit: input.unit, totalStock: input.totalStock ?? 0 };
@@ -118,6 +134,7 @@ export async function createGlobalInventoryItem(
 
 export async function updateGlobalInventoryItem(
   env: Env,
+  central: CentralStore,
   itemId: string,
   input: { name?: string; unit?: string; totalStock?: number; minStock?: number; description?: string },
 ) {
@@ -126,11 +143,11 @@ export async function updateGlobalInventoryItem(
   const [existing] = await db
     .select()
     .from(schema.globalInventoryItems)
-    .where(eq(schema.globalInventoryItems.id, itemId))
+    .where(and(eq(schema.globalInventoryItems.id, itemId), centralItemScope(central)))
     .limit(1);
 
   if (!existing) {
-    throw HttpError.notFound("Inventory item not found", "item_not_found");
+    throw HttpError.notFound("Central inventory item not found", "item_not_found");
   }
 
   const patch = Object.fromEntries(
@@ -140,7 +157,12 @@ export async function updateGlobalInventoryItem(
   if (Object.keys(patch).length > 0) {
     await db
       .update(schema.globalInventoryItems)
-      .set({ ...patch, updatedAt: new Date() })
+      .set({
+        ...patch,
+        ownerId: central.ownerId,
+        storeId: central.id,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.globalInventoryItems.id, itemId));
   }
 
@@ -151,8 +173,20 @@ export async function updateGlobalInventoryItem(
     .limit(1);
 }
 
-export async function deleteGlobalInventoryItem(env: Env, itemId: string) {
+export async function deleteGlobalInventoryItem(
+  env: Env,
+  central: CentralStore,
+  itemId: string,
+) {
   const db = createDb(env.DB);
+  const [existing] = await db
+    .select({ id: schema.globalInventoryItems.id })
+    .from(schema.globalInventoryItems)
+    .where(and(eq(schema.globalInventoryItems.id, itemId), centralItemScope(central)))
+    .limit(1);
+  if (!existing) {
+    throw HttpError.notFound("Central inventory item not found", "item_not_found");
+  }
   await db
     .delete(schema.globalInventoryItems)
     .where(eq(schema.globalInventoryItems.id, itemId));
@@ -231,32 +265,38 @@ function storeStub(env: Env, storeId: string): DurableObjectStub<StoreDurableObj
   return env.STORE.get(env.STORE.idFromName(storeId));
 }
 
+/**
+ * Move stock from the central store to one branch.
+ *
+ * The source is never chosen by the client: it is always the caller's central
+ * store. Stock leaves the centre at dispatch, so the branch's confirmation only
+ * raises the branch side. A cancel puts the stock back.
+ */
 export async function createAllocation(
   env: Env,
-  input: { globalItemId: string; fromStoreId: string; toStoreId: string; productId?: string; quantity: number; notes?: string },
+  input: { globalItemId: string; toStoreId: string; productId?: string; quantity: number; notes?: string },
   actor: AllocationActor,
 ) {
   const db = createDb(env.DB);
+  const { central } = await requireCentralSender(env, actor.id);
 
-  if (input.fromStoreId === input.toStoreId) {
-    throw HttpError.badRequest("Source and destination stores must differ", "same_store");
-  }
-
-  // Only an owner/manager of the sending store may send.
-  await requireSenderRole(env, actor.id, input.fromStoreId);
-  // The destination must exist; membership there is checked on fulfill/listing.
-  const [fromStore] = await db
-    .select({ id: schema.store.id })
-    .from(schema.store)
-    .where(eq(schema.store.id, input.fromStoreId))
+  const [item] = await db
+    .select()
+    .from(schema.globalInventoryItems)
+    .where(and(eq(schema.globalInventoryItems.id, input.globalItemId), centralItemScope(central)))
     .limit(1);
 
-  if (!fromStore) {
-    throw HttpError.notFound("Source store not found", "from_store_not_found");
+  if (!item) {
+    throw HttpError.notFound("Central inventory item not found", "item_not_found");
   }
 
   const [toStore] = await db
-    .select({ id: schema.store.id })
+    .select({
+      id: schema.store.id,
+      ownerId: schema.store.ownerId,
+      isCentral: schema.store.isCentral,
+      parentStoreId: schema.store.parentStoreId,
+    })
     .from(schema.store)
     .where(eq(schema.store.id, input.toStoreId))
     .limit(1);
@@ -264,16 +304,11 @@ export async function createAllocation(
   if (!toStore) {
     throw HttpError.notFound("Destination store not found", "to_store_not_found");
   }
-
-  // Verify global item exists
-  const [item] = await db
-    .select()
-    .from(schema.globalInventoryItems)
-    .where(eq(schema.globalInventoryItems.id, input.globalItemId))
-    .limit(1);
-
-  if (!item) {
-    throw HttpError.notFound("Global inventory item not found", "item_not_found");
+  if (toStore.isCentral) {
+    throw HttpError.badRequest("Choose a branch, not the central store", "invalid_destination");
+  }
+  if (toStore.ownerId !== central.ownerId || (toStore.parentStoreId && toStore.parentStoreId !== central.id)) {
+    throw HttpError.forbidden("That shop is not under this central store", "not_in_tree");
   }
 
   const quantity = Math.round(input.quantity);
@@ -281,41 +316,78 @@ export async function createAllocation(
     throw HttpError.badRequest("Quantity must be a whole number of at least 1", "invalid_quantity");
   }
 
-  // Refuse oversends up front: the centre can never promise what it doesn't hold.
-  if (item.totalStock < quantity) {
+  if (item.storeId !== central.id) {
+    await db
+      .update(schema.globalInventoryItems)
+      .set({ ownerId: central.ownerId, storeId: central.id, updatedAt: new Date() })
+      .where(eq(schema.globalInventoryItems.id, item.id));
+  }
+
+  const now = new Date();
+  const deducted = await db
+    .update(schema.globalInventoryItems)
+    .set({
+      totalStock: sql`${schema.globalInventoryItems.totalStock} - ${quantity}`,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.globalInventoryItems.id, item.id),
+        gte(schema.globalInventoryItems.totalStock, quantity),
+      ),
+    )
+    .returning({ id: schema.globalInventoryItems.id });
+
+  if (deducted.length === 0) {
+    const [fresh] = await db
+      .select({ totalStock: schema.globalInventoryItems.totalStock })
+      .from(schema.globalInventoryItems)
+      .where(eq(schema.globalInventoryItems.id, item.id))
+      .limit(1);
     throw HttpError.badRequest(
-      `Only ${item.totalStock} ${item.unit} of "${item.name}" in central stock`,
+      `Only ${fresh?.totalStock ?? 0} ${item.unit} of "${item.name}" in central stock`,
       "insufficient_stock",
     );
   }
 
-  // Create the allocation (stock moves on fulfill, so a pending send reserves
-  // nothing and a cancel costs nothing).
   const allocationId = newId("alloc");
-  const now = new Date();
-  await db.insert(schema.inventoryAllocations).values({
-    id: allocationId,
-    globalItemId: input.globalItemId,
-    fromStoreId: input.fromStoreId,
-    toStoreId: input.toStoreId,
-    productId: input.productId ?? null,
-    quantity,
-    status: "pending",
-    allocatedAt: now,
-    notes: input.notes?.slice(0, 240) ?? null,
-    allocatedByUserId: actor.id,
-    allocatedByName: actor.name.slice(0, 120),
-  });
+  try {
+    await db.insert(schema.inventoryAllocations).values({
+      id: allocationId,
+      globalItemId: input.globalItemId,
+      fromStoreId: central.id,
+      toStoreId: input.toStoreId,
+      productId: input.productId ?? null,
+      quantity,
+      status: "pending",
+      allocatedAt: now,
+      stockDeductedAt: now,
+      notes: input.notes?.slice(0, 240) ?? null,
+      allocatedByUserId: actor.id,
+      allocatedByName: actor.name.slice(0, 120),
+    });
+  } catch (err) {
+    // Do not lose the centre's stock if the transfer row could not be written.
+    await db
+      .update(schema.globalInventoryItems)
+      .set({
+        totalStock: sql`${schema.globalInventoryItems.totalStock} + ${quantity}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.globalInventoryItems.id, item.id));
+    throw err;
+  }
 
   return {
     id: allocationId,
     globalItemId: input.globalItemId,
-    fromStoreId: input.fromStoreId,
+    fromStoreId: central.id,
     toStoreId: input.toStoreId,
     productId: input.productId ?? null,
     quantity,
     status: "pending",
     allocatedAt: now,
+    stockDeductedAt: now,
     notes: input.notes ?? null,
     allocatedByUserId: actor.id,
     allocatedByName: actor.name,
@@ -368,8 +440,10 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
     throw HttpError.notFound("Global inventory item not found", "item_not_found");
   }
 
-  // Re-check central stock: another send may have drained it while pending.
-  if (item.totalStock < allocation.quantity) {
+  // New transfers already left the centre at dispatch. Only legacy rows
+  // (created before the tree model) still deduct on receipt.
+  const deductOnReceipt = allocation.stockDeductedAt == null;
+  if (deductOnReceipt && item.totalStock < allocation.quantity) {
     throw HttpError.badRequest(
       `Only ${item.totalStock} ${item.unit} of "${item.name}" left in central stock`,
       "insufficient_stock",
@@ -402,12 +476,11 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
     throw new HttpError(status, code, message);
   }
 
-  // Central stock only moves once the branch actually received it.
-  //
-  // Claim the pending row first, so exactly one caller deducts: a phone that
-  // timed out may retry while this call is still running, and both would
-  // otherwise subtract the quantity. The DO itself is idempotent by allocation
-  // id, so a retry's stock raise is a no-op.
+  // Claim the pending row first, so exactly one caller marks it received: a
+  // phone that timed out may retry while this call is still running. The DO
+  // itself is idempotent by allocation id, so a retry's stock raise is a no-op.
+  // For a new transfer central stock was already deducted on dispatch; legacy
+  // rows are deducted here once.
   const fulfilledAt = new Date();
   const claimed = await db
     .update(schema.inventoryAllocations)
@@ -425,7 +498,7 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
     )
     .returning({ id: schema.inventoryAllocations.id });
 
-  if (claimed.length > 0) {
+  if (claimed.length > 0 && deductOnReceipt) {
     await db
       .update(schema.globalInventoryItems)
       .set({
@@ -445,6 +518,9 @@ export async function cancelAllocation(env: Env, allocationId: string, actorUser
     .select({
       id: schema.inventoryAllocations.id,
       status: schema.inventoryAllocations.status,
+      globalItemId: schema.inventoryAllocations.globalItemId,
+      quantity: schema.inventoryAllocations.quantity,
+      stockDeductedAt: schema.inventoryAllocations.stockDeductedAt,
       fromStoreId: schema.inventoryAllocations.fromStoreId,
       toStoreId: schema.inventoryAllocations.toStoreId,
     })
@@ -469,10 +545,28 @@ export async function cancelAllocation(env: Env, allocationId: string, actorUser
     throw HttpError.forbidden("Only owners and managers can cancel deliveries", "sender_role_required");
   }
 
-  await db
+  const cancelled = await db
     .update(schema.inventoryAllocations)
     .set({ status: "cancelled" })
-    .where(eq(schema.inventoryAllocations.id, allocationId));
+    .where(
+      and(
+        eq(schema.inventoryAllocations.id, allocationId),
+        eq(schema.inventoryAllocations.status, "pending"),
+      ),
+    )
+    .returning({ id: schema.inventoryAllocations.id });
+
+  // New transfers already left the centre at dispatch; cancelling puts the
+  // stock back. Legacy rows were never deducted, so there is nothing to refund.
+  if (cancelled.length > 0 && allocation.stockDeductedAt != null) {
+    await db
+      .update(schema.globalInventoryItems)
+      .set({
+        totalStock: sql`${schema.globalInventoryItems.totalStock} + ${allocation.quantity}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.globalInventoryItems.id, allocation.globalItemId));
+  }
 
   return { success: true, allocationId };
 }

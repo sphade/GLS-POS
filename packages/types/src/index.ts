@@ -718,6 +718,8 @@ export interface StoreMembership {
   name: string;
   currency: CurrencyCode;
   role: StoreRole;
+  /** True for the owner's parent/central store. */
+  isCentral?: boolean;
 }
 
 /**

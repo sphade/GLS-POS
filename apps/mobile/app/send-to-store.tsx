@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, PickerCard, formStyles } from "@/components/form";
@@ -10,27 +11,22 @@ import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
- * Send-to-store picker: choose a central item, the sending and receiving
- * branches, the destination product (optional — the server matches by name
- * when omitted), and a whole-number quantity.
+ * Transfer stock from the central store to one branch. The source is fixed:
+ * there is no "from shop" picker, because the centre is the parent of every
+ * branch. Stock leaves the centre on dispatch and the branch confirms receipt.
  */
 export default function SendToStoreScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ globalItemId?: string }>();
-  const { stores, activeStore } = useAuth();
-  const senderStores = useMemo(
-    () => stores.filter((s) => s.role === "owner" || s.role === "manager"),
-    [stores],
-  );
+  const { stores } = useAuth();
+  const central = stores.find((s) => s.isCentral);
+  const destinations = stores.filter((s) => !s.isCentral);
 
   const [items, setItems] = useState<CentralItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
 
   const [itemId, setItemId] = useState<string | undefined>(params.globalItemId);
-  const [fromStoreId, setFromStoreId] = useState<string | undefined>(
-    senderStores.find((s) => s.id === activeStore?.id)?.id ?? senderStores[0]?.id,
-  );
   const [toStoreId, setToStoreId] = useState<string | undefined>(undefined);
   const [productId, setProductId] = useState<string | undefined>(undefined);
   const [products, setProducts] = useState<StoreProductOption[]>([]);
@@ -77,15 +73,12 @@ export default function SendToStoreScreen() {
   }, [toStoreId]);
 
   const item = items.find((i) => i.id === itemId);
-  const fromStore = stores.find((s) => s.id === fromStoreId);
   const toStore = stores.find((s) => s.id === toStoreId);
   const product = products.find((p) => p.id === productId);
 
   const qty = Number.parseInt(quantity, 10);
-  const validQty =
-    Number.isInteger(qty) && qty >= 1 && !!item && qty <= item.totalStock;
-  const valid =
-    !!item && !!fromStoreId && !!toStoreId && fromStoreId !== toStoreId && validQty && !sending;
+  const validQty = Number.isInteger(qty) && qty >= 1 && !!item && qty <= item.totalStock;
+  const valid = !!item && !!toStoreId && validQty && !sending;
 
   const openPicker = (title: string, options: PickerOption[], onPick: (id: string) => void) => {
     feedbackTap();
@@ -95,11 +88,10 @@ export default function SendToStoreScreen() {
   const closePicker = () => setPicker(null);
 
   const submit = async () => {
-    if (!valid || !item || !fromStoreId || !toStoreId) return;
+    if (!valid || !item || !toStoreId) return;
     setSending(true);
     const res = await api.createAllocation({
       globalItemId: item.id,
-      fromStoreId,
       toStoreId,
       productId,
       quantity: qty,
@@ -107,21 +99,39 @@ export default function SendToStoreScreen() {
     });
     setSending(false);
     if (!res.ok) {
-      Alert.alert("Could not send", res.error.message);
+      Alert.alert("Could not transfer", res.error.message);
       return;
     }
     feedbackTap();
-    Alert.alert("Sent", `${qty} ${item.unit} ${item.name} sent to ${toStore?.name ?? "store"}. They confirm it on arrival.`, [
-      { text: "OK", onPress: () => router.back() },
-    ]);
+    Alert.alert(
+      "Transfer started",
+      `${qty} ${item.unit} ${item.name} left the Central Store for ${toStore?.name ?? "the shop"}. The shop confirms receipt when it arrives.`,
+      [{ text: "OK", onPress: () => router.back() }],
+    );
   };
 
-  if (senderStores.length === 0) {
+  if (!central) {
     return (
       <SafeAreaView edges={["top"]} style={formStyles.screen}>
-        <EditorToolbar title="Send to store" onClose={() => router.back()} onSave={() => {}} />
+        <EditorToolbar title="Transfer" onClose={() => router.back()} onSave={() => {}} />
         <View style={styles.blocked}>
-          <Text style={styles.blockedText}>Only owners and managers can send stock.</Text>
+          <MaterialCommunityIcons name="crown-outline" size={44} color={colors.grey400} />
+          <Text style={styles.blockedTitle}>Central Store not set up</Text>
+          <Text style={styles.blockedText}>
+            Open the Central Store once to create it, then transfer stock to your shops.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (destinations.length === 0) {
+    return (
+      <SafeAreaView edges={["top"]} style={formStyles.screen}>
+        <EditorToolbar title="Transfer" onClose={() => router.back()} onSave={() => {}} />
+        <View style={styles.blocked}>
+          <Text style={styles.blockedTitle}>No branch shops yet</Text>
+          <Text style={styles.blockedText}>Create a shop first, then transfer stock from the centre.</Text>
         </View>
       </SafeAreaView>
     );
@@ -130,7 +140,7 @@ export default function SendToStoreScreen() {
   return (
     <SafeAreaView edges={["top"]} style={formStyles.screen}>
       <EditorToolbar
-        title="Send to store"
+        title="Transfer"
         dirty={valid}
         onClose={() => router.back()}
         onSave={() => void submit()}
@@ -140,10 +150,36 @@ export default function SendToStoreScreen() {
         <ActivityIndicator style={{ marginTop: 40 }} color={colors.primary} />
       ) : (
         <ScrollView contentContainerStyle={formStyles.body} keyboardShouldPersistTaps="handled">
+          <View style={styles.flowCard}>
+            <View style={styles.flowSide}>
+              <View style={styles.flowIcon}>
+                <MaterialCommunityIcons name="crown-outline" size={20} color={colors.white} />
+              </View>
+              <Text style={styles.flowLabel}>FROM</Text>
+              <Text style={styles.flowName} numberOfLines={1}>
+                {central.name}
+              </Text>
+              <Text style={styles.flowHint}>Central Store</Text>
+            </View>
+
+            <Ionicons name="arrow-forward" size={22} color={colors.grey500} />
+
+            <View style={styles.flowSide}>
+              <View style={[styles.flowIcon, styles.flowIconBranch]}>
+                <MaterialCommunityIcons name="store-outline" size={20} color={colors.primary} />
+              </View>
+              <Text style={styles.flowLabel}>TO</Text>
+              <Text style={styles.flowName} numberOfLines={1}>
+                {toStore?.name ?? "Choose shop"}
+              </Text>
+              <Text style={styles.flowHint}>{toStore ? "Destination" : "Tap below"}</Text>
+            </View>
+          </View>
+
           <PickerCard
             label="CENTRAL ITEM *"
             value={item ? `${item.name} (${item.totalStock} ${item.unit})` : undefined}
-            hint="Choose what to send"
+            hint="Choose what to transfer"
             valid={!!item}
             onPress={() =>
               openPicker(
@@ -158,50 +194,30 @@ export default function SendToStoreScreen() {
           />
 
           <PickerCard
-            label="FROM (SENDING STORE) *"
-            value={fromStore?.name}
-            hint="Choose the hub store"
-            valid={!!fromStoreId}
-            onPress={() =>
-              openPicker(
-                "Sending store",
-                senderStores.map((s) => ({ id: s.id, label: s.name, hint: s.role })),
-                (id) => {
-                  setFromStoreId(id);
-                  if (id === toStoreId) setToStoreId(undefined);
-                  closePicker();
-                },
-              )
-            }
-          />
-
-          <PickerCard
-            label="TO (RECEIVING STORE) *"
+            label="TO SHOP *"
             value={toStore?.name}
-            hint="Choose the branch"
-            valid={!!toStoreId && fromStoreId !== toStoreId}
+            hint="Choose the branch that receives it"
+            valid={!!toStoreId}
             onPress={() => {
-              const options = stores
-                .filter((s) => s.id !== fromStoreId)
-                .map((s) => ({ id: s.id, label: s.name, hint: s.role }));
-              if (options.length === 0) {
-                Alert.alert("No other store", "You need access to at least two stores to send stock.");
+              if (destinations.length === 0) {
+                Alert.alert("No shop", "Create a branch shop first.");
                 return;
               }
-              openPicker("Receiving store", options, (id) => {
-                setToStoreId(id);
-                closePicker();
-              });
+              openPicker(
+                "Receiving shop",
+                destinations.map((s) => ({ id: s.id, label: s.name, hint: s.role })),
+                (id) => {
+                  setToStoreId(id);
+                  closePicker();
+                },
+              );
             }}
           />
-          {fromStoreId && toStoreId && fromStoreId === toStoreId && (
-            <Text style={styles.warn}>Sending and receiving stores must differ.</Text>
-          )}
 
           <PickerCard
             label="DESTINATION PRODUCT (OPTIONAL)"
             value={product?.name}
-            hint={productsLoading ? "Loading products…" : toStoreId ? "Match by name if empty" : "Pick a store first"}
+            hint={productsLoading ? "Loading products..." : toStoreId ? "Match by name if empty" : "Pick a shop first"}
             valid={true}
             onPress={() => {
               if (!toStoreId || products.length === 0) {
@@ -245,7 +261,7 @@ export default function SendToStoreScreen() {
 
           <FieldCard
             label="Note"
-            hint="Optional — e.g. order ref, driver"
+            hint="Optional - e.g. driver, order ref"
             value={notes}
             onChangeText={setNotes}
             showTick={false}
@@ -267,7 +283,34 @@ export default function SendToStoreScreen() {
 }
 
 const styles = StyleSheet.create({
+  flowCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: colors.white,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#E6D3A3",
+    padding: 14,
+    marginBottom: 14,
+    gap: 8,
+  },
+  flowSide: { flex: 1, alignItems: "center" },
+  flowIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#B8860B",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
+  },
+  flowIconBranch: { backgroundColor: colors.blue50 },
+  flowLabel: { fontSize: 10, fontWeight: "800", color: colors.grey500, letterSpacing: 0.7 },
+  flowName: { fontSize: 14, fontWeight: "800", color: colors.grey900, marginTop: 2, maxWidth: 130 },
+  flowHint: { fontSize: 11, color: colors.grey500, marginTop: 1 },
   warn: { color: colors.red500, fontSize: 12, fontWeight: "600", marginBottom: 8, marginLeft: 4 },
-  blocked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30 },
-  blockedText: { color: colors.grey600, textAlign: "center" },
+  blocked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30, gap: 8 },
+  blockedTitle: { fontSize: 17, fontWeight: "800", color: colors.grey900, marginTop: 10 },
+  blockedText: { color: colors.grey600, textAlign: "center", lineHeight: 20 },
 });

@@ -68,9 +68,11 @@ export type AttachableStaff = {
   shops: number;
 };
 
-/** Central-warehouse stock item (global inventory). Quantities are whole base units. */
+/** Stock owned by the central store. Quantities are whole base units. */
 export type CentralItem = {
   id: string;
+  ownerId?: string | null;
+  storeId?: string | null;
   name: string;
   unit: string;
   totalStock: number;
@@ -92,6 +94,7 @@ export type CentralAllocation = {
   quantity: number;
   status: CentralAllocationStatus;
   allocatedAt: string | number;
+  stockDeductedAt?: string | number | null;
   fulfilledAt?: string | number | null;
   notes: string | null;
   allocatedByUserId?: string | null;
@@ -142,6 +145,12 @@ export const api = {
   /** Create a store the user will own. */
   createStore: (body: { name: string; currency?: string }) =>
     request<StoreMembership>("/stores", { method: "POST", body: JSON.stringify(body) }),
+  /** Create the owner's parent central store, or return the existing one. */
+  ensureCentralStore: (body?: { name?: string; currency?: string }) =>
+    request<StoreMembership>("/stores/central", {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
 
   /** Staff roster for a store (requires staff:manage). */
   listMembers: (storeId: string) =>
@@ -228,7 +237,7 @@ export const api = {
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     return request<CentralAllocation[]>(`/inventory/allocations${suffix}`);
   },
-  createAllocation: (body: { globalItemId: string; fromStoreId: string; toStoreId: string; productId?: string; quantity: number; notes?: string }) =>
+  createAllocation: (body: { globalItemId: string; toStoreId: string; productId?: string; quantity: number; notes?: string }) =>
     request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }),
   fulfillAllocation: (id: string) =>
     // Deliberately longer than the default: the server wakes the destination

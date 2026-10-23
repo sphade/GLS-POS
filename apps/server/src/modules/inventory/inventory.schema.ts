@@ -24,8 +24,8 @@ export type UpdateGlobalInventoryItemInput = z.infer<typeof updateGlobalInventor
 // --- Allocations ---
 
 export const createAllocationSchema = z.object({
-  globalItemId: z.string().min(1, "Global item ID is required"),
-  fromStoreId: z.string().min(1, "Source store ID is required"),
+  globalItemId: z.string().min(1, "Central item ID is required"),
+  /** The source is always the caller's central store, never a branch. */
   toStoreId: z.string().min(1, "Destination store ID is required"),
   /**
    * Destination product in the receiving store. Optional for backwards

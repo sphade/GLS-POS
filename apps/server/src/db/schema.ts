@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
 
 /**
  * Control-plane schema (Cloudflare D1). Holds cross-store data only:
@@ -83,6 +83,14 @@ export const store = sqliteTable("store", {
   ownerId: text("owner_id")
     .notNull()
     .references(() => user.id),
+  /**
+   * The centre of the owner's tree. It is a real store row so it can be
+   * switched to and hold its own inventory, but it is not a selling branch and
+   * never appears as a transfer destination.
+   */
+  isCentral: integer("is_central", { mode: "boolean" }).notNull().default(false),
+  /** A branch's parent central store. Null for the central store itself. */
+  parentStoreId: text("parent_store_id"),
   /** Street address, printed on receipts. */
   address: text("address"),
   /** Contact number for customers, printed on receipts. */
@@ -93,7 +101,9 @@ export const store = sqliteTable("store", {
   receiptFooter: text("receipt_footer"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
-});
+}, (table) => [
+  index("store_owner_central_idx").on(table.ownerId, table.isCentral),
+]);
 
 /**
  * Expo push tokens for staff devices, so the server can alert a locked/closed

@@ -12,19 +12,28 @@ import { sqliteTable, text, integer, real, index, uniqueIndex } from "drizzle-or
 // --- Global inventory items (bulk stock) ---
 
 /**
- * A bulk inventory item that can be distributed across stores.
- * Example: "Rice - 50kg bag", "Turkey - whole", "Oil - 5L container"
+ * A bulk inventory item owned by the central store.
+ * Example: "Rice", 100 bags; "Turkey", 20 pieces; "Oil", 30 litres.
+ *
+ * The central store is a real store row (`store.is_central`), so its stock is
+ * not shared with other owners. `storeId` is the central store that owns this
+ * item; `ownerId` scopes it even for legacy rows created before the central
+ * store existed.
  */
 export const globalInventoryItems = sqliteTable("global_inventory_items", {
-  id: text("id").primaryKey(), // e.g., 'rice-50kg-bag-001'
-  name: text("name").notNull(), // e.g., 'Rice - 50kg bag'
+  id: text("id").primaryKey(), // e.g., 'inv_...'
+  ownerId: text("owner_id"),
+  storeId: text("store_id"),
+  name: text("name").notNull(), // e.g., 'Rice'
   unit: text("unit").notNull(), // 'kg', 'liters', 'pieces', 'bags'
   totalStock: integer("total_stock").notNull().default(0), // Total quantity in base units
   minStock: integer("min_stock").notNull().default(0), // Alert threshold
   description: text("description"), // Optional notes
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
-});
+}, (table) => [
+  index("global_inventory_items_store_idx").on(table.storeId),
+]);
 
 // --- Inventory allocations (distribution tracking) ---
 
@@ -52,6 +61,12 @@ export const inventoryAllocations = sqliteTable("inventory_allocations", {
     enum: ["pending", "fulfilled", "cancelled"] 
   }).notNull().default("pending"),
   allocatedAt: integer("allocated_at", { mode: "timestamp" }).notNull(),
+  /**
+   * When the central stock was actually deducted. New transfers deduct on
+   * dispatch, so this is set at send time. Rows from before the tree model
+   * have null here and are deducted on receipt instead.
+   */
+  stockDeductedAt: integer("stock_deducted_at", { mode: "timestamp" }),
   fulfilledAt: integer("fulfilled_at", { mode: "timestamp" }), // When received
   notes: text("notes"), // Optional: reason, order reference, etc.
   /**
@@ -62,7 +77,9 @@ export const inventoryAllocations = sqliteTable("inventory_allocations", {
   allocatedByName: text("allocated_by_name"),
   fulfilledByUserId: text("fulfilled_by_user_id"),
   fulfilledByName: text("fulfilled_by_name"),
-});
+}, (table) => [
+  index("inventory_allocations_from_store_idx").on(table.fromStoreId),
+]);
 
 // --- Store-level conversion rates (bulk → portion) ---
 

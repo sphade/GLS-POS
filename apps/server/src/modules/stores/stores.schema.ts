@@ -8,6 +8,14 @@ export const createStoreSchema = z.object({
 
 export type CreateStoreInput = z.infer<typeof createStoreSchema>;
 
+/** Create (or return) the owner's parent central store. */
+export const ensureCentralStoreSchema = z.object({
+  name: z.string().min(1).max(80).optional(),
+  currency: z.string().length(3).optional(),
+});
+
+export type EnsureCentralStoreInput = z.infer<typeof ensureCentralStoreSchema>;
+
 /**
  * Business Settings. Every field is optional so the screen can save just what
  * changed; empty strings clear a field rather than storing "".

@@ -36,7 +36,7 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
     entries: [
       { label: "VIP Orders (QR)", icon: "qrcode-scan", route: "/online-orders", needs: "sale:create" },
       { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory", needs: "catalog:write" },
-      { label: "Central Stock", icon: "warehouse", route: "/central-stock", needs: "inventory:adjust" },
+      { label: "Central Store", icon: "crown-outline", route: "/central-stock", needs: "inventory:adjust" },
       { label: "Incoming Deliveries", icon: "truck-delivery-outline", route: "/incoming-stock", needs: "inventory:adjust" },
       { label: "Production", icon: "chef-hat", route: "/production", needs: "inventory:adjust" },
       { label: "Table Management", icon: "table-furniture", route: "/tables", needs: "tables:manage" },
@@ -75,6 +75,10 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
   const { store } = useStore();
   const { can, canManageBusiness, signOut, stores } = useAuth();
   const canSwitch = stores.length > 1;
+  const central = stores.find((s) => s.isCentral);
+  const canManageCentral = central
+    ? central.role === "owner" || central.role === "manager"
+    : stores.some((s) => s.role === "owner");
 
   // Keep the modal mounted through the close animation.
   const [mounted, setMounted] = useState(visible);
@@ -185,7 +189,11 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
             )}
 
             {GROUPS.map((g) => {
-              const allowed = g.entries.filter((e) => !e.needs || can(e.needs));
+              const allowed = g.entries.filter(
+                (e) =>
+                  (!e.needs || can(e.needs)) &&
+                  (e.route !== "/central-stock" || canManageCentral),
+              );
               if (allowed.length === 0) return null;
               return (
                 <View key={g.title}>
