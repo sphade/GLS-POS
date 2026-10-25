@@ -105,6 +105,8 @@ export type CentralAllocation = {
   itemUnit: string;
   fromStoreName: string;
   toStoreName: string;
+  /** Local-only: the last sync failure for this transfer, if any. */
+  syncError?: string;
 };
 
 export type StoreProductOption = {
@@ -222,8 +224,14 @@ export const api = {
   // already handles a failed result, so offline screens show the message
   // instead of hanging.
   listCentralItems: () => request<CentralItem[]>("/inventory"),
-  createCentralItem: (body: { name: string; unit: string; totalStock?: number; minStock?: number; description?: string }) =>
-    request<CentralItem>("/inventory", { method: "POST", body: JSON.stringify(body) }),
+  createCentralItem: (body: {
+    id?: string;
+    name: string;
+    unit: string;
+    totalStock?: number;
+    minStock?: number;
+    description?: string;
+  }) => request<CentralItem>("/inventory", { method: "POST", body: JSON.stringify(body) }),
   updateCentralItem: (id: string, body: { name?: string; unit?: string; totalStock?: number; minStock?: number; description?: string }) =>
     request<CentralItem[]>(`/inventory/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteCentralItem: (id: string) =>
@@ -237,7 +245,14 @@ export const api = {
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     return request<CentralAllocation[]>(`/inventory/allocations${suffix}`);
   },
-  createAllocation: (body: { globalItemId: string; toStoreId: string; productId?: string; quantity: number; notes?: string }) =>
+  createAllocation: (body: {
+    id?: string;
+    globalItemId: string;
+    toStoreId: string;
+    productId?: string;
+    quantity: number;
+    notes?: string;
+  }) =>
     request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }),
   fulfillAllocation: (id: string) =>
     // Deliberately longer than the default: the server wakes the destination

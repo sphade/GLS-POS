@@ -1,8 +1,16 @@
 import { z } from "zod";
 
+/** IDs minted on a device while offline. Retrying the same id is safe. */
+const clientId = z
+  .string()
+  .min(4)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]+$/, "ID must be letters, numbers, - or _");
+
 // --- Global Inventory Items ---
 
 export const createGlobalInventoryItemSchema = z.object({
+  id: clientId.optional(),
   name: z.string().min(1, "Name is required"),
   unit: z.enum(["kg", "liters", "pieces", "bags", "boxes", "cans"]).default("kg"),
   totalStock: z.number().int().min(0).optional(),
@@ -24,6 +32,8 @@ export type UpdateGlobalInventoryItemInput = z.infer<typeof updateGlobalInventor
 // --- Allocations ---
 
 export const createAllocationSchema = z.object({
+  /** Client-generated idempotency key; retrying the same id is safe. */
+  id: clientId.optional(),
   globalItemId: z.string().min(1, "Central item ID is required"),
   /** The source is always the caller's central store, never a branch. */
   toStoreId: z.string().min(1, "Destination store ID is required"),

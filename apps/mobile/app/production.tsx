@@ -18,7 +18,8 @@ import { feedbackTap } from "@/lib/feedback";
  */
 export default function ProductionScreen() {
   const router = useRouter();
-  const { activeStore, can } = useAuth();
+  const { activeStore, can, store } = useAuth();
+  const isCentral = store?.isCentral;
   const canProduce = can("inventory:adjust");
 
   const [rules, setRules] = useState<ProductionRule[]>([]);
@@ -108,7 +109,7 @@ export default function ProductionScreen() {
 
   return (
     <EntityListScreen
-      title="Production"
+      title={isCentral ? "Central Production Rules" : "Production"}
       data={rules}
       keyExtractor={(rule) => rule.id}
       searchOf={(rule) => {

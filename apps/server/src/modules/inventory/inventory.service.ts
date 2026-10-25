@@ -110,11 +110,30 @@ export async function listGlobalInventoryItems(env: Env, central: CentralStore) 
 export async function createGlobalInventoryItem(
   env: Env,
   central: CentralStore,
-  input: { name: string; unit: string; totalStock?: number; minStock?: number; description?: string },
+  input: {
+    id?: string;
+    name: string;
+    unit: string;
+    totalStock?: number;
+    minStock?: number;
+    description?: string;
+  },
 ) {
   const db = createDb(env.DB);
-  const id = newId("inv");
+  const id = input.id ?? newId("inv");
   const now = new Date();
+
+  if (input.id) {
+    const [existing] = await db
+      .select()
+      .from(schema.globalInventoryItems)
+      .where(eq(schema.globalInventoryItems.id, id))
+      .limit(1);
+    if (existing) {
+      if (existing.ownerId === central.ownerId) return existing;
+      throw HttpError.badRequest("That item id is already in use", "duplicate_id");
+    }
+  }
 
   await db.insert(schema.globalInventoryItems).values({
     id,
@@ -129,7 +148,12 @@ export async function createGlobalInventoryItem(
     updatedAt: now,
   });
 
-  return { id, name: input.name, unit: input.unit, totalStock: input.totalStock ?? 0 };
+  const [created] = await db
+    .select()
+    .from(schema.globalInventoryItems)
+    .where(eq(schema.globalInventoryItems.id, id))
+    .limit(1);
+  return created;
 }
 
 export async function updateGlobalInventoryItem(
@@ -274,11 +298,52 @@ function storeStub(env: Env, storeId: string): DurableObjectStub<StoreDurableObj
  */
 export async function createAllocation(
   env: Env,
-  input: { globalItemId: string; toStoreId: string; productId?: string; quantity: number; notes?: string },
+  input: {
+    id?: string;
+    globalItemId: string;
+    toStoreId: string;
+    productId?: string;
+    quantity: number;
+    notes?: string;
+  },
   actor: AllocationActor,
 ) {
   const db = createDb(env.DB);
   const { central } = await requireCentralSender(env, actor.id);
+  const allocationId = input.id ?? newId("alloc");
+
+  // Retrying a client-minted id must return the original transfer without
+  // deducting stock a second time. Check before validating the item so a
+  // response lost after a successful write is still safely replayable.
+  if (input.id) {
+    const [existing] = await db
+      .select()
+      .from(schema.inventoryAllocations)
+      .where(eq(schema.inventoryAllocations.id, allocationId))
+      .limit(1);
+    if (existing) {
+      if (existing.fromStoreId !== central.id) {
+        throw HttpError.badRequest("That transfer id is already in use", "duplicate_id");
+      }
+      const [existingItem] = await db
+        .select({ name: schema.globalInventoryItems.name, unit: schema.globalInventoryItems.unit })
+        .from(schema.globalInventoryItems)
+        .where(eq(schema.globalInventoryItems.id, existing.globalItemId))
+        .limit(1);
+      const [existingStore] = await db
+        .select({ name: schema.store.name })
+        .from(schema.store)
+        .where(eq(schema.store.id, existing.toStoreId))
+        .limit(1);
+      return {
+        ...existing,
+        itemName: existingItem?.name ?? existing.globalItemId,
+        itemUnit: existingItem?.unit ?? "",
+        fromStoreName: central.name,
+        toStoreName: existingStore?.name ?? existing.toStoreId,
+      };
+    }
+  }
 
   const [item] = await db
     .select()
@@ -293,6 +358,7 @@ export async function createAllocation(
   const [toStore] = await db
     .select({
       id: schema.store.id,
+      name: schema.store.name,
       ownerId: schema.store.ownerId,
       isCentral: schema.store.isCentral,
       parentStoreId: schema.store.parentStoreId,
@@ -350,7 +416,6 @@ export async function createAllocation(
     );
   }
 
-  const allocationId = newId("alloc");
   try {
     await db.insert(schema.inventoryAllocations).values({
       id: allocationId,
@@ -391,6 +456,10 @@ export async function createAllocation(
     notes: input.notes ?? null,
     allocatedByUserId: actor.id,
     allocatedByName: actor.name,
+    itemName: item.name,
+    itemUnit: item.unit,
+    fromStoreName: central.name,
+    toStoreName: toStore.name,
   };
 }
 

@@ -14,6 +14,7 @@ import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { prepareHistoryIndexes, setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
+import { CentralSyncBridge } from "@/components/CentralSyncBridge";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
 import { colors } from "@/constants/theme";
@@ -131,6 +132,7 @@ function StoreScopedData() {
         >
           <WebOrdersProvider key={`orders-${dataScope}`}>
             <CartCatalogBridge />
+            <CentralSyncBridge />
             <StatusBar style="light" backgroundColor={colors.primaryDark} />
             <AuthGate>
               <RootStack />

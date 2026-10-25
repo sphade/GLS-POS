@@ -8,6 +8,16 @@ import { EditorToolbar, FieldCard, PickerCard, formStyles } from "@/components/f
 import { PickerSheet, type PickerOption } from "@/components/PickerSheet";
 import { api, type CentralItem, type StoreProductOption } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useStore } from "@/lib/store";
+import { useCatalog } from "@/lib/catalog";
+import {
+  centralItems,
+  createCentralTransferLocal,
+  flushCentralOutbox,
+  refreshCentralItems,
+  useCentralRevision,
+} from "@/lib/central";
+import { OFFLINE_MODE } from "@/lib/offline";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -18,9 +28,12 @@ import { feedbackTap } from "@/lib/feedback";
 export default function SendToStoreScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ globalItemId?: string }>();
-  const { stores } = useAuth();
+  const { stores, user } = useAuth();
+  const { store } = useStore();
+  const { products: catalogProducts } = useCatalog();
   const central = stores.find((s) => s.isCentral);
   const destinations = stores.filter((s) => !s.isCentral);
+  const revision = useCentralRevision();
 
   const [items, setItems] = useState<CentralItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,40 +50,74 @@ export default function SendToStoreScreen() {
   const [picker, setPicker] = useState<null | { title: string; options: PickerOption[]; onPick: (id: string) => void }>(null);
 
   useEffect(() => {
-    void (async () => {
-      const res = await api.listCentralItems();
+    if (!central) {
+      setItems([]);
       setLoading(false);
-      if (!res.ok) {
-        Alert.alert("Could not load central stock", res.error.message);
-        return;
-      }
-      setItems(res.data);
-      if (params.globalItemId && !res.data.some((i) => i.id === params.globalItemId)) {
+      return;
+    }
+    const cached = centralItems(central.id);
+    setItems(cached);
+    setLoading(false);
+    if (params.globalItemId && !cached.some((i) => i.id === params.globalItemId)) {
+      setItemId(undefined);
+    }
+  }, [central?.id, params.globalItemId, revision]);
+
+  useEffect(() => {
+    if (!central) return;
+    void (async () => {
+      await refreshCentralItems(central.id);
+      const fresh = centralItems(central.id);
+      setItems(fresh);
+      setLoading(false);
+      if (params.globalItemId && !fresh.some((i) => i.id === params.globalItemId)) {
         setItemId(undefined);
       }
     })();
-  }, [params.globalItemId]);
+  }, [central?.id, params.globalItemId]);
 
   // Destination catalog for the product picker. Best-effort: the send still
-  // works without it (the server matches by item name on confirm).
+  // works without it (the server matches by item name on confirm). When the
+  // destination is the active branch its catalog is already local, so the
+  // picker still works offline.
   useEffect(() => {
     if (!toStoreId) {
       setProducts([]);
       setProductId(undefined);
       return;
     }
+
+    const localOptions: StoreProductOption[] =
+      toStoreId === store.id
+        ? catalogProducts.map((product) => ({
+            id: product.id,
+            name: product.name,
+            stock: product.stockQuantity,
+            stockState: product.stockQuantity == null ? "untracked" : "tracked",
+          }))
+        : [];
+    setProducts(localOptions);
+    setProductId((prev) =>
+      prev && localOptions.some((option) => option.id === prev) ? prev : undefined,
+    );
+
+    if (OFFLINE_MODE) {
+      setProductsLoading(false);
+      return;
+    }
+
     setProductsLoading(true);
     void (async () => {
       const res = await api.listStoreProducts(toStoreId);
       setProductsLoading(false);
       if (res.ok) {
         setProducts(res.data);
-        setProductId((prev) => (prev && res.data.some((p) => p.id === prev) ? prev : undefined));
-      } else {
-        setProducts([]);
+        setProductId((prev) =>
+          prev && res.data.some((p) => p.id === prev) ? prev : undefined,
+        );
       }
     })();
-  }, [toStoreId]);
+  }, [catalogProducts, store.id, toStoreId]);
 
   const item = items.find((i) => i.id === itemId);
   const toStore = stores.find((s) => s.id === toStoreId);
@@ -87,25 +134,42 @@ export default function SendToStoreScreen() {
 
   const closePicker = () => setPicker(null);
 
-  const submit = async () => {
-    if (!valid || !item || !toStoreId) return;
+  const submit = () => {
+    if (!valid || !item || !toStoreId || !central) return;
+    const actor = user
+      ? { id: user.id, name: user.name, email: user.email }
+      : null;
+    if (!actor) return;
+
     setSending(true);
-    const res = await api.createAllocation({
-      globalItemId: item.id,
-      toStoreId,
-      productId,
-      quantity: qty,
-      notes: notes.trim() || undefined,
-    });
+    const res = createCentralTransferLocal(
+      central.id,
+      central.name,
+      {
+        globalItemId: item.id,
+        toStoreId,
+        toStoreName: toStore?.name ?? "Branch",
+        productId,
+        quantity: qty,
+        notes: notes.trim() || undefined,
+      },
+      actor,
+    );
     setSending(false);
     if (!res.ok) {
-      Alert.alert("Could not transfer", res.error.message);
+      Alert.alert("Could not transfer", res.error);
       return;
     }
+
     feedbackTap();
+    void flushCentralOutbox(
+      central.id,
+      actor,
+      stores.map((membership) => ({ id: membership.id })),
+    );
     Alert.alert(
-      "Transfer started",
-      `${qty} ${item.unit} ${item.name} left the Central Store for ${toStore?.name ?? "the shop"}. The shop confirms receipt when it arrives.`,
+      "Transfer saved",
+      `${qty} ${item.unit} ${item.name} left the Central Store for ${toStore?.name ?? "the shop"}. The transfer is saved on this device and will sync automatically; the shop confirms receipt when it arrives.`,
       [{ text: "OK", onPress: () => router.back() }],
     );
   };

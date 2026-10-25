@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, PickerCard, formStyles } from "@/components/form";
 import { PickerSheet, type PickerOption } from "@/components/PickerSheet";
 import { api, type ProductionRule, type StoreProductOption } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useStore } from "@/lib/store";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -20,7 +22,9 @@ import { feedbackTap } from "@/lib/feedback";
 export default function ProductionRuleEditorScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const { activeStore } = useAuth();
+  const { activeStore, can, store } = useAuth();
+  const isCentral = store?.isCentral;
+  const canManage = can("inventory:adjust");
 
   const [products, setProducts] = useState<StoreProductOption[]>([]);
   const [existing, setExisting] = useState<ProductionRule | null>(null);
@@ -99,7 +103,7 @@ export default function ProductionRuleEditorScreen() {
   const pickOptions = (excludeId: string | undefined): PickerOption[] =>
     tracked
       .filter((p) => p.id !== excludeId)
-      .map((p) => ({ id: p.id, label: p.name, hint: `${p.stock ?? 0} in stock` }));
+      .map((p) => ({ id: p.id, label: p.name, hint: `${p.stock ?? 0} in stock" }));
 
   const save = async () => {
     if (!activeStore || !valid || !input || !output) return;

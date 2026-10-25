@@ -160,6 +160,24 @@ function open(storeId: string): SQLite.SQLiteDatabase {
 
   database.execSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT);`);
 
+  /**
+   * Local-only documents that do not participate in the store sync protocol:
+   * the central-stock cache and its outbox. They still live in the store's
+   * SQLite file so switching branches cannot mix them up.
+   */
+  database.execSync(
+    `CREATE TABLE IF NOT EXISTS local_docs (
+      collection TEXT NOT NULL,
+      id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (collection, id)
+    );`,
+  );
+  database.execSync(
+    `CREATE INDEX IF NOT EXISTS local_docs_collection_idx ON local_docs (collection);`,
+  );
+
   handles.set(storeId, database);
   return database;
 }
@@ -238,6 +256,111 @@ export function loadOne<T>(c: Collection, id: string): T | null {
     id,
   );
   return row ? (JSON.parse(row.data) as T) : null;
+}
+
+// --- Local-only documents (central cache + outbox) --------------------------
+
+const LOCAL_DOC_COLLECTION = /^[a-z_][a-z0-9_]*$/;
+
+function assertLocalCollection(collection: string): void {
+  if (!LOCAL_DOC_COLLECTION.test(collection)) {
+    throw new Error(`Unsafe local document collection: ${collection}`);
+  }
+}
+
+function localDocPutOn<T extends { id: string }>(
+  db: SQLite.SQLiteDatabase,
+  collection: string,
+  item: T,
+): void {
+  assertLocalCollection(collection);
+  db.runSync(
+    `INSERT INTO local_docs (collection, id, data, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(collection, id) DO UPDATE SET
+       data = excluded.data,
+       updated_at = MAX(excluded.updated_at, updated_at + 1)`,
+    collection,
+    item.id,
+    JSON.stringify(item),
+    Date.now(),
+  );
+}
+
+/** Read one local-only document from a specific store database. */
+export function localDocGet<T>(storeId: string, collection: string, id: string): T | null {
+  assertLocalCollection(collection);
+  const row = open(storeId).getFirstSync<{ data: string }>(
+    `SELECT data FROM local_docs WHERE collection = ? AND id = ?`,
+    collection,
+    id,
+  );
+  return row ? (JSON.parse(row.data) as T) : null;
+}
+
+/** All local-only documents in a collection, in insertion order. */
+export function localDocLoadAll<T>(storeId: string, collection: string): T[] {
+  assertLocalCollection(collection);
+  return open(storeId)
+    .getAllSync<{ data: string }>(
+      `SELECT data FROM local_docs WHERE collection = ? ORDER BY rowid ASC`,
+      collection,
+    )
+    .map((row) => JSON.parse(row.data) as T);
+}
+
+export function localDocCount(storeId: string, collection: string): number {
+  assertLocalCollection(collection);
+  return (
+    open(storeId).getFirstSync<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM local_docs WHERE collection = ?`,
+      collection,
+    )?.n ?? 0
+  );
+}
+
+export function localDocPut<T extends { id: string }>(
+  storeId: string,
+  collection: string,
+  item: T,
+): void {
+  localDocPutOn(open(storeId), collection, item);
+}
+
+export function localDocDelete(storeId: string, collection: string, id: string): void {
+  assertLocalCollection(collection);
+  open(storeId).runSync(
+    `DELETE FROM local_docs WHERE collection = ? AND id = ?`,
+    collection,
+    id,
+  );
+}
+
+/** Commit several local-only documents atomically. */
+export function localDocWriteBatch(
+  storeId: string,
+  writes: readonly { collection: string; item: { id: string } }[],
+): void {
+  if (writes.length === 0) return;
+  const db = open(storeId);
+  withTx(db, () => {
+    for (const write of writes) {
+      localDocPutOn(db, write.collection, write.item);
+    }
+  });
+}
+
+/** Replace a local-only collection with the latest server snapshot. */
+export function localDocReplaceAll<T extends { id: string }>(
+  storeId: string,
+  collection: string,
+  items: readonly T[],
+): void {
+  assertLocalCollection(collection);
+  const db = open(storeId);
+  withTx(db, () => {
+    db.runSync(`DELETE FROM local_docs WHERE collection = ?`, collection);
+    for (const item of items) localDocPutOn(db, collection, item);
+  });
 }
 
 /**

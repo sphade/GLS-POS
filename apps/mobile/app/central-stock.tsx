@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,6 +7,15 @@ import { colors } from "@/constants/theme";
 import { SwipeTabs } from "@/components/SwipeTabs";
 import { EntityListScreen, EntityRow } from "@/components/EntityListScreen";
 import { api, type CentralAllocation, type CentralItem } from "@/lib/api";
+import {
+  centralAllocations,
+  centralItems,
+  centralLastError,
+  centralPendingCount,
+  refreshCentralAllocations,
+  refreshCentralItems,
+  useCentralRevision,
+} from "@/lib/central";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
@@ -41,40 +50,63 @@ export default function CentralStockScreen() {
   const [allocations, setAllocations] = useState<CentralAllocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const revision = useCentralRevision();
+
+  const pending = central ? centralPendingCount(central.id) : 0;
+  const syncError = central ? centralLastError(central.id) : null;
+
+  const readLocal = useCallback(
+    (centralId: string) => {
+      setItems(centralItems(centralId));
+      setAllocations(centralAllocations(centralId));
+    },
+    [],
+  );
 
   const load = useCallback(async () => {
-    setLoading(true);
     setError(null);
 
-    if (!central) {
+    let centralId = central?.id;
+    if (!centralId) {
       const ensured = await api.ensureCentralStore();
       if (!ensured.ok) {
         setError(ensured.error.message);
         setLoading(false);
         return;
       }
+      centralId = ensured.data.id;
       await refresh();
     }
 
-    const [itemsRes, allocRes] = await Promise.all([api.listCentralItems(), api.listAllocations()]);
-    if (!itemsRes.ok) {
-      setError(itemsRes.error.message);
-      setLoading(false);
-      return;
+    const cachedItems = centralItems(centralId);
+    const cachedAllocations = centralAllocations(centralId);
+    readLocal(centralId);
+    if (cachedItems.length > 0 || cachedAllocations.length > 0) setLoading(false);
+
+    const [itemsOk, allocationsOk] = await Promise.all([
+      refreshCentralItems(centralId),
+      refreshCentralAllocations(centralId),
+    ]);
+    readLocal(centralId);
+
+    if (!itemsOk && !allocationsOk && cachedItems.length === 0 && cachedAllocations.length === 0) {
+      setError("No saved central stock yet. Connect once to load it.");
     }
-    setItems(itemsRes.data);
-    // A failed allocation list shouldn't hide the stock itself; the SENT tab
-    // shows its own message when empty.
-    setAllocations(allocRes.ok ? allocRes.data : []);
-    if (!allocRes.ok) setError((prev) => prev ?? null);
     setLoading(false);
-  }, [central, refresh]);
+  }, [central?.id, readLocal, refresh]);
+
+  useEffect(() => {
+    if (central) readLocal(central.id);
+  }, [central, readLocal, revision]);
 
   useFocusEffect(
     useCallback(() => {
       if (canManage) void load();
     }, [canManage, load]),
   );
+
+  const syncMessage =
+    syncError ?? (pending > 0 ? `${pending} central change${pending === 1 ? "" : "s"} waiting to sync` : null);
 
   if (!canManage) {
     return (
@@ -114,6 +146,15 @@ export default function CentralStockScreen() {
           <Ionicons name="refresh" size={22} color={colors.primary} />
         </Pressable>
       </View>
+
+      {syncMessage ? (
+        <View style={styles.syncBanner}>
+          <Ionicons name="cloud-offline-outline" size={14} color={colors.white} />
+          <Text style={styles.syncBannerText} numberOfLines={2}>
+            {syncMessage}
+          </Text>
+        </View>
+      ) : null}
 
       {loading ? (
         <ActivityIndicator style={{ marginTop: 60 }} size="large" color={colors.primary} />
@@ -197,7 +238,7 @@ export default function CentralStockScreen() {
                     initial={a.itemName.charAt(0).toUpperCase()}
                     color={statusTone(a.status)}
                     title={`${a.quantity} ${a.itemUnit} ${a.itemName}`}
-                    subtitle={`To ${a.toStoreName} | ${statusLabel(a.status)} | by ${a.allocatedByName ?? "staff"} | ${formatDate(a.allocatedAt)}`}
+                    subtitle={`To ${a.toStoreName} | ${statusLabel(a.status)} | by ${a.allocatedByName ?? "staff"} | ${formatDate(a.allocatedAt)}${a.syncError ? ` | ${a.syncError}` : ""}`}
                     trailing={
                       <View style={[styles.statusPill, { backgroundColor: statusTone(a.status) }]}>
                         <Text style={styles.statusPillText}>{statusLabel(a.status)}</Text>
@@ -233,6 +274,15 @@ const styles = StyleSheet.create({
   },
   toolbarBtn: { width: 44, alignItems: "center" },
   toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
+  syncBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: colors.lowStock,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  syncBannerText: { flex: 1, color: colors.white, fontSize: 11, fontWeight: "700" },
   lowPill: { backgroundColor: colors.red500, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
   lowPillText: { color: colors.white, fontSize: 10, fontWeight: "800" },
   rowTrailing: { flexDirection: "row", alignItems: "center", gap: 8 },
