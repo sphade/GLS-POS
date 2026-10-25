@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EntityListScreen, EntityRow } from "@/components/EntityListScreen";
@@ -58,6 +58,9 @@ export default function IncomingStockScreen() {
   const membership = stores.find((s) => s.id === store.id) ?? activeStore;
   const myRole = membership && membership.id === store.id ? membership.role : null;
   const canConfirm = myRole === "owner" || myRole === "manager";
+  // The Central Store is the sender, never the receiver: it has no incoming
+  // deliveries and must not be able to "send to itself".
+  const isCentral = !!store.isCentral;
   const pending = centralPendingCount(store.id);
   const syncError = centralLastError(store.id);
 
@@ -67,21 +70,29 @@ export default function IncomingStockScreen() {
   const [acting, setActing] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (isCentral) {
+      setRows([]);
+      setLoading(false);
+      return;
+    }
     setError(null);
-    const cached = centralAllocations(store.id);
+    // The local cache is scoped to this store and normally holds only its own
+    // deliveries, but it is filtered again on the way out so a stale or
+    // cross-scoped row can never be mistaken for something arriving here.
+    const cached = centralAllocations(store.id).filter((a) => a.toStoreId === store.id);
     setRows(cached);
     if (cached.length > 0) setLoading(false);
 
     const ok = await refreshCentralAllocations(store.id, { toStoreId: store.id });
-    setRows(centralAllocations(store.id));
+    setRows(centralAllocations(store.id).filter((a) => a.toStoreId === store.id));
     if (!ok && cached.length === 0) {
       setError("No saved deliveries yet. Connect once to load them.");
     }
     setLoading(false);
-  }, [store.id]);
+  }, [isCentral, store.id]);
 
   useEffect(() => {
-    setRows(centralAllocations(store.id));
+    setRows(centralAllocations(store.id).filter((a) => a.toStoreId === store.id));
   }, [revision, store.id]);
 
   useFocusEffect(
@@ -175,6 +186,18 @@ export default function IncomingStockScreen() {
   };
 
   const body = () => {
+    if (isCentral) {
+      return (
+        <View style={styles.blocked}>
+          <MaterialCommunityIcons name="crown-outline" size={44} color={colors.grey400} />
+          <Text style={styles.blockedTitle}>The Central Store sends, it does not receive</Text>
+          <Text style={styles.blockedText}>
+            Stock only ever moves out of the Central Store into your shops. Open a shop to see
+            what has been delivered to it.
+          </Text>
+        </View>
+      );
+    }
     if (loading && rows.length === 0) {
       return <ActivityIndicator style={{ marginTop: 60 }} size="large" color={colors.primary} />;
     }

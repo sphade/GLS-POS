@@ -92,6 +92,11 @@ export type CentralAllocation = {
   toStoreId: string;
   productId: string | null;
   quantity: number;
+  /** What the receiving shop's stock rises by. Equal to `quantity` when the
+   *  two sides count in the same unit (or on rows from before conversion). */
+  receiveQuantity?: number | null;
+  /** The receiving shop's unit, e.g. 'pieces'. */
+  receiveUnit?: string | null;
   status: CentralAllocationStatus;
   allocatedAt: string | number;
   stockDeductedAt?: string | number | null;
@@ -251,9 +256,14 @@ export const api = {
     toStoreId: string;
     productId?: string;
     quantity: number;
+    receiveQuantity?: number;
+    receiveUnit?: string;
     notes?: string;
   }) =>
-    request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }),
+    // Longer than the default: the server raises the destination store's
+    // Durable Object stock inside this request, which can outlast 12s on a
+    // cold store. Retrying is safe (the server dedupes by id).
+    request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }, 30_000),
   fulfillAllocation: (id: string) =>
     // Deliberately longer than the default: the server wakes the destination
     // store's Durable Object and writes there before answering, which can

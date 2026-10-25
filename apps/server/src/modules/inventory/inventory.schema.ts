@@ -44,6 +44,14 @@ export const createAllocationSchema = z.object({
    */
   productId: z.string().min(1).optional(),
   quantity: z.number().int().min(1, "Quantity must be at least 1"),
+  /**
+   * How much the receiving store's stock goes up by, in its own unit. One kg
+   * of flour may be 10 loaves at the shop, so this is not always `quantity`.
+   * Defaults to `quantity` when omitted.
+   */
+  receiveQuantity: z.number().int().min(1).optional(),
+  /** Destination unit for display, e.g. 'pieces'. Defaults to the item's unit. */
+  receiveUnit: z.string().min(1).max(24).optional(),
   notes: z.string().max(240).optional(),
 });
 

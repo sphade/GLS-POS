@@ -55,7 +55,11 @@ export function StoreSwitcherList({
             onPress: () => {
               setStoreId(id);
               onDone();
-              if (pathname === "/central-stock") router.replace("/");
+              // Transfers only exist in the Central Store, so leaving it must
+              // not strand the user on a central-only screen.
+              if (pathname === "/transfers" || pathname === "/(tabs)/transfers") {
+                router.replace("/" as never);
+              }
             },
           },
         ],
@@ -64,7 +68,9 @@ export function StoreSwitcherList({
     }
     setStoreId(id);
     onDone();
-    if (pathname === "/central-stock") router.replace("/");
+    if (pathname === "/transfers" || pathname === "/(tabs)/transfers") {
+      router.replace("/" as never);
+    }
   };
 
   const goTo = (route: string) => {
@@ -80,30 +86,22 @@ export function StoreSwitcherList({
       {[...stores]
         .sort((a, b) => Number(!!b.isCentral) - Number(!!a.isCentral))
         .map((s) => {
-          const active = !s.isCentral && s.id === store.id;
+          const active = s.id === store.id;
           return (
             <Pressable
               key={s.id}
               accessibilityRole="button"
               accessibilityState={{ selected: active }}
-              accessibilityLabel={s.isCentral ? "Open Central Store" : `Switch to ${s.name}`}
+              accessibilityLabel={`Switch to ${s.name}`}
               style={[styles.row, s.isCentral && styles.centralRow]}
-              onPress={() => {
-                if (s.isCentral) {
-                  feedbackTap();
-                  onDone();
-                  router.push("/central-stock" as never);
-                  return;
-                }
-                select(s.id);
-              }}
+              onPress={() => select(s.id)}
               android_ripple={{ color: "#00000010" }}
             >
               <View
                 style={[
                   styles.avatar,
                   active && { backgroundColor: colors.primary },
-                  s.isCentral && styles.centralAvatar,
+                  s.isCentral && !active && styles.centralAvatar,
                 ]}
               >
                 {s.isCentral ? (
@@ -134,9 +132,7 @@ export function StoreSwitcherList({
                   <Text style={styles.rowRef}>{s.reference}</Text>
                 </View>
               </View>
-              {s.isCentral ? (
-                <Ionicons name="chevron-forward" size={20} color={colors.grey500} />
-              ) : active ? (
+              {active ? (
                 <Ionicons name="checkmark-circle" size={22} color={colors.primary} />
               ) : null}
             </Pressable>

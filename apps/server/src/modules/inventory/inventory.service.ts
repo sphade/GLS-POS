@@ -304,6 +304,9 @@ export async function createAllocation(
     toStoreId: string;
     productId?: string;
     quantity: number;
+    /** What the receiving store's stock rises by, in its own unit. */
+    receiveQuantity?: number;
+    receiveUnit?: string;
     notes?: string;
   },
   actor: AllocationActor,
@@ -316,7 +319,7 @@ export async function createAllocation(
   // deducting stock a second time. Check before validating the item so a
   // response lost after a successful write is still safely replayable.
   if (input.id) {
-    const [existing] = await db
+    let [existing] = await db
       .select()
       .from(schema.inventoryAllocations)
       .where(eq(schema.inventoryAllocations.id, allocationId))
@@ -324,6 +327,23 @@ export async function createAllocation(
     if (existing) {
       if (existing.fromStoreId !== central.id) {
         throw HttpError.badRequest("That transfer id is already in use", "duplicate_id");
+      }
+      // A first attempt that died between writing the row and receiving it
+      // would otherwise sit as pending forever. Finish it now, best-effort:
+      // the destination raise is idempotent by allocation id, so a repeat is
+      // free and a real failure is left for the fulfill endpoint to report.
+      if (existing.status === "pending") {
+        try {
+          await fulfillAllocation(env, allocationId, actor);
+          const [refreshed] = await db
+            .select()
+            .from(schema.inventoryAllocations)
+            .where(eq(schema.inventoryAllocations.id, allocationId))
+            .limit(1);
+          if (refreshed) existing = refreshed;
+        } catch {
+          // Leave it pending rather than fail a replay of a good transfer.
+        }
       }
       const [existingItem] = await db
         .select({ name: schema.globalInventoryItems.name, unit: schema.globalInventoryItems.unit })
@@ -382,6 +402,16 @@ export async function createAllocation(
     throw HttpError.badRequest("Quantity must be a whole number of at least 1", "invalid_quantity");
   }
 
+  // The centre counts in kg and the shop counts in pieces, so the two sides of
+  // a transfer are genuinely different numbers. Both must be whole units.
+  const receiveQuantity = Math.round(input.receiveQuantity ?? quantity);
+  if (!Number.isFinite(receiveQuantity) || receiveQuantity < 1) {
+    throw HttpError.badRequest(
+      "The receiving quantity must be a whole number of at least 1",
+      "invalid_quantity",
+    );
+  }
+
   if (item.storeId !== central.id) {
     await db
       .update(schema.globalInventoryItems)
@@ -424,6 +454,8 @@ export async function createAllocation(
       toStoreId: input.toStoreId,
       productId: input.productId ?? null,
       quantity,
+      receiveQuantity,
+      receiveUnit: input.receiveUnit?.trim().slice(0, 24) || null,
       status: "pending",
       allocatedAt: now,
       stockDeductedAt: now,
@@ -443,6 +475,27 @@ export async function createAllocation(
     throw err;
   }
 
+  // A transfer is received the moment it is sent. The centre dispatches and the
+  // shop's stock rises inside the same request, so nobody has to stand around
+  // confirming a delivery that already left the building. If the destination
+  // cannot take it - no matching product, untracked stock, variants - the whole
+  // send is rolled back rather than left hanging as "in transit" forever.
+  try {
+    await fulfillAllocation(env, allocationId, actor);
+  } catch (err) {
+    await db
+      .delete(schema.inventoryAllocations)
+      .where(eq(schema.inventoryAllocations.id, allocationId));
+    await db
+      .update(schema.globalInventoryItems)
+      .set({
+        totalStock: sql`${schema.globalInventoryItems.totalStock} + ${quantity}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.globalInventoryItems.id, item.id));
+    throw err;
+  }
+
   return {
     id: allocationId,
     globalItemId: input.globalItemId,
@@ -450,9 +503,12 @@ export async function createAllocation(
     toStoreId: input.toStoreId,
     productId: input.productId ?? null,
     quantity,
-    status: "pending",
+    receiveQuantity,
+    receiveUnit: input.receiveUnit?.trim().slice(0, 24) || null,
+    status: "fulfilled" as const,
     allocatedAt: now,
     stockDeductedAt: now,
+    fulfilledAt: new Date(),
     notes: input.notes ?? null,
     allocatedByUserId: actor.id,
     allocatedByName: actor.name,
@@ -525,7 +581,9 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
   const received = await storeStub(env, allocation.toStoreId).receiveCentralDelivery({
     productId: allocation.productId ?? undefined,
     globalItemName: item.name,
-    quantity: allocation.quantity,
+    // The two sides of a transfer count differently: 1 kg out of the centre may
+    // be 10 pieces on the shop's shelf. Legacy rows have no conversion.
+    quantity: allocation.receiveQuantity ?? allocation.quantity,
     ref: allocation.id,
     note: allocation.notes ?? `Central delivery of ${allocation.quantity} ${item.unit} ${item.name}`,
     actor: { id: actor.id, name: actor.name, email: actor.email, role: effective },

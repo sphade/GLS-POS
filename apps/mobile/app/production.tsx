@@ -18,8 +18,8 @@ import { feedbackTap } from "@/lib/feedback";
  */
 export default function ProductionScreen() {
   const router = useRouter();
-  const { activeStore, can, store } = useAuth();
-  const isCentral = store?.isCentral;
+  const { activeStore, can } = useAuth();
+  const isCentral = activeStore?.isCentral;
   const canProduce = can("inventory:adjust");
 
   const [rules, setRules] = useState<ProductionRule[]>([]);

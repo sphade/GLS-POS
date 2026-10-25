@@ -21,8 +21,8 @@ import { feedbackTap } from "@/lib/feedback";
 export default function ProductionRunScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ ruleId?: string }>();
-  const { activeStore, can, store } = useAuth();
-  const isCentral = store?.isCentral;
+  const { activeStore, can } = useAuth();
+  const isCentral = activeStore?.isCentral;
   const canManage = can("inventory:adjust");
 
   const [rule, setRule] = useState<ProductionRule | null>(null);
@@ -236,7 +236,7 @@ export default function ProductionRunScreen() {
           showTick={false}
         />
 
-        {saving && <ActivityIndicator style={{ marginTop: 12 }} color={colors.primary} />
+        {saving && <ActivityIndicator style={{ marginTop: 12 }} color={colors.primary} />}
       </ScrollView>
     </SafeAreaView>
   );
@@ -263,22 +263,4 @@ const styles = StyleSheet.create({
   blocked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30, gap: 8 },
   blockedTitle: { fontSize: 17, fontWeight: "800", color: colors.grey900, marginTop: 10 },
   blockedText: { fontSize: 13.5, color: colors.grey600, textAlign: "center", lineHeight: 20 },
-});
-  summary: {
-    backgroundColor: colors.card,
-    borderRadius: 4,
-    padding: 14,
-    marginBottom: 8,
-    elevation: 1,
-  },
-  summaryLabel: { fontSize: 12, fontWeight: "600", color: colors.grey600, marginBottom: 6 },
-  summaryText: { fontSize: 17, fontWeight: "800", color: colors.grey900 },
-  summaryHint: { fontSize: 12.5, color: colors.grey600, marginTop: 8 },
-  warn: {
-    color: colors.red500,
-    fontSize: 12,
-    fontWeight: "600",
-    marginBottom: 8,
-    marginLeft: 4,
-  },
 });

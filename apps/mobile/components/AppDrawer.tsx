@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   Animated,
   Dimensions,
   Modal,
@@ -16,6 +17,7 @@ import { colors } from "@/constants/theme";
 import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
 import { StoreSwitcherList } from "@/components/StoreSwitcherList";
 
 type Entry = {
@@ -24,6 +26,10 @@ type Entry = {
   route: string;
   /** Hidden unless the signed-in role holds this permission. */
   needs?: Permission;
+  /** Opens the Central Store by switching into it, not by pushing a screen. */
+  central?: boolean;
+  /** Hidden while the Central Store is the active shop. */
+  branchOnly?: boolean;
 };
 
 /**
@@ -36,8 +42,15 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
     entries: [
       { label: "VIP Orders (QR)", icon: "qrcode-scan", route: "/online-orders", needs: "sale:create" },
       { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory", needs: "catalog:write" },
-      { label: "Central Store", icon: "crown-outline", route: "/central-stock", needs: "inventory:adjust" },
-      { label: "Incoming Deliveries", icon: "truck-delivery-outline", route: "/incoming-stock", needs: "inventory:adjust" },
+      { label: "Central Store", icon: "crown-outline", route: "/", needs: "inventory:adjust", central: true },
+      {
+        label: "Incoming Deliveries",
+        icon: "truck-delivery-outline",
+        route: "/incoming-stock",
+        needs: "inventory:adjust",
+        // The Central Store is the sender, never a recipient.
+        branchOnly: true,
+      },
       { label: "Production", icon: "chef-hat", route: "/production", needs: "inventory:adjust" },
       { label: "Table Management", icon: "table-furniture", route: "/tables", needs: "tables:manage" },
       { label: "Customers Management", icon: "account-group-outline", route: "/customers", needs: "customers:manage" },
@@ -72,8 +85,8 @@ const DURATION = 220;
  */
 export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const router = useRouter();
-  const { store } = useStore();
-  const { can, canManageBusiness, signOut, stores } = useAuth();
+  const { store, setStoreId } = useStore();
+  const { can, canManageBusiness, signOut, stores, refresh } = useAuth();
   const canSwitch = stores.length > 1;
   const central = stores.find((s) => s.isCentral);
   const canManageCentral = central
@@ -113,6 +126,43 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
     router.push(route as never);
   };
 
+  // The Central Store is a shop you switch into, not a hub screen you push on
+  // top of whatever shop is open — so its drawer entry switches first and lands
+  // on the central tab bar. A business created before the central store existed
+  // gets one created here, then switched to once the fresh membership arrives.
+  const [openingCentral, setOpeningCentral] = useState(false);
+  const [pendingCentralSwitch, setPendingCentralSwitch] = useState(false);
+
+  useEffect(() => {
+    if (!pendingCentralSwitch || !central) return;
+    setPendingCentralSwitch(false);
+    setStoreId(central.id);
+    router.replace("/" as never);
+  }, [central, pendingCentralSwitch, router, setStoreId]);
+
+  const openCentral = () => {
+    feedbackTap();
+    onClose();
+    if (central) {
+      if (store.id !== central.id) setStoreId(central.id);
+      router.replace("/" as never);
+      return;
+    }
+    if (!canManageBusiness || openingCentral) return;
+
+    setOpeningCentral(true);
+    void (async () => {
+      const ensured = await api.ensureCentralStore();
+      setOpeningCentral(false);
+      if (!ensured.ok) {
+        Alert.alert("Could not open the Central Store", ensured.error.message);
+        return;
+      }
+      await refresh();
+      setPendingCentralSwitch(true);
+    })();
+  };
+
   // Render immediately on the opening commit; `mounted` only keeps the modal
   // alive while its close animation finishes.
   if (!visible && !mounted) return null;
@@ -139,8 +189,12 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
                 setSwitcherOpen((v) => !v);
               }}
             >
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{store.initials}</Text>
+              <View style={[styles.avatar, store.isCentral && styles.centralAvatar]}>
+                {store.isCentral ? (
+                  <MaterialCommunityIcons name="crown-outline" size={21} color={colors.white} />
+                ) : (
+                  <Text style={styles.avatarText}>{store.initials}</Text>
+                )}
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.storeName} numberOfLines={1}>
@@ -192,19 +246,20 @@ export function AppDrawer({ visible, onClose }: { visible: boolean; onClose: () 
               const allowed = g.entries.filter(
                 (e) =>
                   (!e.needs || can(e.needs)) &&
-                  (e.route !== "/central-stock" || canManageCentral),
+                  (!e.branchOnly || !store.isCentral) &&
+                  (e.central !== true || canManageCentral),
               );
               if (allowed.length === 0) return null;
               return (
                 <View key={g.title}>
                   <Text style={styles.groupTitle}>{g.title}</Text>
                   {allowed.map((e) => (
-                    <Pressable
-                      key={e.label}
-                      style={styles.row}
-                      onPress={() => go(e.route)}
-                      android_ripple={{ color: "#00000010" }}
-                    >
+                  <Pressable
+                    key={e.label}
+                    style={styles.row}
+                    onPress={() => (e.central ? openCentral() : go(e.route))}
+                    android_ripple={{ color: "#00000010" }}
+                  >
                       <MaterialCommunityIcons name={e.icon} size={22} color={colors.primary} />
                       <Text style={styles.rowLabel}>{e.label}</Text>
                     </Pressable>
@@ -260,6 +315,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  centralAvatar: { backgroundColor: "#B8860B" },
   avatarText: { color: colors.white, fontSize: 17, fontWeight: "800" },
   storeName: { color: colors.white, fontSize: 16, fontWeight: "700" },
   storeRef: { color: "#FFFFFFBB", fontSize: 12, marginTop: 2 },

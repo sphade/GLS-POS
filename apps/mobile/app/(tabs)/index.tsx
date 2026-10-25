@@ -40,6 +40,7 @@ import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { useServerRefresh } from "@/lib/sync";
 import { useStore } from "@/lib/store";
+import { CentralItemsView } from "@/components/CentralItemsView";
 import { ProductAvatar } from "@/components/product-avatar";
 import { EmptyState } from "@/components/EmptyState";
 import { stockHintOf } from "@/lib/stock";
@@ -123,7 +124,17 @@ function sameItems(a: readonly Item[], b: readonly Item[]): boolean {
   return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
-export default function ItemsScreen() {
+/**
+ * The Central Store has no POS catalog to sell from — its Items tab is the
+ * parent stock list instead (every item the owner added, with per-row transfer).
+ * Swapping the whole screen keeps the grid's hooks untouched by the branch.
+ */
+export default function ItemsRoute() {
+  const { store } = useStore();
+  return store.isCentral ? <CentralItemsView /> : <ItemsScreen />;
+}
+
+function ItemsScreen() {
   const router = useRouter();
   // Fast context only: stable actions + non-reactive readers. The screen must
   // NOT subscribe to cart changes, or every tap re-renders the whole grid.

@@ -251,6 +251,13 @@ export type CreateCentralTransferInput = {
   toStoreName: string;
   productId?: string;
   quantity: number;
+  /**
+   * What the receiving shop's stock rises by, in its own unit. 1 kg leaving
+   * the centre may be 10 pieces on the shop's shelf, so this is allowed to
+   * differ from `quantity`. Defaults to `quantity`.
+   */
+  receiveQuantity?: number;
+  receiveUnit?: string;
   notes?: string;
 };
 
@@ -258,7 +265,14 @@ export type CreateCentralTransferResult =
   | { ok: true; allocation: CentralAllocation }
   | { ok: false; error: string };
 
-/** Deduct central stock and create a pending transfer locally. */
+/**
+ * Deduct central stock and record the transfer locally.
+ *
+ * A transfer is received the moment it is sent, so it is written as fulfilled
+ * straight away: nobody has to confirm a delivery that already left the
+ * building. If the server refuses it (for example the shop has no matching
+ * product) the outbox rolls this back and the stock returns.
+ */
 export function createCentralTransferLocal(
   scopeId: string,
   centralName: string,
@@ -279,6 +293,11 @@ export function createCentralTransferLocal(
     };
   }
 
+  const receiveQuantity = Math.round(input.receiveQuantity ?? quantity);
+  if (!Number.isFinite(receiveQuantity) || receiveQuantity < 1) {
+    return { ok: false, error: "The shop's receiving quantity must be at least 1." };
+  }
+
   const now = new Date();
   const allocation: CentralAllocation = {
     id: uid("alloc"),
@@ -287,12 +306,17 @@ export function createCentralTransferLocal(
     toStoreId: input.toStoreId,
     productId: input.productId ?? null,
     quantity,
-    status: "pending",
+    receiveQuantity,
+    receiveUnit: input.receiveUnit?.trim() || null,
+    status: "fulfilled",
     allocatedAt: now.toISOString(),
     stockDeductedAt: now.toISOString(),
+    fulfilledAt: now.toISOString(),
     notes: input.notes?.trim().slice(0, 240) || null,
     allocatedByUserId: actor.id,
     allocatedByName: actor.name,
+    fulfilledByUserId: actor.id,
+    fulfilledByName: actor.name,
     itemName: item.name,
     itemUnit: item.unit,
     fromStoreName: centralName,
@@ -419,6 +443,13 @@ const ROLLBACK_CODES = new Set([
   "not_a_member",
   "sender_role_required",
   "owner_only",
+  // The shop cannot take the delivery: no matching product, stock untracked,
+  // or a variant product. The server has already refunded the centre, so the
+  // device must undo its copy of the send instead of retrying forever.
+  "unknown_product",
+  "untracked_product",
+  "product_has_variants",
+  "delivery_refused",
 ]);
 
 function failure(error: { code: string; message: string }): OpResult {
@@ -490,7 +521,10 @@ function rollbackAllocationCreate(
   error: string,
 ): void {
   const stored = centralAllocation(scopeId, op.allocation.id) ?? op.allocation;
-  if (stored.status !== "pending") return;
+  // Already cancelled, or a branch confirmed it and it has to stay received.
+  if (stored.status !== "pending" && stored.status !== "fulfilled") return;
+  // A cancelled send must never put stock back twice.
+  if (stored.stockDeductedAt == null) return;
 
   const item = centralItem(scopeId, stored.globalItemId);
   const writes: { collection: string; item: CentralAllocation | CentralItem }[] = [
@@ -565,6 +599,22 @@ export async function flushCentralOutbox(
     if (result.ok) {
       localDocDelete(scopeId, OUTBOX, op.id);
       if (result.item) localDocPut(scopeId, ITEMS, result.item);
+      if (op.kind === "allocation.create") {
+        // The server received the delivery in the same request, so the queued
+        // send is on the shop's shelf now. Rows written by an older build may
+        // still read "pending"; catch them up.
+        const local = centralAllocation(scopeId, op.allocation.id);
+        if (local && local.status === "pending") {
+          localDocPut(scopeId, ALLOCATIONS, {
+            ...local,
+            status: "fulfilled",
+            fulfilledAt: new Date().toISOString(),
+            fulfilledByUserId: op.actorId,
+            fulfilledByName: op.actorName,
+            syncError: undefined,
+          });
+        }
+      }
       if (op.kind === "allocation.fulfill" || op.kind === "allocation.cancel") {
         const local = centralAllocation(scopeId, op.allocationId);
         if (local?.syncError) {

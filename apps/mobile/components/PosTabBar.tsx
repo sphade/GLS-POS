@@ -20,12 +20,27 @@ import { feedbackTap } from "@/lib/feedback";
  * clipped the labels on phones with a gesture bar.
  */
 type IconName = keyof typeof Ionicons.glyphMap;
-type TabMeta = { label: string; needs?: Permission; icon: IconName; iconActive: IconName };
+type TabMeta = {
+  label: string;
+  needs?: Permission;
+  icon: IconName;
+  iconActive: IconName;
+  /** Only the Central Store gets this tab. */
+  centralOnly?: boolean;
+  /** Hidden while the Central Store is active — it never rings up sales. */
+  branchOnly?: boolean;
+};
 
 const TABS: Record<string, TabMeta> = {
   reports: { label: "Reports", needs: "reports:view", icon: "bar-chart-outline", iconActive: "bar-chart" },
   today: { label: "Today", needs: "receipts:view", icon: "receipt-outline", iconActive: "receipt" },
-  counter: { label: "Counter", icon: "cart-outline", iconActive: "cart" },
+  counter: { label: "Counter", icon: "cart-outline", iconActive: "cart", branchOnly: true },
+  transfers: {
+    label: "Transfers",
+    icon: "swap-horizontal-outline",
+    iconActive: "swap-horizontal",
+    centralOnly: true,
+  },
   index: { label: "Items", icon: "grid-outline", iconActive: "grid" },
   more: { label: "More", icon: "menu-outline", iconActive: "menu" },
 };
@@ -54,6 +69,10 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
       {state.routes.map((route, index) => {
         const meta = TABS[route.name];
         if (!meta) return null;
+        // `href: null` only hides a tab from the router's linking config; a
+        // custom tab bar still receives every route, so the bar filters too.
+        if (meta.centralOnly && !store.isCentral) return null;
+        if (meta.branchOnly && store.isCentral) return null;
         if (meta.needs && !can(meta.needs)) return null;
         const focused = state.index === index;
 

@@ -56,7 +56,16 @@ export const inventoryAllocations = sqliteTable("inventory_allocations", {
    * when null the server matches by global-item name instead.
    */
   productId: text("product_id"),
+  /** Quantity that leaves the centre, in the central item's unit (e.g. 1 kg). */
   quantity: integer("quantity").notNull(), // Amount allocated
+  /**
+   * Quantity the receiving store's stock is raised by, in ITS unit (e.g. 10
+   * pieces). NULL on rows created before conversion existed, which then fall
+   * back to `quantity`.
+   */
+  receiveQuantity: integer("receive_quantity"),
+  /** Unit the destination counts in, for display: 'pieces', 'boxes', ... */
+  receiveUnit: text("receive_unit"),
   status: text("status", { 
     enum: ["pending", "fulfilled", "cancelled"] 
   }).notNull().default("pending"),

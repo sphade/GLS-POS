@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, PickerCard, formStyles } from "@/components/form";
 import { PickerSheet, type PickerOption } from "@/components/PickerSheet";
-import { api, type CentralItem, type StoreProductOption } from "@/lib/api";
+import { CENTRAL_UNITS, api, type CentralItem, type StoreProductOption } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
 import { useCatalog } from "@/lib/catalog";
@@ -23,7 +23,12 @@ import { feedbackTap } from "@/lib/feedback";
 /**
  * Transfer stock from the central store to one branch. The source is fixed:
  * there is no "from shop" picker, because the centre is the parent of every
- * branch. Stock leaves the centre on dispatch and the branch confirms receipt.
+ * branch. Stock leaves the centre and lands on the shop's shelf in the same
+ * request, so there is nothing for anyone to confirm afterwards.
+ *
+ * The two sides count differently: a kg leaving the centre may be ten loaves at
+ * the shop, so the form asks how much the receiving shop's stock goes up by and
+ * remembers the product it matched there.
  */
 export default function SendToStoreScreen() {
   const router = useRouter();
@@ -43,8 +48,14 @@ export default function SendToStoreScreen() {
   const [toStoreId, setToStoreId] = useState<string | undefined>(undefined);
   const [productId, setProductId] = useState<string | undefined>(undefined);
   const [products, setProducts] = useState<StoreProductOption[]>([]);
+  /** The shop `products` was loaded for; guards the name match below. */
+  const [productsStoreId, setProductsStoreId] = useState<string | null>(null);
   const [productsLoading, setProductsLoading] = useState(false);
   const [quantity, setQuantity] = useState("");
+  /** How much the receiving shop's stock rises by. Empty means "same as sent". */
+  const [receiveQty, setReceiveQty] = useState("");
+  /** The shop's own unit, e.g. pieces. Defaults to the central item's unit. */
+  const [receiveUnitChoice, setReceiveUnitChoice] = useState<string | undefined>(undefined);
   const [notes, setNotes] = useState("");
 
   const [picker, setPicker] = useState<null | { title: string; options: PickerOption[]; onPick: (id: string) => void }>(null);
@@ -81,10 +92,17 @@ export default function SendToStoreScreen() {
   // destination is the active branch its catalog is already local, so the
   // picker still works offline.
   useEffect(() => {
+    // Which shop the loaded list belongs to. Without it a fast picker change
+    // could match a product from the shop picked a moment before.
+    let cancelled = false;
+
     if (!toStoreId) {
       setProducts([]);
+      setProductsStoreId(null);
       setProductId(undefined);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
 
     const localOptions: StoreProductOption[] =
@@ -97,35 +115,60 @@ export default function SendToStoreScreen() {
           }))
         : [];
     setProducts(localOptions);
+    setProductsStoreId(toStoreId);
     setProductId((prev) =>
       prev && localOptions.some((option) => option.id === prev) ? prev : undefined,
     );
 
     if (OFFLINE_MODE) {
       setProductsLoading(false);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
 
     setProductsLoading(true);
     void (async () => {
       const res = await api.listStoreProducts(toStoreId);
+      if (cancelled) return;
       setProductsLoading(false);
       if (res.ok) {
         setProducts(res.data);
+        setProductsStoreId(toStoreId);
         setProductId((prev) =>
           prev && res.data.some((p) => p.id === prev) ? prev : undefined,
         );
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [catalogProducts, store.id, toStoreId]);
 
   const item = items.find((i) => i.id === itemId);
   const toStore = stores.find((s) => s.id === toStoreId);
   const product = products.find((p) => p.id === productId);
+  const receiveUnit = receiveUnitChoice ?? item?.unit ?? "units";
+
+  // The shop almost always sells this item under the same name. Match it as
+  // soon as the destination list arrives so the transfer is tied to the exact
+  // product the shop already has, instead of leaning on a later name match.
+  useEffect(() => {
+    if (!toStoreId || productsStoreId !== toStoreId) return;
+    if (products.length === 0 || !item) return;
+    const wanted = item.name.trim().toLowerCase();
+    setProductId((prev) => {
+      if (prev && products.some((p) => p.id === prev)) return prev;
+      return products.find((p) => p.name.trim().toLowerCase() === wanted)?.id;
+    });
+  }, [item, products, productsStoreId, toStoreId]);
 
   const qty = Number.parseInt(quantity, 10);
   const validQty = Number.isInteger(qty) && qty >= 1 && !!item && qty <= item.totalStock;
-  const valid = !!item && !!toStoreId && validQty && !sending;
+  const receiveNum = receiveQty.trim() === "" ? qty : Number.parseInt(receiveQty, 10);
+  const validReceiveQty = Number.isInteger(receiveNum) && receiveNum >= 1;
+  const valid = !!item && !!toStoreId && validQty && validReceiveQty && !sending;
 
   const openPicker = (title: string, options: PickerOption[], onPick: (id: string) => void) => {
     feedbackTap();
@@ -151,6 +194,8 @@ export default function SendToStoreScreen() {
         toStoreName: toStore?.name ?? "Branch",
         productId,
         quantity: qty,
+        receiveQuantity: receiveNum,
+        receiveUnit,
         notes: notes.trim() || undefined,
       },
       actor,
@@ -168,8 +213,10 @@ export default function SendToStoreScreen() {
       stores.map((membership) => ({ id: membership.id })),
     );
     Alert.alert(
-      "Transfer saved",
-      `${qty} ${item.unit} ${item.name} left the Central Store for ${toStore?.name ?? "the shop"}. The transfer is saved on this device and will sync automatically; the shop confirms receipt when it arrives.`,
+      "Transfer sent",
+      `${qty} ${item.unit} ${item.name} left ${central.name} for ${toStore?.name ?? "the shop"}, where ${receiveNum} ${receiveUnit} ${receiveNum === 1 ? "was" : "were"} added to stock.${
+        product ? ` It went to "${product.name}".` : ""
+      } Nothing has to be confirmed.`,
       [{ text: "OK", onPress: () => router.back() }],
     );
   };
@@ -251,6 +298,10 @@ export default function SendToStoreScreen() {
                 items.map((i) => ({ id: i.id, label: i.name, hint: `${i.totalStock} ${i.unit}` })),
                 (id) => {
                   setItemId(id);
+                  // The conversion belongs to one item at one shop, so a new
+                  // item starts from "same as sent" again.
+                  setReceiveQty("");
+                  setReceiveUnitChoice(undefined);
                   closePicker();
                 },
               )
@@ -324,6 +375,47 @@ export default function SendToStoreScreen() {
           )}
 
           <FieldCard
+            label={`SHOP RECEIVES (${receiveUnit}) *`}
+            hint={
+              item && quantity.trim() !== ""
+                ? `${quantity} ${item.unit} becomes this much on their shelf`
+                : "How much stock the shop gains. Leave empty to match the quantity."
+            }
+            value={receiveQty}
+            onChangeText={setReceiveQty}
+            keyboardType="numeric"
+            decimals={false}
+            showTick={false}
+          />
+          <View style={styles.unitCard}>
+            <Text style={styles.unitLabel}>THE SHOP COUNTS IN</Text>
+            <View style={styles.chipRow}>
+              {CENTRAL_UNITS.map((u) => (
+                <Pressable
+                  key={u}
+                  style={[styles.chip, receiveUnit === u && styles.chipActive]}
+                  onPress={() => {
+                    feedbackTap();
+                    setReceiveUnitChoice(u);
+                  }}
+                >
+                  <Text style={[styles.chipText, receiveUnit === u && { color: colors.white }]}>
+                    {u}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          {item && quantity.trim() !== "" && validQty && (
+            <Text style={styles.rate}>
+              {qty} {item.unit} {item.name} → {receiveNum} {receiveUnit} at {toStore?.name ?? "the shop"}
+            </Text>
+          )}
+          {receiveQty.trim() !== "" && !validReceiveQty && (
+            <Text style={styles.warn}>Enter a whole number of at least 1.</Text>
+          )}
+
+          <FieldCard
             label="Note"
             hint="Optional - e.g. driver, order ref"
             value={notes}
@@ -373,6 +465,20 @@ const styles = StyleSheet.create({
   flowLabel: { fontSize: 10, fontWeight: "800", color: colors.grey500, letterSpacing: 0.7 },
   flowName: { fontSize: 14, fontWeight: "800", color: colors.grey900, marginTop: 2, maxWidth: 130 },
   flowHint: { fontSize: 11, color: colors.grey500, marginTop: 1 },
+  unitCard: { backgroundColor: colors.card, borderRadius: 4, padding: 12, marginBottom: 8, elevation: 1 },
+  unitLabel: { fontSize: 12, fontWeight: "700", color: colors.grey600, letterSpacing: 0.6, marginBottom: 10 },
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.grey300,
+    backgroundColor: colors.white,
+  },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { fontSize: 14, fontWeight: "600", color: colors.grey700 },
+  rate: { fontSize: 12.5, fontWeight: "700", color: colors.dkGreen, marginBottom: 8, marginLeft: 4 },
   warn: { color: colors.red500, fontSize: 12, fontWeight: "600", marginBottom: 8, marginLeft: 4 },
   blocked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30, gap: 8 },
   blockedTitle: { fontSize: 17, fontWeight: "800", color: colors.grey900, marginTop: 10 },

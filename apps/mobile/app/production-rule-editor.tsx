@@ -22,8 +22,8 @@ import { feedbackTap } from "@/lib/feedback";
 export default function ProductionRuleEditorScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const { activeStore, can, store } = useAuth();
-  const isCentral = store?.isCentral;
+  const { activeStore, can } = useAuth();
+  const isCentral = activeStore?.isCentral;
   const canManage = can("inventory:adjust");
 
   const [products, setProducts] = useState<StoreProductOption[]>([]);
@@ -103,7 +103,7 @@ export default function ProductionRuleEditorScreen() {
   const pickOptions = (excludeId: string | undefined): PickerOption[] =>
     tracked
       .filter((p) => p.id !== excludeId)
-      .map((p) => ({ id: p.id, label: p.name, hint: `${p.stock ?? 0} in stock" }));
+      .map((p) => ({ id: p.id, label: p.name, hint: `${p.stock ?? 0} in stock` }));
 
   const save = async () => {
     if (!activeStore || !valid || !input || !output) return;

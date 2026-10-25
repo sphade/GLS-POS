@@ -44,7 +44,10 @@ export function CentralSyncBridge() {
       if (central) {
         await flushCentralOutbox(central.id, actor, memberships);
         await refreshCentralItems(central.id);
-        await refreshCentralAllocations(central.id);
+        // The centre's own cache holds only what it SENT. Without the filter it
+        // swallowed every other shop's transfers too, and those then showed up
+        // on the Central Store as "incoming deliveries".
+        await refreshCentralAllocations(central.id, { fromStoreId: central.id });
       }
 
       for (const branch of branches) {

@@ -16,6 +16,7 @@ import { useStore } from "@/lib/store";
 import { getSyncActivity, subscribeSyncActivity, useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 import { stockSummaryOf } from "@/lib/stock";
+import { CentralLedgerReport } from "@/components/CentralLedgerReport";
 
 const CURRENCY = "NGN";
 const RANGES = [
@@ -127,9 +128,12 @@ function dateLabelFor(range: string) {
  * screen (Inventory), so nothing leads to a dead or misleading page.
  */
 export default function ReportsRoute() {
+  const { store } = useStore();
+  // The centre has no sales to report on. Its owner wants the stock ledger:
+  // what came in, what went to which shop, what is still on hand.
   return (
     <RequirePermission permission="reports:view">
-      <ReportsScreen />
+      {store.isCentral ? <CentralLedgerReport /> : <ReportsScreen />}
     </RequirePermission>
   );
 }

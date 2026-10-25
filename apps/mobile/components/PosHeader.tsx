@@ -61,6 +61,13 @@ export function PosHeader({
               setOpen(true);
             }}
           >
+            {store.isCentral && (
+              <MaterialCommunityIcons
+                name="crown-outline"
+                size={18}
+                color={colors.white}
+              />
+            )}
             <Text style={styles.storeName} numberOfLines={1}>
               {store.name}
             </Text>
