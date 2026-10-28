@@ -111,6 +111,13 @@ export default function MoreScreen() {
       needs: "inventory:adjust",
     },
     {
+      key: "stockRoom",
+      value: "Open",
+      title: "Stock Room\nfrom Central Store",
+      route: "/stock-room",
+      needs: "inventory:adjust",
+    },
+    {
       key: "stockValue",
       value: formatMoney(stockSell, CURRENCY),
       title: "Stock Value\n(selling price)",
@@ -125,7 +132,10 @@ export default function MoreScreen() {
   ];
 
   // Staff only see what their role allows. The server enforces the same matrix.
-  const cards = allCards.filter((c) => !c.needs || can(c.needs));
+  // The Stock Room is a branch view; the Central Store sends, it never receives.
+  const cards = allCards.filter(
+    (c) => (!c.needs || can(c.needs)) && (c.key !== "stockRoom" || !store.isCentral),
+  );
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>

@@ -51,20 +51,20 @@ export const inventoryAllocations = sqliteTable("inventory_allocations", {
   toStoreId: text("to_store_id") // The destination (branch)
     .notNull(),
   /**
-   * Destination product in the receiving store whose DO stock is raised on
-   * fulfill. Nullable so rows created before the picker existed stay valid;
-   * when null the server matches by global-item name instead.
+   * Legacy destination product mapping. New transfers never set this: a
+   * delivery is recorded against the central item itself, so the shop does not
+   * need a matching menu product.
    */
   productId: text("product_id"),
   /** Quantity that leaves the centre, in the central item's unit (e.g. 1 kg). */
   quantity: integer("quantity").notNull(), // Amount allocated
   /**
-   * Quantity the receiving store's stock is raised by, in ITS unit (e.g. 10
-   * pieces). NULL on rows created before conversion existed, which then fall
-   * back to `quantity`.
+   * Quantity the receiving shop records as received, in the same unit as
+   * `quantity`. Kept as a separate column for rows written before transfers
+   * stopped converting units; new rows always mirror `quantity`.
    */
   receiveQuantity: integer("receive_quantity"),
-  /** Unit the destination counts in, for display: 'pieces', 'boxes', ... */
+  /** The item's unit at the time of the transfer, for display: 'kg', 'pieces', ... */
   receiveUnit: text("receive_unit"),
   status: text("status", { 
     enum: ["pending", "fulfilled", "cancelled"] 
@@ -103,13 +103,25 @@ export const inventoryConversionRates = sqliteTable("inventory_conversion_rates"
   globalItemId: text("global_item_id")
     .notNull()
     .references(() => globalInventoryItems.id),
+  /**
+   * The branch menu product this rate produces (e.g. "Jollof rice"). Nullable
+   * only for rows written before conversions targeted a real product; new
+   * rates always name one, because converting stock must raise something.
+   */
+  productId: text("product_id"),
   // How the store uses this item in their menu
   portionName: text("portion_name").notNull(), // e.g., 'Jollof Rice - Per Spoon'
   quantityPerPortion: real("quantity_per_portion").notNull(), // e.g., 0.25 (kg per portion)
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
-});
+}, (table) => [
+  uniqueIndex("inventory_conversion_rates_target_idx").on(
+    table.storeId,
+    table.globalItemId,
+    table.productId,
+  ),
+]);
 
 // --- Migration: inventory conversion (for existing stock) ---
 
@@ -124,6 +136,11 @@ export const inventoryConversions = sqliteTable("inventory_conversions", {
   globalItemId: text("global_item_id")
     .notNull()
     .references(() => globalInventoryItems.id),
+  /**
+   * The menu product this batch was turned into. Nullable only for historical
+   * rows; every new conversion raises exactly one product's stock.
+   */
+  productId: text("product_id"),
   // How much has been converted
   bulkQuantityUsed: integer("bulk_quantity_used").notNull(), // e.g., 20000 (grams from 20kg)
   portionsProduced: integer("portions_produced").notNull(), // e.g., 80 portions

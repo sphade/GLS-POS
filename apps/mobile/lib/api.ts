@@ -90,12 +90,12 @@ export type CentralAllocation = {
   globalItemId: string;
   fromStoreId: string;
   toStoreId: string;
+  /** Legacy destination-product mapping; new transfers leave this null. */
   productId: string | null;
   quantity: number;
-  /** What the receiving shop's stock rises by. Equal to `quantity` when the
-   *  two sides count in the same unit (or on rows from before conversion). */
+  /** Quantity the shop records as received. Mirrors `quantity` on new rows. */
   receiveQuantity?: number | null;
-  /** The receiving shop's unit, e.g. 'pieces'. */
+  /** The item's unit at send time, e.g. 'kg'. */
   receiveUnit?: string | null;
   status: CentralAllocationStatus;
   allocatedAt: string | number;
@@ -119,6 +119,44 @@ export type StoreProductOption = {
   name: string;
   stock: number | null;
   stockState: string;
+};
+
+/**
+ * A saved rate: how much of one central item turns into one menu product.
+ * Example: 0.2 kg of rice per plate of Jollof rice.
+ */
+export type CentralConversionRate = {
+  id: string;
+  storeId: string;
+  globalItemId: string;
+  productId: string | null;
+  portionName: string;
+  quantityPerPortion: number;
+  isActive: boolean;
+  itemName: string;
+  itemUnit: string;
+};
+
+/** One batch of Stock Room stock turned into a menu product. */
+export type CentralConversion = {
+  id: string;
+  storeId: string;
+  globalItemId: string;
+  productId: string | null;
+  bulkQuantityUsed: number;
+  portionsProduced: number;
+  convertedAt: string | number;
+  notes: string | null;
+  itemName: string;
+  itemUnit: string;
+  productName?: string;
+  /** Local-only: the last sync failure for this conversion, if any. */
+  syncError?: string;
+  /**
+   * Local-only: the server refused this batch (stock gone, product untracked).
+   * A failed row is hidden and its stock returns to the Stock Room.
+   */
+  failed?: boolean;
 };
 
 /** Owner-defined yield between two branch products: inputQty of one makes outputQty of the other. */
@@ -254,20 +292,16 @@ export const api = {
     id?: string;
     globalItemId: string;
     toStoreId: string;
-    productId?: string;
     quantity: number;
-    receiveQuantity?: number;
-    receiveUnit?: string;
     notes?: string;
   }) =>
-    // Longer than the default: the server raises the destination store's
-    // Durable Object stock inside this request, which can outlast 12s on a
-    // cold store. Retrying is safe (the server dedupes by id).
+    // Longer than the default: the server may need to wake the destination
+    // store for reads, which can outlast 12s on a cold store. Retrying is safe
+    // (the server dedupes by id).
     request<CentralAllocation>("/inventory/allocations", { method: "POST", body: JSON.stringify(body) }, 30_000),
   fulfillAllocation: (id: string) =>
-    // Deliberately longer than the default: the server wakes the destination
-    // store's Durable Object and writes there before answering, which can
-    // outlast 12s on a cold store. Retrying is safe (the server dedupes).
+    // Deliberately longer than the default for cold starts. Retrying is safe
+    // (the server dedupes by allocation id).
     request<{ success: boolean; allocationId: string }>(
       `/inventory/allocations/${id}/fulfill`,
       { method: "POST" },
@@ -277,6 +311,33 @@ export const api = {
     request<{ success: boolean; allocationId: string }>(`/inventory/allocations/${id}/cancel`, { method: "POST" }),
   listStoreProducts: (storeId: string) =>
     request<StoreProductOption[]>(`/inventory/store-products?storeId=${encodeURIComponent(storeId)}`),
+
+  listConversionRates: (storeId: string) =>
+    request<CentralConversionRate[]>(
+      `/inventory/conversion-rates?storeId=${encodeURIComponent(storeId)}`,
+    ),
+  listConversions: (storeId: string, limit = 50) =>
+    request<CentralConversion[]>(
+      `/inventory/conversions?storeId=${encodeURIComponent(storeId)}&limit=${limit}`,
+    ),
+  createConversion: (
+    storeId: string,
+    body: {
+      id?: string;
+      globalItemId: string;
+      productId: string;
+      bulkQuantityUsed: number;
+      portionSize?: number;
+      notes?: string;
+    },
+  ) =>
+    // The server raises the menu product's stock inside this request, so allow
+    // a cold store longer than the default. Retrying is safe (deduped by id).
+    request<CentralConversion>(
+      `/inventory/conversions?storeId=${encodeURIComponent(storeId)}`,
+      { method: "POST", body: JSON.stringify(body) },
+      30_000,
+    ),
 
   listProductionRules: (storeId: string) =>
     request<ProductionRule[]>(

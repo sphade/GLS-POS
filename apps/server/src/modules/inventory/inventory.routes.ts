@@ -191,8 +191,15 @@ inventory.post("/conversion-rates", validate("json", upsertConversionRateSchema)
   const storeId = await resolveRateStoreId(c);
   await requireInventoryAdjust(c.env, user.id, storeId);
 
-  const { globalItemId, portionName, quantityPerPortion } = c.req.valid("json");
-  const rate = await upsertConversionRate(c.env, storeId, globalItemId, portionName, quantityPerPortion);
+  const { globalItemId, productId, portionName, quantityPerPortion } = c.req.valid("json");
+  const rate = await upsertConversionRate(
+    c.env,
+    storeId,
+    globalItemId,
+    productId,
+    portionName,
+    quantityPerPortion,
+  );
   return ok(c, rate, 201);
 });
 
@@ -204,8 +211,11 @@ inventory.post("/conversions", validate("json", recordConversionSchema), async (
   const storeId = await resolveRateStoreId(c);
   await requireInventoryAdjust(c.env, user.id, storeId);
 
-  const { globalItemId, bulkQuantityUsed, portionsProduced, notes } = c.req.valid("json");
-  const conversion = await recordConversion(c.env, storeId, globalItemId, bulkQuantityUsed, portionsProduced, notes);
+  const conversion = await recordConversion(c.env, storeId, c.req.valid("json"), {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+  });
   return ok(c, conversion, 201);
 });
 

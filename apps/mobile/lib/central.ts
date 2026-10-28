@@ -3,6 +3,8 @@ import {
   api,
   type CentralAllocation,
   type CentralAllocationStatus,
+  type CentralConversion,
+  type CentralConversionRate,
   type CentralItem,
 } from "./api";
 import {
@@ -33,6 +35,8 @@ import { OFFLINE_MODE } from "./offline";
 
 const ITEMS = "central_items";
 const ALLOCATIONS = "central_allocations";
+const CONVERSIONS = "central_conversions";
+const RATES = "central_conversion_rates";
 const OUTBOX = "central_outbox";
 
 export type CentralActor = {
@@ -72,6 +76,12 @@ type NewCentralOp =
       allocationId: string;
       fromStoreId: string;
       toStoreId: string;
+    }
+  | {
+      kind: "conversion.create";
+      conversion: CentralConversion;
+      /** Saved with the conversion so the next batch needs no rate input. */
+      portionSize?: number;
     };
 
 export type CentralOp = OpBase & NewCentralOp;
@@ -137,6 +147,36 @@ export function centralAllocation(
   return localDocGet<CentralAllocation>(scopeId, ALLOCATIONS, id);
 }
 
+export function centralConversions(scopeId: string): CentralConversion[] {
+  return localDocLoadAll<CentralConversion>(scopeId, CONVERSIONS).sort(
+    (a, b) => new Date(b.convertedAt).getTime() - new Date(a.convertedAt).getTime(),
+  );
+}
+
+export function centralConversionRates(scopeId: string): CentralConversionRate[] {
+  return localDocLoadAll<CentralConversionRate>(scopeId, RATES);
+}
+
+/**
+ * How much of one item the shop still holds in its Stock Room.
+ *
+ * Deliveries received minus everything already turned into menu stock. Only
+ * fulfilled deliveries count: a cancelled send never arrived.
+ */
+export function centralReceivedBalance(
+  scopeId: string,
+  globalItemId: string,
+): number {
+  const received = centralAllocations(scopeId)
+    .filter((a) => a.toStoreId === scopeId && a.status === "fulfilled")
+    .filter((a) => a.globalItemId === globalItemId)
+    .reduce((sum, a) => sum + a.quantity, 0);
+  const used = centralConversions(scopeId)
+    .filter((c) => c.globalItemId === globalItemId && !c.failed)
+    .reduce((sum, c) => sum + c.bulkQuantityUsed, 0);
+  return received - used;
+}
+
 export function centralPendingCount(scopeId: string): number {
   return localDocCount(scopeId, OUTBOX);
 }
@@ -147,6 +187,8 @@ export function centralLastError(scopeId: string): string | null {
     .filter((op) => !!op.lastError)
     .sort((a, b) => b.createdAt - a.createdAt);
   if (failures[0]?.lastError) return failures[0].lastError;
+  const conversionFailure = centralConversions(scopeId).find((c) => !!c.syncError);
+  if (conversionFailure?.syncError) return conversionFailure.syncError;
   const allocationFailure = centralAllocations(scopeId).find((a) => !!a.syncError);
   return allocationFailure?.syncError ?? null;
 }
@@ -249,15 +291,8 @@ export type CreateCentralTransferInput = {
   globalItemId: string;
   toStoreId: string;
   toStoreName: string;
-  productId?: string;
+  /** Units leaving the centre. The shop receives exactly this, same unit. */
   quantity: number;
-  /**
-   * What the receiving shop's stock rises by, in its own unit. 1 kg leaving
-   * the centre may be 10 pieces on the shop's shelf, so this is allowed to
-   * differ from `quantity`. Defaults to `quantity`.
-   */
-  receiveQuantity?: number;
-  receiveUnit?: string;
   notes?: string;
 };
 
@@ -270,8 +305,8 @@ export type CreateCentralTransferResult =
  *
  * A transfer is received the moment it is sent, so it is written as fulfilled
  * straight away: nobody has to confirm a delivery that already left the
- * building. If the server refuses it (for example the shop has no matching
- * product) the outbox rolls this back and the stock returns.
+ * building. If the server refuses it (for example the central item ran out)
+ * the outbox rolls this back and the stock returns.
  */
 export function createCentralTransferLocal(
   scopeId: string,
@@ -293,10 +328,7 @@ export function createCentralTransferLocal(
     };
   }
 
-  const receiveQuantity = Math.round(input.receiveQuantity ?? quantity);
-  if (!Number.isFinite(receiveQuantity) || receiveQuantity < 1) {
-    return { ok: false, error: "The shop's receiving quantity must be at least 1." };
-  }
+  const receiveQuantity = quantity;
 
   const now = new Date();
   const allocation: CentralAllocation = {
@@ -304,10 +336,10 @@ export function createCentralTransferLocal(
     globalItemId: item.id,
     fromStoreId: scopeId,
     toStoreId: input.toStoreId,
-    productId: input.productId ?? null,
+    productId: null,
     quantity,
     receiveQuantity,
-    receiveUnit: input.receiveUnit?.trim() || null,
+    receiveUnit: item.unit,
     status: "fulfilled",
     allocatedAt: now.toISOString(),
     stockDeductedAt: now.toISOString(),
@@ -337,6 +369,99 @@ export function createCentralTransferLocal(
   ]);
   emitCentralChange(true);
   return { ok: true, allocation };
+}
+
+export type CreateCentralConversionInput = {
+  globalItemId: string;
+  itemName: string;
+  itemUnit: string;
+  productId: string;
+  productName: string;
+  /** Whole units of the central item to turn into menu stock. */
+  quantity: number;
+  /** Whole units of the item that one menu unit uses. */
+  portionSize: number;
+  notes?: string;
+};
+
+/**
+ * Turn part of a branch's Stock Room stock into menu stock, offline first.
+ *
+ * The received ledger drops immediately because the conversion is stored
+ * locally. The menu product's own stock is raised by the server when the queued
+ * batch syncs, so the branch's catalog catches up on the next pull.
+ */
+export function createCentralConversionLocal(
+  scopeId: string,
+  input: CreateCentralConversionInput,
+  actor: CentralActor,
+): { ok: true; conversion: CentralConversion } | { ok: false; error: string } {
+  const quantity = Math.round(input.quantity);
+  if (!Number.isFinite(quantity) || quantity < 1) {
+    return { ok: false, error: "Enter a whole number of at least 1." };
+  }
+  if (!Number.isFinite(input.portionSize) || input.portionSize <= 0) {
+    return { ok: false, error: "Set how much stock one menu item uses." };
+  }
+
+  const available = centralReceivedBalance(scopeId, input.globalItemId);
+  if (quantity > available) {
+    return {
+      ok: false,
+      error: `Only ${available} ${input.itemUnit} of "${input.itemName}" left in the Stock Room.`,
+    };
+  }
+
+  const portions = Math.floor(quantity / input.portionSize + 1e-9);
+  if (portions < 1) {
+    return {
+      ok: false,
+      error: `That is less than one ${input.productName}. Raise the quantity or lower the portion size.`,
+    };
+  }
+
+  const now = new Date();
+  const conversion: CentralConversion = {
+    id: uid("conv"),
+    storeId: scopeId,
+    globalItemId: input.globalItemId,
+    productId: input.productId,
+    bulkQuantityUsed: quantity,
+    portionsProduced: portions,
+    convertedAt: now.toISOString(),
+    notes: input.notes?.trim().slice(0, 240) || null,
+    itemName: input.itemName,
+    itemUnit: input.itemUnit,
+    productName: input.productName,
+  };
+
+  // Cache the rate locally so the next batch is one tap. The server saves the
+  // same rate when the batch syncs.
+  const rate: CentralConversionRate = {
+    id: `rate_${input.globalItemId}_${input.productId}`,
+    storeId: scopeId,
+    globalItemId: input.globalItemId,
+    productId: input.productId,
+    portionName: input.productName,
+    quantityPerPortion: input.portionSize,
+    isActive: true,
+    itemName: input.itemName,
+    itemUnit: input.itemUnit,
+  };
+
+  const op = newOp(scopeId, actor, {
+    kind: "conversion.create",
+    conversion,
+    portionSize: input.portionSize,
+  });
+
+  localDocWriteBatch(scopeId, [
+    { collection: CONVERSIONS, item: conversion },
+    { collection: RATES, item: rate },
+    { collection: OUTBOX, item: op },
+  ]);
+  emitCentralChange(true);
+  return { ok: true, conversion };
 }
 
 /** Mark a delivery received in the branch cache and queue the server confirm. */
@@ -443,13 +568,13 @@ const ROLLBACK_CODES = new Set([
   "not_a_member",
   "sender_role_required",
   "owner_only",
-  // The shop cannot take the delivery: no matching product, stock untracked,
-  // or a variant product. The server has already refunded the centre, so the
-  // device must undo its copy of the send instead of retrying forever.
-  "unknown_product",
-  "untracked_product",
-  "product_has_variants",
-  "delivery_refused",
+  // Stock Room conversion refused by the server (rate missing, too small for
+  // one menu item, product gone or untracked). The batch is undone locally.
+  "rate_required",
+  "too_small",
+  "product_not_found",
+  "product_refused",
+  "invalid_store",
 ]);
 
 function failure(error: { code: string; message: string }): OpResult {
@@ -492,7 +617,6 @@ async function applyCentralOp(op: CentralOp): Promise<OpResult> {
         id: op.allocation.id,
         globalItemId: op.allocation.globalItemId,
         toStoreId: op.allocation.toStoreId,
-        productId: op.allocation.productId ?? undefined,
         quantity: op.allocation.quantity,
         notes: op.allocation.notes ?? undefined,
       });
@@ -511,6 +635,32 @@ async function applyCentralOp(op: CentralOp): Promise<OpResult> {
     case "allocation.cancel": {
       const res = await api.cancelAllocation(op.allocationId);
       return res.ok ? { ok: true } : failure(res.error);
+    }
+    case "conversion.create": {
+      const res = await api.createConversion(op.scopeId, {
+        id: op.conversion.id,
+        globalItemId: op.conversion.globalItemId,
+        productId: op.conversion.productId ?? "",
+        bulkQuantityUsed: op.conversion.bulkQuantityUsed,
+        portionSize: op.portionSize,
+        notes: op.conversion.notes ?? undefined,
+      });
+      if (res.ok) {
+        // Keep the server's timestamp and product name, drop any local error.
+        localDocPut(op.scopeId, CONVERSIONS, {
+          ...op.conversion,
+          ...res.data,
+          syncError: undefined,
+          failed: undefined,
+        });
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: res.error.message,
+        permanent: !TRANSIENT_CODES.has(res.error.code),
+        rollback: ROLLBACK_CODES.has(res.error.code),
+      };
     }
   }
 }
@@ -558,6 +708,7 @@ function opAllowed(op: CentralOp, memberships: readonly CentralMembership[]): bo
     case "item.update":
     case "item.delete":
     case "allocation.create":
+    case "conversion.create":
       return member(op.scopeId);
     case "allocation.fulfill":
     case "allocation.cancel":
@@ -630,6 +781,21 @@ export async function flushCentralOutbox(
       continue;
     }
 
+    if (result.rollback && op.kind === "conversion.create") {
+      // The server refused the batch. Mark it failed instead of retrying, so
+      // the stock returns to the Stock Room and the reason stays visible.
+      const local =
+        localDocGet<CentralConversion>(scopeId, CONVERSIONS, op.conversion.id) ??
+        op.conversion;
+      localDocPut(scopeId, CONVERSIONS, {
+        ...local,
+        failed: true,
+        syncError: result.error,
+      });
+      localDocDelete(scopeId, OUTBOX, op.id);
+      continue;
+    }
+
     const next: CentralOp = {
       ...op,
       attempts: op.attempts + 1,
@@ -667,6 +833,26 @@ export async function refreshCentralAllocations(
   const res = await api.listAllocations(query);
   if (!res.ok) return false;
   localDocReplaceAll(scopeId, ALLOCATIONS, res.data);
+  emitCentralChange();
+  return true;
+}
+
+/** Replace the branch's conversion history cache. */
+export async function refreshCentralConversions(scopeId: string): Promise<boolean> {
+  if (OFFLINE_MODE || localDocCount(scopeId, OUTBOX) > 0) return false;
+  const res = await api.listConversions(scopeId);
+  if (!res.ok) return false;
+  localDocReplaceAll(scopeId, CONVERSIONS, res.data);
+  emitCentralChange();
+  return true;
+}
+
+/** Replace the branch's saved conversion rates. */
+export async function refreshCentralConversionRates(scopeId: string): Promise<boolean> {
+  if (OFFLINE_MODE || localDocCount(scopeId, OUTBOX) > 0) return false;
+  const res = await api.listConversionRates(scopeId);
+  if (!res.ok) return false;
+  localDocReplaceAll(scopeId, RATES, res.data);
   emitCentralChange();
   return true;
 }

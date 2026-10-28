@@ -293,8 +293,10 @@ function storeStub(env: Env, storeId: string): DurableObjectStub<StoreDurableObj
  * Move stock from the central store to one branch.
  *
  * The source is never chosen by the client: it is always the caller's central
- * store. Stock leaves the centre at dispatch, so the branch's confirmation only
- * raises the branch side. A cancel puts the stock back.
+ * store. A transfer is a record of stock moving to a shop, not a change to that
+ * shop's menu: the quantity sent is the quantity received, in the central item's
+ * own unit. The shop sees it under its "Central stock", and no destination
+ * product has to exist for the send to succeed.
  */
 export async function createAllocation(
   env: Env,
@@ -302,11 +304,7 @@ export async function createAllocation(
     id?: string;
     globalItemId: string;
     toStoreId: string;
-    productId?: string;
     quantity: number;
-    /** What the receiving store's stock rises by, in its own unit. */
-    receiveQuantity?: number;
-    receiveUnit?: string;
     notes?: string;
   },
   actor: AllocationActor,
@@ -328,10 +326,10 @@ export async function createAllocation(
       if (existing.fromStoreId !== central.id) {
         throw HttpError.badRequest("That transfer id is already in use", "duplicate_id");
       }
-      // A first attempt that died between writing the row and receiving it
-      // would otherwise sit as pending forever. Finish it now, best-effort:
-      // the destination raise is idempotent by allocation id, so a repeat is
-      // free and a real failure is left for the fulfill endpoint to report.
+      // A first attempt that died between writing the row and marking it
+      // received would otherwise sit as pending forever. Finish it now,
+      // best-effort: fulfilling is idempotent, so a repeat is free and a real
+      // failure is left for the fulfill endpoint to report.
       if (existing.status === "pending") {
         try {
           await fulfillAllocation(env, allocationId, actor);
@@ -402,16 +400,6 @@ export async function createAllocation(
     throw HttpError.badRequest("Quantity must be a whole number of at least 1", "invalid_quantity");
   }
 
-  // The centre counts in kg and the shop counts in pieces, so the two sides of
-  // a transfer are genuinely different numbers. Both must be whole units.
-  const receiveQuantity = Math.round(input.receiveQuantity ?? quantity);
-  if (!Number.isFinite(receiveQuantity) || receiveQuantity < 1) {
-    throw HttpError.badRequest(
-      "The receiving quantity must be a whole number of at least 1",
-      "invalid_quantity",
-    );
-  }
-
   if (item.storeId !== central.id) {
     await db
       .update(schema.globalInventoryItems)
@@ -452,10 +440,13 @@ export async function createAllocation(
       globalItemId: input.globalItemId,
       fromStoreId: central.id,
       toStoreId: input.toStoreId,
-      productId: input.productId ?? null,
+      productId: null,
       quantity,
-      receiveQuantity,
-      receiveUnit: input.receiveUnit?.trim().slice(0, 24) || null,
+      // The shop receives exactly what the centre sends, in the same unit.
+      // The legacy receive columns stay populated so older clients and reports
+      // keep displaying a coherent number.
+      receiveQuantity: quantity,
+      receiveUnit: item.unit,
       status: "pending",
       allocatedAt: now,
       stockDeductedAt: now,
@@ -476,10 +467,8 @@ export async function createAllocation(
   }
 
   // A transfer is received the moment it is sent. The centre dispatches and the
-  // shop's stock rises inside the same request, so nobody has to stand around
-  // confirming a delivery that already left the building. If the destination
-  // cannot take it - no matching product, untracked stock, variants - the whole
-  // send is rolled back rather than left hanging as "in transit" forever.
+  // shop's central-stock ledger records it inside the same request, so nobody
+  // has to stand around confirming a delivery that already left the building.
   try {
     await fulfillAllocation(env, allocationId, actor);
   } catch (err) {
@@ -501,10 +490,10 @@ export async function createAllocation(
     globalItemId: input.globalItemId,
     fromStoreId: central.id,
     toStoreId: input.toStoreId,
-    productId: input.productId ?? null,
+    productId: null,
     quantity,
-    receiveQuantity,
-    receiveUnit: input.receiveUnit?.trim().slice(0, 24) || null,
+    receiveQuantity: quantity,
+    receiveUnit: item.unit,
     status: "fulfilled" as const,
     allocatedAt: now,
     stockDeductedAt: now,
@@ -547,11 +536,10 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
     roleInStore(env, actor.id, allocation.toStoreId),
     roleInStore(env, actor.id, allocation.fromStoreId),
   ]);
-  const effective = ([toRole, fromRole] as const).find((r) => r && SENDER_ROLES.includes(r));
   if (!toRole && !fromRole) {
     throw HttpError.forbidden("You are not a member of this delivery", "not_a_member");
   }
-  if (!effective) {
+  if (![toRole, fromRole].some((r) => r && SENDER_ROLES.includes(r))) {
     throw HttpError.forbidden("Only owners and managers can confirm deliveries", "sender_role_required");
   }
 
@@ -575,39 +563,14 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
     );
   }
 
-  // Raise the destination store's DO stock FIRST. If the product mapping is
-  // wrong the allocation stays pending with a clear error and central stock
-  // is untouched, so staff can fix the mapping and retry.
-  const received = await storeStub(env, allocation.toStoreId).receiveCentralDelivery({
-    productId: allocation.productId ?? undefined,
-    globalItemName: item.name,
-    // The two sides of a transfer count differently: 1 kg out of the centre may
-    // be 10 pieces on the shop's shelf. Legacy rows have no conversion.
-    quantity: allocation.receiveQuantity ?? allocation.quantity,
-    ref: allocation.id,
-    note: allocation.notes ?? `Central delivery of ${allocation.quantity} ${item.unit} ${item.name}`,
-    actor: { id: actor.id, name: actor.name, email: actor.email, role: effective },
-  });
-
-  if (!received.ok) {
-    const message =
-      received.error === "unknown_product"
-        ? `No "${item.name}" product in the destination store. Create it there first, then confirm again.`
-        : received.error === "untracked_product"
-          ? `The destination "${item.name}" product does not track stock. Enable tracking, then confirm again.`
-          : received.error === "product_has_variants"
-            ? `The destination "${item.name}" product has variants. Split it into simple items or pick the variant product first.`
-            : "Invalid delivery quantity";
-    const code = received.error === "unknown_product" ? "unknown_product" : "delivery_refused";
-    const status = received.error === "unknown_product" ? 404 : 400;
-    throw new HttpError(status, code, message);
-  }
-
-  // Claim the pending row first, so exactly one caller marks it received: a
-  // phone that timed out may retry while this call is still running. The DO
-  // itself is idempotent by allocation id, so a retry's stock raise is a no-op.
-  // For a new transfer central stock was already deducted on dispatch; legacy
-  // rows are deducted here once.
+  // A transfer never touches the destination shop's menu or product stock. The
+  // allocation row itself is the shop's central-stock ledger entry: whatever
+  // quantity was sent is what the shop received, in the item's own unit.
+  //
+  // Claim the pending row so exactly one caller marks it received: a phone that
+  // timed out may retry while this call is still running. For a new transfer
+  // central stock was already deducted on dispatch; legacy rows are deducted
+  // here once.
   const fulfilledAt = new Date();
   const claimed = await db
     .update(schema.inventoryAllocations)
@@ -635,7 +598,7 @@ export async function fulfillAllocation(env: Env, allocationId: string, actor: A
       .where(eq(schema.globalInventoryItems.id, allocation.globalItemId));
   }
 
-  return { success: true, allocationId, received };
+  return { success: true, allocationId };
 }
 
 export async function cancelAllocation(env: Env, allocationId: string, actorUserId: string) {
@@ -710,6 +673,7 @@ export async function getConversionRate(
   env: Env,
   storeId: string,
   globalItemId: string,
+  productId?: string,
 ) {
   const db = createDb(env.DB);
 
@@ -720,6 +684,9 @@ export async function getConversionRate(
       and(
         eq(schema.inventoryConversionRates.storeId, storeId),
         eq(schema.inventoryConversionRates.globalItemId, globalItemId),
+        productId
+          ? eq(schema.inventoryConversionRates.productId, productId)
+          : isNull(schema.inventoryConversionRates.productId),
         eq(schema.inventoryConversionRates.isActive, true),
       ),
     )
@@ -732,6 +699,7 @@ export async function upsertConversionRate(
   env: Env,
   storeId: string,
   globalItemId: string,
+  productId: string | undefined,
   portionName: string,
   quantityPerPortion: number,
 ) {
@@ -748,6 +716,9 @@ export async function upsertConversionRate(
       and(
         eq(schema.inventoryConversionRates.storeId, storeId),
         eq(schema.inventoryConversionRates.globalItemId, globalItemId),
+        productId
+          ? eq(schema.inventoryConversionRates.productId, productId)
+          : isNull(schema.inventoryConversionRates.productId),
       ),
     )
     .limit(1);
@@ -776,6 +747,7 @@ export async function upsertConversionRate(
     id,
     storeId,
     globalItemId,
+    productId: productId ?? null,
     portionName,
     quantityPerPortion,
     isActive: true,
@@ -800,6 +772,7 @@ export async function listConversionRates(env: Env, storeId: string) {
       id: schema.inventoryConversionRates.id,
       storeId: schema.inventoryConversionRates.storeId,
       globalItemId: schema.inventoryConversionRates.globalItemId,
+      productId: schema.inventoryConversionRates.productId,
       portionName: schema.inventoryConversionRates.portionName,
       quantityPerPortion: schema.inventoryConversionRates.quantityPerPortion,
       isActive: schema.inventoryConversionRates.isActive,
@@ -819,31 +792,194 @@ export async function listConversionRates(env: Env, storeId: string) {
 export async function recordConversion(
   env: Env,
   storeId: string,
-  globalItemId: string,
-  bulkQuantityUsed: number,
-  portionsProduced: number,
-  notes?: string,
+  input: {
+    id?: string;
+    globalItemId: string;
+    productId: string;
+    bulkQuantityUsed: number;
+    portionSize?: number;
+    notes?: string;
+  },
+  actor: AllocationActor,
 ) {
   const db = createDb(env.DB);
 
-  const bulk = Math.round(bulkQuantityUsed);
-  const portions = Math.round(portionsProduced);
-  if (!Number.isFinite(bulk) || bulk < 1 || !Number.isFinite(portions) || portions < 1) {
-    throw HttpError.badRequest("Quantities must be whole numbers of at least 1", "invalid_quantity");
+  const bulk = Math.round(input.bulkQuantityUsed);
+  if (!Number.isFinite(bulk) || bulk < 1) {
+    throw HttpError.badRequest("Quantity must be a whole number of at least 1", "invalid_quantity");
   }
 
-  const id = newId("conv_rec");
+  const [store] = await db
+    .select({
+      id: schema.store.id,
+      ownerId: schema.store.ownerId,
+      isCentral: schema.store.isCentral,
+    })
+    .from(schema.store)
+    .where(eq(schema.store.id, storeId))
+    .limit(1);
+  if (!store) throw HttpError.notFound("Store not found", "store_not_found");
+  if (store.isCentral) {
+    throw HttpError.badRequest(
+      "The Central Store does not convert its own stock",
+      "invalid_store",
+    );
+  }
+
+  const [item] = await db
+    .select()
+    .from(schema.globalInventoryItems)
+    .where(eq(schema.globalInventoryItems.id, input.globalItemId))
+    .limit(1);
+  if (!item) {
+    throw HttpError.notFound("Central inventory item not found", "item_not_found");
+  }
+  if (item.ownerId && item.ownerId !== store.ownerId) {
+    throw HttpError.forbidden("That item belongs to another business", "not_in_tree");
+  }
+
+  // Replaying a client-minted id returns the original conversion. The stock
+  // raise is idempotent too, so a lost response can be retried safely.
+  if (input.id) {
+    const [existing] = await db
+      .select()
+      .from(schema.inventoryConversions)
+      .where(eq(schema.inventoryConversions.id, input.id))
+      .limit(1);
+    if (existing) {
+      if (existing.storeId !== storeId) {
+        throw HttpError.badRequest("That conversion id is already in use", "duplicate_id");
+      }
+      return {
+        ...existing,
+        itemName: item.name,
+        itemUnit: item.unit,
+        productName: "",
+      };
+    }
+  }
+
+  // What the shop actually holds: fulfilled deliveries minus everything it has
+  // already turned into menu stock. This is the ledger the Stock Room shows.
+  const [received] = await db
+    .select({ total: sql<number>`coalesce(sum(${schema.inventoryAllocations.quantity}), 0)` })
+    .from(schema.inventoryAllocations)
+    .where(
+      and(
+        eq(schema.inventoryAllocations.toStoreId, storeId),
+        eq(schema.inventoryAllocations.globalItemId, input.globalItemId),
+        eq(schema.inventoryAllocations.status, "fulfilled"),
+      ),
+    );
+  const [converted] = await db
+    .select({ total: sql<number>`coalesce(sum(${schema.inventoryConversions.bulkQuantityUsed}), 0)` })
+    .from(schema.inventoryConversions)
+    .where(
+      and(
+        eq(schema.inventoryConversions.storeId, storeId),
+        eq(schema.inventoryConversions.globalItemId, input.globalItemId),
+      ),
+    );
+
+  const available = Number(received?.total ?? 0) - Number(converted?.total ?? 0);
+  if (bulk > available) {
+    throw HttpError.badRequest(
+      `Only ${available} ${item.unit} of "${item.name}" left in the Stock Room`,
+      "insufficient_stock",
+    );
+  }
+
+  // The owner sets the rate once; every later conversion is automatic. A rate
+  // sent with this request is saved so the next one needs no input.
+  const savedRate = await getConversionRate(env, storeId, input.globalItemId, input.productId);
+  const portionSize = input.portionSize ?? savedRate?.quantityPerPortion;
+  if (!portionSize || portionSize <= 0) {
+    throw HttpError.badRequest(
+      "Set how much stock one menu item uses, then convert again",
+      "rate_required",
+    );
+  }
+
+  const portions = Math.floor(bulk / portionSize + 1e-9);
+  if (portions < 1) {
+    throw HttpError.badRequest(
+      `That is less than one menu item. Raise the quantity or lower the portion size.`,
+      "too_small",
+    );
+  }
+
+  const id = input.id ?? newId("conv_rec");
   await db.insert(schema.inventoryConversions).values({
     id,
     storeId,
-    globalItemId,
+    globalItemId: input.globalItemId,
+    productId: input.productId,
     bulkQuantityUsed: bulk,
     portionsProduced: portions,
     convertedAt: new Date(),
-    notes: notes?.slice(0, 240) ?? null,
+    notes: input.notes?.slice(0, 240) ?? null,
   });
 
-  return { id, success: true };
+  // Raise the menu product's stock in its own store. If the product cannot take
+  // it (missing, untracked, has variants) the conversion row is removed so the
+  // stock reappears in the Stock Room.
+  let added: Awaited<ReturnType<StoreDurableObject["addProductStock"]>>;
+  try {
+    added = await storeStub(env, storeId).addProductStock({
+      productId: input.productId,
+      quantity: portions,
+      ref: id,
+      note: input.notes ?? `Stock Room: ${bulk} ${item.unit} ${item.name}`,
+      actor: { id: actor.id, name: actor.name, email: actor.email },
+    });
+  } catch (err) {
+    await db
+      .delete(schema.inventoryConversions)
+      .where(eq(schema.inventoryConversions.id, id));
+    throw err;
+  }
+
+  if (!added.ok) {
+    await db
+      .delete(schema.inventoryConversions)
+      .where(eq(schema.inventoryConversions.id, id));
+    const message =
+      added.error === "unknown_product"
+        ? "That menu item no longer exists in this shop."
+        : added.error === "untracked_product"
+          ? "That menu item does not track stock. Turn tracking on first."
+          : added.error === "product_has_variants"
+            ? "That menu item has variants. Convert into a simple item instead."
+            : "Invalid conversion quantity.";
+    const code =
+      added.error === "unknown_product" ? "product_not_found" : "product_refused";
+    throw new HttpError(added.error === "unknown_product" ? 404 : 400, code, message);
+  }
+
+  if (input.portionSize != null) {
+    await upsertConversionRate(
+      env,
+      storeId,
+      input.globalItemId,
+      input.productId,
+      added.productName,
+      input.portionSize,
+    );
+  }
+
+  return {
+    id,
+    storeId,
+    globalItemId: input.globalItemId,
+    productId: input.productId,
+    bulkQuantityUsed: bulk,
+    portionsProduced: portions,
+    convertedAt: new Date(),
+    notes: input.notes?.slice(0, 240) ?? null,
+    itemName: item.name,
+    itemUnit: item.unit,
+    productName: added.productName,
+  };
 }
 
 export async function listConversions(env: Env, storeId: string, limit: number = 50) {
@@ -854,6 +990,7 @@ export async function listConversions(env: Env, storeId: string, limit: number =
       id: schema.inventoryConversions.id,
       storeId: schema.inventoryConversions.storeId,
       globalItemId: schema.inventoryConversions.globalItemId,
+      productId: schema.inventoryConversions.productId,
       bulkQuantityUsed: schema.inventoryConversions.bulkQuantityUsed,
       portionsProduced: schema.inventoryConversions.portionsProduced,
       convertedAt: schema.inventoryConversions.convertedAt,

@@ -1402,6 +1402,141 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   /**
+   * Raise one product's stock for a Stock Room conversion.
+   *
+   * Called server-side only, never by devices. `ref` is the conversion id and
+   * the movement id is derived from it, so a retried request cannot add the
+   * same stock twice. The product must exist, track stock, and be a simple item
+   * (a parent with variants would misstate what can sell).
+   */
+  async addProductStock(input: {
+    productId: string;
+    quantity: number;
+    ref: string;
+    note?: string;
+    actor: { id: string; name: string; email?: string; role?: string };
+  }): Promise<
+    | {
+        ok: true;
+        duplicate: boolean;
+        productId: string;
+        productName: string;
+        previousStock: number;
+        stock: number;
+      }
+    | {
+        ok: false;
+        error: "unknown_product" | "untracked_product" | "product_has_variants" | "invalid_quantity";
+      }
+  > {
+    const quantity = Math.round(input.quantity);
+    if (!Number.isFinite(quantity) || quantity < 1) {
+      return { ok: false, error: "invalid_quantity" };
+    }
+
+    const [productRow] = this.db
+      .select({ data: schema.documents.data })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "products"),
+          eq(schema.documents.id, input.productId),
+        ),
+      )
+      .all();
+
+    if (!productRow) return { ok: false, error: "unknown_product" };
+    const product = JSON.parse(productRow.data) as StoredProduct;
+    if (product.variants?.length) return { ok: false, error: "product_has_variants" };
+    const previous = product.stockQuantity;
+    if (previous === null || previous === undefined) {
+      return { ok: false, error: "untracked_product" };
+    }
+
+    const movementId = `mov_conv_${input.ref}`;
+    const already = this.db
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "stock_movements"),
+          eq(schema.documents.id, movementId),
+        ),
+      )
+      .get();
+    if (already) {
+      return {
+        ok: true,
+        duplicate: true,
+        productId: product.id,
+        productName: product.name,
+        previousStock: previous,
+        stock: previous,
+      };
+    }
+
+    const next = previous + quantity;
+    const updated: StoredProduct = { ...product, stockQuantity: next };
+    let seq = this.currentSeq();
+    const now = Date.now();
+
+    seq += 1;
+    this.db
+      .insert(schema.documents)
+      .values({
+        collection: "products",
+        id: product.id,
+        data: JSON.stringify(updated),
+        updatedAt: now,
+        deleted: false,
+        serverSeq: seq,
+      })
+      .onConflictDoUpdate({
+        target: [schema.documents.collection, schema.documents.id],
+        set: { data: JSON.stringify(updated), updatedAt: now, serverSeq: seq },
+      })
+      .run();
+
+    seq += 1;
+    this.db
+      .insert(schema.documents)
+      .values({
+        collection: "stock_movements",
+        id: movementId,
+        data: JSON.stringify({
+          id: movementId,
+          productId: product.id,
+          productName: product.name,
+          reason: "restock",
+          delta: quantity,
+          baseStock: previous,
+          resulting: next,
+          at: now,
+          ref: `stockroom:${input.ref}`,
+          note: (input.note ?? `Stock Room conversion of ${quantity}`).slice(0, 240),
+          actorId: input.actor.id,
+          actorName: input.actor.name,
+          actorEmail: input.actor.email,
+          actorRole: input.actor.role,
+        }),
+        updatedAt: now,
+        deleted: false,
+        serverSeq: seq,
+      })
+      .run();
+
+    this.broadcast("changes");
+    return {
+      ok: true,
+      duplicate: false,
+      productId: product.id,
+      productName: product.name,
+      previousStock: previous,
+      stock: next,
+    };
+  }
+
+  /**
    * Record one production run: consume `inputQty` of one tracked product and
    * add `outputQty` of another.
    *

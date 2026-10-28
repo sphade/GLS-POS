@@ -40,7 +40,10 @@ function formatDate(at: string | number): string {
   return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
-/** How much the receiving shop's stock rose, when it differs from what left. */
+/**
+ * Legacy rows only: before transfers stopped converting units, a shop could
+ * record a different number than the centre sent. New rows always match.
+ */
 function receivedText(a: CentralAllocation): string {
   if (a.receiveQuantity == null || a.receiveQuantity === a.quantity) return "";
   return ` → ${a.receiveQuantity} ${a.receiveUnit ?? a.itemUnit}`;

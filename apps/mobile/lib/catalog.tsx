@@ -52,22 +52,6 @@ export type AdjustStockResult =
   | { ok: true; product: Item; movement: StockMovement }
   | { ok: false; error: string };
 
-export type ReceiveCentralDeliveryInput = {
-  ref: string;
-  productId?: string;
-  itemName: string;
-  quantity: number;
-  note?: string;
-};
-
-export type ReceiveCentralDeliveryResult =
-  | { ok: true; duplicate: boolean }
-  | {
-      ok: false;
-      code: "unknown_product" | "untracked_product" | "product_has_variants" | "invalid_quantity";
-      error: string;
-    };
-
 /**
  * One page of a stock target's history, newest first, with the total count.
  *
@@ -264,11 +248,6 @@ type CatalogState = {
    * The materialized product and its movement are committed atomically.
    */
   adjustStock: (input: AdjustStockInput) => AdjustStockResult;
-  /**
-   * Apply a central delivery to local branch stock before the server confirms.
-   * The deterministic movement id makes repeated confirms harmless.
-   */
-  receiveCentralDelivery: (input: ReceiveCentralDeliveryInput) => ReceiveCentralDeliveryResult;
   /** Log an opening stock change while creating/configuring an item. Does not
    *  write the product; the item editor has already persisted the quantity. */
   logStockChange: (
@@ -689,81 +668,6 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
           summary: `${action} ${quantity} stock for "${targetName}" · ${current} → ${resulting}${note ? ` · ${note}` : ""}`,
         });
         return { ok: true, product: updated, movement };
-      },
-
-      receiveCentralDelivery: (input) => {
-        // The server uses the same deterministic movement id, so a retried
-        // confirmation can never add the delivery twice.
-        const movementId = `mov_central_${input.ref}`;
-        if (loadOne<StockMovement>("stock_movements", movementId)) {
-          return { ok: true, duplicate: true };
-        }
-
-        const quantity = Math.round(input.quantity);
-        if (!Number.isFinite(quantity) || quantity <= 0) {
-          return {
-            ok: false,
-            code: "invalid_quantity",
-            error: "The delivery quantity is invalid.",
-          };
-        }
-
-        const wanted = input.itemName.trim().toLowerCase();
-        const product = input.productId
-          ? products.find((candidate) => candidate.id === input.productId)
-          : products.find(
-              (candidate) => candidate.name.trim().toLowerCase() === wanted,
-            );
-
-        if (!product) {
-          return {
-            ok: false,
-            code: "unknown_product",
-            error: `No "${input.itemName}" product in this store. Create it first, then confirm again.`,
-          };
-        }
-        if (product.variants?.length) {
-          return {
-            ok: false,
-            code: "product_has_variants",
-            error: `The "${product.name}" product has variants. Split it into simple items or choose a variant product first.`,
-          };
-        }
-        if (product.stockQuantity == null) {
-          return {
-            ok: false,
-            code: "untracked_product",
-            error: `The "${product.name}" product does not track stock. Enable tracking, then confirm again.`,
-          };
-        }
-
-        const current = product.stockQuantity;
-        const resulting = current + quantity;
-        const updated: Item = { ...product, stockQuantity: resulting };
-        const movement: StockMovement = {
-          id: movementId,
-          productId: product.id,
-          productName: product.name,
-          reason: "restock",
-          delta: quantity,
-          baseStock: current,
-          resulting,
-          at: Date.now(),
-          ref: `central:${input.ref}`,
-          note: input.note ?? `Central delivery of ${quantity} ${input.itemName}`,
-          ...movementActor(),
-        };
-
-        putBatch([
-          { collection: "products", item: updated, dirty: "preserve" as const },
-          { collection: "stock_movements", item: movement },
-        ]);
-        setProducts((currentProducts) =>
-          currentProducts.map((candidate) =>
-            candidate.id === updated.id ? updated : candidate,
-          ),
-        );
-        return { ok: true, duplicate: false };
       },
 
       logStockChange: (product, delta, reason, resulting, variant) => {

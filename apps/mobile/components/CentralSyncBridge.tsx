@@ -7,6 +7,8 @@ import { OFFLINE_MODE } from "@/lib/offline";
 import {
   flushCentralOutbox,
   refreshCentralAllocations,
+  refreshCentralConversionRates,
+  refreshCentralConversions,
   refreshCentralItems,
   subscribeCentralWrites,
 } from "@/lib/central";
@@ -59,6 +61,8 @@ export function CentralSyncBridge() {
         await refreshCentralAllocations(activeBranch.id, {
           toStoreId: activeBranch.id,
         });
+        await refreshCentralConversions(activeBranch.id);
+        await refreshCentralConversionRates(activeBranch.id);
       }
     };
 

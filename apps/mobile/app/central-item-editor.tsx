@@ -145,7 +145,7 @@ export default function CentralItemEditorScreen() {
         <EditorToolbar title="Central item" onClose={() => router.back()} onSave={() => {}} />
         <View style={styles.blocked}>
           <Text style={styles.blockedText}>
-            This item is not saved on this device. Reconnect and reopen it from Central Stock.
+            This item is not saved on this device. Reconnect and reopen it from Central Items.
           </Text>
         </View>
       </SafeAreaView>

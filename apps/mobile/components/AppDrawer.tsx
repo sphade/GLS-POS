@@ -44,9 +44,9 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
       { label: "Inventory Management", icon: "package-variant-closed", route: "/inventory", needs: "catalog:write" },
       { label: "Central Store", icon: "crown-outline", route: "/", needs: "inventory:adjust", central: true },
       {
-        label: "Incoming Deliveries",
-        icon: "truck-delivery-outline",
-        route: "/incoming-stock",
+        label: "Stock Room",
+        icon: "warehouse",
+        route: "/stock-room",
         needs: "inventory:adjust",
         // The Central Store is the sender, never a recipient.
         branchOnly: true,

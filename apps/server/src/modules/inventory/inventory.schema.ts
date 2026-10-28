@@ -38,20 +38,10 @@ export const createAllocationSchema = z.object({
   /** The source is always the caller's central store, never a branch. */
   toStoreId: z.string().min(1, "Destination store ID is required"),
   /**
-   * Destination product in the receiving store. Optional for backwards
-   * compatibility: when omitted the server matches by global-item name on
-   * fulfill and refuses with a clear error if nothing matches.
+   * What leaves the centre. The shop receives exactly this quantity in the
+   * same unit; it is not mapped to a destination product.
    */
-  productId: z.string().min(1).optional(),
   quantity: z.number().int().min(1, "Quantity must be at least 1"),
-  /**
-   * How much the receiving store's stock goes up by, in its own unit. One kg
-   * of flour may be 10 loaves at the shop, so this is not always `quantity`.
-   * Defaults to `quantity` when omitted.
-   */
-  receiveQuantity: z.number().int().min(1).optional(),
-  /** Destination unit for display, e.g. 'pieces'. Defaults to the item's unit. */
-  receiveUnit: z.string().min(1).max(24).optional(),
   notes: z.string().max(240).optional(),
 });
 
@@ -69,8 +59,10 @@ export type ListAllocationsQuery = z.infer<typeof listAllocationsQuerySchema>;
 
 export const upsertConversionRateSchema = z.object({
   globalItemId: z.string().min(1, "Global item ID is required"),
+  /** Branch menu product this rate produces. */
+  productId: z.string().min(1).optional(),
   portionName: z.string().min(1, "Portion name is required").max(120),
-  /** Base units of bulk stock per portion (e.g. grams when the unit is kg). */
+  /** Bulk units used per one menu unit (e.g. 0.2 kg of rice per plate). */
   quantityPerPortion: z.number().positive("Quantity per portion must be positive"),
 });
 
@@ -79,9 +71,17 @@ export type UpsertConversionRateInput = z.infer<typeof upsertConversionRateSchem
 // --- Conversions (bulk used -> portions made) ---
 
 export const recordConversionSchema = z.object({
+  /** Client-generated idempotency key; retrying the same id is safe. */
+  id: clientId.optional(),
   globalItemId: z.string().min(1, "Global item ID is required"),
+  productId: z.string().min(1, "Choose the menu item to add this stock to"),
+  /** Bulk units being converted, in the central item's unit. */
   bulkQuantityUsed: z.number().int().min(1, "Bulk quantity must be at least 1"),
-  portionsProduced: z.number().int().min(1, "Portions must be at least 1"),
+  /**
+   * Bulk units one menu unit uses. Sent so an owner can set the rate while
+   * converting; when omitted the saved rate is used.
+   */
+  portionSize: z.number().positive("Portion size must be positive").optional(),
   notes: z.string().max(240).optional(),
 });
 
