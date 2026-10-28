@@ -94,13 +94,19 @@ vip.post(
     // wrapped so a push failure can never fail the order.
     const items = result.order.lines.reduce((n, l) => n + l.quantity, 0);
     c.executionCtx.waitUntil(
-      notifyStore(c.env, storeId, {
-        title: `New VIP order · ${result.order.tableName}`,
-        body: `${result.order.code} — ${items} item${items === 1 ? "" : "s"}, ${
-          store.currency
-        } ${(result.order.total / 100).toLocaleString()}`,
-        data: { kind: "web_order", orderId: result.order.id, storeId },
-      }).catch(() => undefined),
+      notifyStore(
+        c.env,
+        storeId,
+        {
+          title: `New VIP order · ${result.order.tableName}`,
+          body: `${result.order.code} — ${items} item${items === 1 ? "" : "s"}, ${
+            store.currency
+          } ${(result.order.total / 100).toLocaleString()}`,
+          data: { kind: "web_order", orderId: result.order.id, storeId },
+        },
+        // Floor leads act on orders; owners and cashiers are not interrupted.
+        { roles: ["manager", "supervisor"] },
+      ).catch(() => undefined),
     );
 
     return ok(c, { code: result.order.code, total: result.order.total, id: result.order.id }, 201);

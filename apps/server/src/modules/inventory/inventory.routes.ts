@@ -4,6 +4,7 @@ import type { AppEnv } from "../../context.js";
 import { ok } from "../../lib/response.js";
 import { validate } from "../../lib/validator.js";
 import { HttpError } from "../../lib/http-error.js";
+import { notifyStore } from "../push/push.service.js";
 import {
   createGlobalInventoryItem,
   listGlobalInventoryItems,
@@ -113,6 +114,26 @@ inventory.post("/:id/adjust", validate("json", adjustCentralStockSchema), async 
     c.req.valid("json"),
     { id: user.id, name: user.name },
   );
+
+  if (result.lowStock) {
+    c.executionCtx.waitUntil(
+      notifyStore(
+        c.env,
+        central.id,
+        {
+          title: `Low stock · ${result.lowStock.itemName}`,
+          body: `${result.lowStock.remaining} ${result.lowStock.unit} left — alert set at ${result.lowStock.minStock}.`,
+          data: {
+            kind: "central_low_stock",
+            storeId: central.id,
+            itemId: result.lowStock.itemId,
+          },
+        },
+        { roles: ["owner"] },
+      ).catch(() => undefined),
+    );
+  }
+
   return ok(c, result, 201);
 });
 
@@ -158,6 +179,41 @@ inventory.post("/allocations", validate("json", createAllocationSchema), async (
     name: user.name,
     email: user.email,
   });
+
+  // Tell the receiving shop, and only the people who act on it. Fired after the
+  // response so Expo can never slow a transfer down.
+  c.executionCtx.waitUntil(
+    notifyStore(
+      c.env,
+      allocation.toStoreId,
+      {
+        title: `${allocation.quantity} ${allocation.itemUnit} ${allocation.itemName} received`,
+        body: `Sent from ${allocation.fromStoreName}. It is now in your Stock Room.`,
+        data: { kind: "stock_arrived", storeId: allocation.toStoreId },
+      },
+      { roles: ["owner", "manager", "supervisor"] },
+    ).catch(() => undefined),
+  );
+
+  if (allocation.lowStock) {
+    c.executionCtx.waitUntil(
+      notifyStore(
+        c.env,
+        allocation.fromStoreId,
+        {
+          title: `Low stock · ${allocation.lowStock.itemName}`,
+          body: `${allocation.lowStock.remaining} ${allocation.lowStock.unit} left — alert set at ${allocation.lowStock.minStock}.`,
+          data: {
+            kind: "central_low_stock",
+            storeId: allocation.fromStoreId,
+            itemId: allocation.lowStock.itemId,
+          },
+        },
+        { roles: ["owner"] },
+      ).catch(() => undefined),
+    );
+  }
+
   return ok(c, allocation, 201);
 });
 
@@ -251,6 +307,22 @@ inventory.post("/conversions", validate("json", recordConversionSchema), async (
     name: user.name,
     email: user.email,
   });
+
+  // Owners see what their bulk stock became. The person who converted already
+  // saw the result on screen, so this is the owner's paper trail.
+  c.executionCtx.waitUntil(
+    notifyStore(
+      c.env,
+      storeId,
+      {
+        title: `${conversion.portionsProduced} ${conversion.productName} added`,
+        body: `${conversion.bulkQuantityUsed} ${conversion.itemUnit} ${conversion.itemName} converted in the Stock Room.`,
+        data: { kind: "conversion_done", storeId },
+      },
+      { roles: ["owner"] },
+    ).catch(() => undefined),
+  );
+
   return ok(c, conversion, 201);
 });
 

@@ -44,7 +44,7 @@ export default function StockRoomConvertScreen() {
     available?: string;
   }>();
   const { store } = useStore();
-  const { stores, user } = useAuth();
+  const { stores, user, can } = useAuth();
   const { products } = useCatalog();
   const revision = useCentralRevision();
 
@@ -162,6 +162,18 @@ export default function StockRoomConvertScreen() {
       [{ text: "OK", onPress: () => router.back() }],
     );
   };
+
+  if (!can("inventory:adjust")) {
+    return (
+      <SafeAreaView edges={["top"]} style={formStyles.screen}>
+        <EditorToolbar title="Convert stock" onClose={() => router.back()} onSave={() => {}} />
+        <View style={styles.blocked}>
+          <Text style={styles.blockedTitle}>Owners, managers and supervisors only</Text>
+          <Text style={styles.blockedText}>Your role cannot convert stock.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (!globalItemId) {
     return (

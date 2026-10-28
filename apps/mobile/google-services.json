@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "239935164470",
+    "project_id": "gls-pos",
+    "storage_bucket": "gls-pos.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:239935164470:android:446e5ffd7fcedfd4604897",
+        "android_client_info": {
+          "package_name": "com.gls.pos"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9qzYPJxMfZI-ZWg2JbvugQlWcyNgHkRU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

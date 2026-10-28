@@ -215,7 +215,7 @@ export default function StockRoomScreen() {
       ) : !canView ? (
         blocked(
           "lock-outline",
-          "Owners and managers only",
+          "Owners, managers and supervisors only",
           "Your role cannot view or convert stock.",
         )
       ) : loading && items.length === 0 ? (

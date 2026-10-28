@@ -257,7 +257,7 @@ export async function adjustCentralStock(
       .where(eq(schema.centralStockMovements.id, input.id))
       .limit(1);
     if (existing) {
-      return { item, movement: existing, duplicate: true };
+      return { item, movement: existing, duplicate: true, lowStock: null };
     }
   }
 
@@ -314,6 +314,20 @@ export async function adjustCentralStock(
     item: updated,
     movement,
     duplicate: false,
+    /**
+     * Set when a removal dropped the item to or below its alert level. The
+     * route sends the owner one push; adding stock never alerts.
+     */
+    lowStock:
+      delta < 0 && base > item.minStock && updated.totalStock <= item.minStock
+        ? {
+            itemId: item.id,
+            itemName: item.name,
+            unit: item.unit,
+            remaining: updated.totalStock,
+            minStock: item.minStock,
+          }
+        : null,
   };
 }
 
@@ -486,6 +500,8 @@ export async function createAllocation(
         itemUnit: existingItem?.unit ?? "",
         fromStoreName: central.name,
         toStoreName: existingStore?.name ?? existing.toStoreId,
+        // A replay must not alert twice; the first attempt already did.
+        lowStock: null,
       };
     }
   }
@@ -547,7 +563,7 @@ export async function createAllocation(
         gte(schema.globalInventoryItems.totalStock, quantity),
       ),
     )
-    .returning({ id: schema.globalInventoryItems.id });
+    .returning({ id: schema.globalInventoryItems.id, totalStock: schema.globalInventoryItems.totalStock });
 
   if (deducted.length === 0) {
     const [fresh] = await db
@@ -632,6 +648,21 @@ export async function createAllocation(
     itemUnit: item.unit,
     fromStoreName: central.name,
     toStoreName: toStore.name,
+    /**
+     * Set only when this send pushed the centre from healthy to low. The route
+     * turns it into a push, so the service stays free of notification concerns
+     * and a replay cannot alert twice.
+     */
+    lowStock:
+      item.totalStock > item.minStock && deducted[0]!.totalStock <= item.minStock
+        ? {
+            itemId: item.id,
+            itemName: item.name,
+            unit: item.unit,
+            remaining: deducted[0]!.totalStock,
+            minStock: item.minStock,
+          }
+        : null,
   };
 }
 

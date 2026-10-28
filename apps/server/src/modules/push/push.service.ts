@@ -1,4 +1,5 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import type { StoreRole } from "@gls-pos/types";
 import { createDb, schema } from "../../db/index.js";
 import type { Env } from "../../env.js";
 
@@ -52,7 +53,52 @@ async function tokensForStore(env: Env, storeId: string): Promise<string[]> {
 }
 
 /**
- * Alert every staff device for a store. Expo accepts up to 100 messages per
+ * Tokens for the staff in this store who hold one of `roles`.
+ *
+ * A device token belongs to a user, and a user's role is per store, so the
+ * join is what stops a cashier's phone from buzzing about an owner-only event.
+ * Staff who left the store are excluded automatically because the membership
+ * row is gone.
+ */
+async function tokensForRoles(
+  env: Env,
+  storeId: string,
+  roles: readonly StoreRole[],
+): Promise<string[]> {
+  if (roles.length === 0) return [];
+  const db = createDb(env.DB);
+  const rows = await db
+    .select({ token: schema.pushToken.token })
+    .from(schema.pushToken)
+    .innerJoin(
+      schema.member,
+      and(
+        eq(schema.member.userId, schema.pushToken.userId),
+        eq(schema.member.storeId, schema.pushToken.storeId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.pushToken.storeId, storeId),
+        inArray(schema.member.role, roles as string[]),
+      ),
+    );
+  return rows.map((r) => r.token);
+}
+
+/**
+ * Who should hear about an event.
+ *
+ * Omit `roles` to reach every device signed into the store (floor-wide events
+ * like a new order). Pass roles to keep money- and stock-sensitive alerts with
+ * the people responsible for them.
+ */
+export type PushAudience = {
+  roles?: readonly StoreRole[];
+};
+
+/**
+ * Alert staff devices for a store. Expo accepts up to 100 messages per
  * request; we chunk to stay inside that.
  *
  * Invalid tokens are pruned so a reinstalled app doesn't leave dead rows behind.
@@ -61,8 +107,11 @@ export async function notifyStore(
   env: Env,
   storeId: string,
   message: { title: string; body: string; data?: Record<string, unknown> },
+  audience: PushAudience = {},
 ): Promise<{ sent: number }> {
-  const tokens = await tokensForStore(env, storeId);
+  const tokens = audience.roles
+    ? await tokensForRoles(env, storeId, audience.roles)
+    : await tokensForStore(env, storeId);
   if (tokens.length === 0) return { sent: 0 };
 
   let sent = 0;

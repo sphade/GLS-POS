@@ -15,6 +15,7 @@ import { WebOrdersProvider } from "@/lib/web-orders";
 import { prepareHistoryIndexes, setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
 import { CentralSyncBridge } from "@/components/CentralSyncBridge";
+import { NotificationRouter } from "@/components/NotificationRouter";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
 import { colors } from "@/constants/theme";
@@ -133,6 +134,8 @@ function StoreScopedData() {
           <WebOrdersProvider key={`orders-${dataScope}`}>
             <CartCatalogBridge />
             <CentralSyncBridge />
+            {/* Opens the screen a tapped push is about, switching store first. */}
+            <NotificationRouter />
             <StatusBar style="light" backgroundColor={colors.primaryDark} />
             <AuthGate>
               <RootStack />
@@ -269,7 +272,6 @@ function RootStack() {
       <Stack.Screen name="select-table" options={MODAL} />
       <Stack.Screen name="take-order" options={MODAL} />
       <Stack.Screen name="charge" options={MODAL} />
-      <Stack.Screen name="cash-payment" options={MODAL} />
       <Stack.Screen name="receipt/[id]" options={MODAL} />
       <Stack.Screen name="scanner" options={MODAL} />
 

@@ -36,11 +36,17 @@ function projectId(): string | undefined {
   return extra?.eas?.projectId ?? (Constants as { easConfig?: { projectId?: string } }).easConfig?.projectId;
 }
 
-/** Android needs an explicit high-importance channel to make sound on the lock screen. */
+/**
+ * Android needs an explicit high-importance channel to make sound on the lock
+ * screen. The id stays `vip-orders` for compatibility with builds that already
+ * created it; the label is what staff see in Android settings, and every store
+ * alert now shares it.
+ */
 async function ensureAndroidChannel(): Promise<void> {
   if (Platform.OS !== "android") return;
   await Notifications.setNotificationChannelAsync("vip-orders", {
-    name: "VIP orders",
+    name: "Store alerts",
+    description: "New orders, stock transfers and low-stock warnings.",
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 250, 200, 250],
     lightColor: "#5AA02C",
