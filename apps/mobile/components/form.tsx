@@ -2,6 +2,7 @@
 import { Alert, Image, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
+import { FORM_MAX_WIDTH } from "@/lib/responsive";
 import { NumberInput } from "@/components/NumberInput";
 import { feedbackTap } from "@/lib/feedback";
 
@@ -39,25 +40,29 @@ export function EditorToolbar({
 }) {
   return (
     <View style={styles.toolbar}>
-      <Pressable onPress={onClose} style={styles.toolbarBtn} hitSlop={8}>
-        <Ionicons name="close" size={26} color={colors.primary} />
-      </Pressable>
-      <Text style={styles.toolbarTitle} numberOfLines={1}>
-        {title.toUpperCase()}
-      </Text>
-      {onDelete && (
-        <Pressable onPress={onDelete} style={styles.deleteBtn}>
-          <Text style={styles.deleteText}>DELETE</Text>
+      {/* On a wide till the title/save controls would otherwise sit at opposite
+          edges of a metre-wide bar. The inner row keeps them a thumb apart. */}
+      <View style={styles.toolbarInner}>
+        <Pressable onPress={onClose} style={styles.toolbarBtn} hitSlop={8}>
+          <Ionicons name="close" size={26} color={colors.primary} />
         </Pressable>
-      )}
-      {onFavourite && (
-        <Pressable onPress={onFavourite} style={styles.toolbarBtn} hitSlop={8}>
-          <Ionicons name="heart-outline" size={24} color={colors.green} />
+        <Text style={styles.toolbarTitle} numberOfLines={1}>
+          {title.toUpperCase()}
+        </Text>
+        {onDelete && (
+          <Pressable onPress={onDelete} style={styles.deleteBtn}>
+            <Text style={styles.deleteText}>DELETE</Text>
+          </Pressable>
+        )}
+        {onFavourite && (
+          <Pressable onPress={onFavourite} style={styles.toolbarBtn} hitSlop={8}>
+            <Ionicons name="heart-outline" size={24} color={colors.green} />
+          </Pressable>
+        )}
+        <Pressable style={[styles.saveBtn, !dirty && { opacity: 0.45 }]} disabled={!dirty} onPress={onSave}>
+          <Text style={styles.saveText}>SAVE</Text>
         </Pressable>
-      )}
-      <Pressable style={[styles.saveBtn, !dirty && { opacity: 0.45 }]} disabled={!dirty} onPress={onSave}>
-        <Text style={styles.saveText}>SAVE</Text>
-      </Pressable>
+      </View>
     </View>
   );
 }
@@ -272,18 +277,34 @@ export function Segmented({
 
 export const formStyles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.screenBg },
-  body: { padding: 8, paddingBottom: 40 },
+  /**
+   * Forms stay a comfortable reading width on tablets/POS terminals and are
+   * centred, rather than stretching a single text field across the whole till.
+   * On a phone `maxWidth` is never reached, so the layout is unchanged.
+   */
+  body: {
+    padding: 8,
+    paddingBottom: 40,
+    width: "100%",
+    maxWidth: FORM_MAX_WIDTH,
+    alignSelf: "center",
+  },
 });
 
 const styles = StyleSheet.create({
   toolbar: {
-    flexDirection: "row",
-    alignItems: "center",
     backgroundColor: colors.grey100,
     paddingVertical: 8,
-    paddingRight: 8,
-    gap: 4,
     elevation: 4,
+  },
+  toolbarInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    width: "100%",
+    maxWidth: 960,
+    alignSelf: "center",
+    paddingRight: 8,
   },
   toolbarBtn: { width: 44, alignItems: "center" },
   toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },

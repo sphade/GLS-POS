@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
+import { centeredForm } from "@/lib/responsive";
 import {
   forgetPrinter,
   getSavedPrinter,
@@ -114,7 +115,7 @@ export default function PrinterSetupScreen() {
         <Text style={styles.toolbarTitle}>PRINTER SETUP</Text>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 8, paddingBottom: 30 }}>
+      <ScrollView contentContainerStyle={[{ padding: 8, paddingBottom: 30 }, centeredForm]}>
         {/* Paired printer */}
         <Text style={styles.section}>CURRENT PRINTER</Text>
         <View style={styles.card}>

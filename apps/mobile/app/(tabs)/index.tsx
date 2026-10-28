@@ -46,6 +46,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { stockHintOf } from "@/lib/stock";
 import { itemMatchesSearch } from "@/lib/search";
 import { metaGet, metaSet } from "@/lib/db";
+import { CONTENT_MAX_WIDTH } from "@/lib/responsive";
 import { feedbackAddItem, feedbackError, feedbackTap } from "@/lib/feedback";
 
 const NEW_ITEM_ID = "__new_item__";
@@ -164,8 +165,17 @@ function ItemsScreen() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const { width } = useWindowDimensions();
 
-  const cols = isGrid ? (width > 700 ? 5 : 3) : 1;
-  const cardWidth = (width - PAD * 2 - GAP * (cols - 1)) / cols;
+  /**
+   * Card size adapts to the till, not just "big = 5 columns".
+   *
+   * Tiles keep roughly the same physical size on a phone and a 15" terminal:
+   * 3 across a handset, 4-7 across a tablet/POS, never wider than ~190px. The
+   * grid itself is capped at 1280px and centred, so an ultra-wide screen gets
+   * margins instead of dinner-plate product cards.
+   */
+  const contentWidth = Math.min(width, CONTENT_MAX_WIDTH);
+  const cols = isGrid ? Math.max(3, Math.min(8, Math.floor(contentWidth / 168))) : 1;
+  const cardWidth = (contentWidth - PAD * 2 - GAP * (cols - 1)) / cols;
 
   /** Persist alongside the state change, so the choice outlives the screen. */
   const toggleLayout = useCallback(() => {
@@ -670,12 +680,14 @@ function GoToCounterBar({ onPress }: { onPress: () => void }) {
   const count = useCartCount();
   if (count === 0) return null;
   return (
-    <Pressable style={styles.goToCounter} onPress={onPress}>
-      <Text style={styles.goToCounterText}>{strings.goToCounter}</Text>
-      <View style={styles.goBadge}>
-        <Text style={styles.goBadgeText}>{count}</Text>
-      </View>
-    </Pressable>
+    <View style={styles.goToCounterWrap} pointerEvents="box-none">
+      <Pressable style={styles.goToCounter} onPress={onPress}>
+        <Text style={styles.goToCounterText}>{strings.goToCounter}</Text>
+        <View style={styles.goBadge}>
+          <Text style={styles.goBadgeText}>{count}</Text>
+        </View>
+      </Pressable>
+    </View>
   );
 }
 
@@ -803,7 +815,13 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
   headerRegion: { backgroundColor: colors.primary },
 
-  gridContent: { paddingTop: GAP, paddingBottom: 96 },
+  gridContent: {
+    paddingTop: GAP,
+    paddingBottom: 96,
+    width: "100%",
+    maxWidth: CONTENT_MAX_WIDTH,
+    alignSelf: "center",
+  },
   /** One line of grid cards (or a single row in list mode). */
   gridRow: { flexDirection: "row", gap: GAP, paddingHorizontal: PAD },
   /** List mode has one item per line, so the row stacks instead of spanning. */
@@ -811,7 +829,12 @@ const styles = StyleSheet.create({
 
   /** Horizontal category tab bar, sits directly under the search row. */
   chipBar: { backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.grey200 },
-  chipBarContent: { paddingHorizontal: PAD + 2, alignItems: "flex-end" },
+  chipBarContent: {
+    paddingHorizontal: PAD + 2,
+    alignItems: "flex-end",
+    maxWidth: CONTENT_MAX_WIDTH,
+    width: "100%",
+  },
   catTab: { height: 46, paddingHorizontal: 14, justifyContent: "center", alignItems: "center" },
   catTabText: { fontSize: 14, fontWeight: "600", letterSpacing: 0.2, color: colors.grey500 },
   catTabTextActive: { color: colors.grey900, fontWeight: "800" },
@@ -988,11 +1011,17 @@ const styles = StyleSheet.create({
   },
   newItemText: { color: colors.primary, fontWeight: "600", fontSize: 15, marginTop: 12, marginBottom: 8 },
 
-  goToCounter: {
+  goToCounterWrap: {
     position: "absolute",
-    left: 12,
-    right: 12,
+    left: 0,
+    right: 0,
     bottom: 12,
+    alignItems: "center",
+    paddingHorizontal: 12,
+  },
+  goToCounter: {
+    width: "100%",
+    maxWidth: 560,
     height: 48,
     borderRadius: 6,
     backgroundColor: colors.green,

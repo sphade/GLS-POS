@@ -274,6 +274,9 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 12,
     maxHeight: "88%",
     overflow: "hidden",
+    width: "100%",
+    maxWidth: 720,
+    alignSelf: "center",
   },
   appBar: {
     flexDirection: "row",

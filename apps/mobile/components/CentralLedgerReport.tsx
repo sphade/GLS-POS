@@ -362,7 +362,13 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.grey200 },
-  scroll: { padding: 8, paddingBottom: 24 },
+  scroll: {
+    padding: 8,
+    paddingBottom: 24,
+    width: "100%",
+    maxWidth: 1000,
+    alignSelf: "center",
+  },
   rangeRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 },
   rangeChip: {
     backgroundColor: colors.white,

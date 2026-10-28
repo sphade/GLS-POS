@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { colors, formatAmount, formatMoney, strings } from "@/constants/theme";
+import { centeredContent } from "@/lib/responsive";
 import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth";
 import {
@@ -174,7 +175,7 @@ export default function ReceiptScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 10, paddingBottom: 24 }}>
+      <ScrollView contentContainerStyle={[{ padding: 10, paddingBottom: 24 }, centeredContent]}>
         <View style={styles.actionRow}>
           {/* Settle unpaid receipts (Card/Transfer/Credit print first, pay after). */}
           {receipt.status === "unpaid" && can("sale:create") && (

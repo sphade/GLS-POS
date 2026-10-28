@@ -13,6 +13,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import type { WebOrder } from "@gls-pos/types";
 import { colors, formatMoney, strings } from "@/constants/theme";
+import { centeredContent } from "@/lib/responsive";
 import { EmptyState } from "@/components/EmptyState";
 import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
 import { loadReceiptsInRange, useCart } from "@/lib/cart";
@@ -229,7 +230,7 @@ export default function TodayScreen() {
           data={filteredReceipts}
           keyExtractor={(r) => r.id}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingBottom: 24 }}
+          contentContainerStyle={[{ paddingBottom: 24 }, centeredContent]}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -266,7 +267,7 @@ export default function TodayScreen() {
           data={filteredOrders}
           keyExtractor={(o) => o.id}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingBottom: 24 }}
+          contentContainerStyle={[{ paddingBottom: 24 }, centeredContent]}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}

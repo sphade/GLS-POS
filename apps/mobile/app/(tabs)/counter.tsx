@@ -129,7 +129,7 @@ function EmptyCounter({
 
   return (
     <ScrollView
-      contentContainerStyle={{ padding: 8 }}
+      contentContainerStyle={styles.cartListContent}
       refreshControl={
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
       }
@@ -233,7 +233,7 @@ function ActiveCounter({
       <FlatList
         data={lineIds}
         keyExtractor={(lineId) => lineId}
-        contentContainerStyle={{ padding: 8, paddingBottom: 8 }}
+        contentContainerStyle={styles.cartListContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
         }
@@ -664,6 +664,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 2,
+    width: "100%",
+    maxWidth: 960,
+    alignSelf: "center",
   },
   billHeaderText: { fontSize: 13, color: colors.grey600, fontWeight: "700" },
   clear: { color: colors.red500, fontWeight: "700", fontSize: 13 },
@@ -747,14 +750,38 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     shadowOffset: { width: 0, height: -4 },
   },
-  totalsCard: { paddingHorizontal: 18, paddingTop: 10, paddingBottom: 6 },
+  totalsCard: {
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 6,
+    width: "100%",
+    maxWidth: 960,
+    alignSelf: "center",
+  },
   totalRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },
   totalLabel: { color: colors.grey600, fontSize: 14 },
   totalValue: { color: colors.grey800, fontSize: 14, fontWeight: "600" },
   totalBold: { fontSize: 18, fontWeight: "800", color: colors.grey900 },
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.grey300, marginVertical: 8 },
 
-  actionRow: { flexDirection: "row", gap: 10, paddingHorizontal: 12, paddingTop: 6, paddingBottom: 12 },
+  actionRow: {
+    flexDirection: "row",
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 12,
+    width: "100%",
+    maxWidth: 960,
+    alignSelf: "center",
+  },
+  /** Cart lines and the checkout footer share one centred column on wide tills. */
+  cartListContent: {
+    padding: 8,
+    paddingBottom: 8,
+    width: "100%",
+    maxWidth: 960,
+    alignSelf: "center",
+  },
   hold: {
     flexDirection: "row",
     alignItems: "center",

@@ -56,7 +56,7 @@ export function EntityListScreen<T>({
   );
 
   const body = (
-    <>
+    <View style={styles.listFrame}>
       <FlatList
         data={filtered}
         keyExtractor={keyExtractor}
@@ -82,7 +82,7 @@ export function EntityListScreen<T>({
           <Text style={styles.fabText}>{addLabel}</Text>
         </Pressable>
       )}
-    </>
+    </View>
   );
 
   /**
@@ -138,34 +138,36 @@ export function EntityListScreen<T>({
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
       <View style={styles.toolbar}>
-        <Pressable onPress={() => router.back()} style={styles.toolbarBtn} hitSlop={8}>
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </Pressable>
-        {searching ? (
-          <TextInput
-            style={styles.searchInput}
-            value={query}
-            onChangeText={setQuery}
-            placeholder={`Search ${title.toLowerCase()}`}
-            placeholderTextColor={colors.grey500}
-            autoFocus
-          />
-        ) : (
-          <Text style={styles.toolbarTitle} numberOfLines={1}>
-            {title.toUpperCase()}
-          </Text>
-        )}
-        <Pressable
-          onPress={() => {
-            feedbackTap();
-            setSearching((v) => !v);
-            setQuery("");
-          }}
-          style={styles.toolbarBtn}
-          hitSlop={8}
-        >
-          <Ionicons name={searching ? "close" : "search"} size={22} color={colors.primary} />
-        </Pressable>
+        <View style={styles.toolbarInner}>
+          <Pressable onPress={() => router.back()} style={styles.toolbarBtn} hitSlop={8}>
+            <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          </Pressable>
+          {searching ? (
+            <TextInput
+              style={styles.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder={`Search ${title.toLowerCase()}`}
+              placeholderTextColor={colors.grey500}
+              autoFocus
+            />
+          ) : (
+            <Text style={styles.toolbarTitle} numberOfLines={1}>
+              {title.toUpperCase()}
+            </Text>
+          )}
+          <Pressable
+            onPress={() => {
+              feedbackTap();
+              setSearching((v) => !v);
+              setQuery("");
+            }}
+            style={styles.toolbarBtn}
+            hitSlop={8}
+          >
+            <Ionicons name={searching ? "close" : "search"} size={22} color={colors.primary} />
+          </Pressable>
+        </View>
       </View>
       {body}
     </SafeAreaView>
@@ -214,18 +216,37 @@ export function EntityRow({
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.screenBg },
   toolbar: {
-    flexDirection: "row",
-    alignItems: "center",
     backgroundColor: colors.grey50,
     height: 56,
-    paddingHorizontal: 4,
     elevation: 2,
+  },
+  toolbarInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    height: "100%",
+    width: "100%",
+    maxWidth: 1100,
+    alignSelf: "center",
+    paddingHorizontal: 4,
+  },
+  /** Lists stop growing on wide tills; rows stay scannable and the FAB centred. */
+  listFrame: {
+    flex: 1,
+    width: "100%",
+    maxWidth: 1100,
+    alignSelf: "center",
   },
   toolbarBtn: { width: 44, alignItems: "center" },
   toolbarTitle: { flex: 1, fontSize: 18, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
   searchInput: { flex: 1, fontSize: 16, color: colors.grey900, paddingHorizontal: 8 },
 
-  embeddedSearchRow: { paddingHorizontal: 8, paddingTop: 8 },
+  embeddedSearchRow: {
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    width: "100%",
+    maxWidth: 1100,
+    alignSelf: "center",
+  },
   embeddedSearchBox: {
     flexDirection: "row",
     alignItems: "center",

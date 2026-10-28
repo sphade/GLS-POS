@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
+import { centeredContent } from "@/lib/responsive";
 import { EmptyState } from "@/components/EmptyState";
 import {
   isVoidReturn,
@@ -126,7 +127,7 @@ export default function ReturnsScreen() {
         <FlatList
           data={returns}
           keyExtractor={(ret) => ret.id}
-          contentContainerStyle={{ padding: 8, paddingBottom: 24 }}
+          contentContainerStyle={[{ padding: 8, paddingBottom: 24 }, centeredContent]}
           renderItem={({ item }) => (
             <ReturnRow
               ret={item}

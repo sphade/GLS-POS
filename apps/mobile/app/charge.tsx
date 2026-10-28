@@ -94,7 +94,7 @@ export default function ChargeScreen() {
         <View style={styles.headerBtn} />
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+      <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.sectionTitle}>{strings.customerDetailsOptional.toUpperCase()}</Text>
         <View style={styles.card}>
           <TextInput
@@ -147,6 +147,13 @@ export default function ChargeScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.grey200 },
+  /** Payment options stay a comfortable width when the till is 1280px wide. */
+  content: {
+    paddingBottom: 24,
+    width: "100%",
+    maxWidth: 760,
+    alignSelf: "center",
+  },
   header: {
     backgroundColor: colors.primary,
     flexDirection: "row",
@@ -200,6 +207,9 @@ const styles = StyleSheet.create({
   charge: {
     margin: 10,
     height: 52,
+    width: "95%",
+    maxWidth: 740,
+    alignSelf: "center",
     borderRadius: 6,
     backgroundColor: colors.green,
     alignItems: "center",

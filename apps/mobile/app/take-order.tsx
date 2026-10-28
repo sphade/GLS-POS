@@ -658,7 +658,14 @@ const styles = StyleSheet.create({
   pager: { flex: 1 },
   page: { flex: 1 },
   pageList: { flex: 1 },
-  pageContent: { padding: 8, paddingBottom: 90, flexGrow: 1 },
+  pageContent: {
+    padding: 8,
+    paddingBottom: 90,
+    flexGrow: 1,
+    width: "100%",
+    maxWidth: 900,
+    alignSelf: "center",
+  },
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, paddingBottom: 80 },
   emptyText: { color: colors.grey600, fontSize: 15 },
 

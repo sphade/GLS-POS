@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
+import { centeredForm } from "@/lib/responsive";
 import {
   feedbackTap,
   getLastAudioError,
@@ -60,7 +61,7 @@ export default function SettingsScreen() {
         <View style={styles.headerBtn} />
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 10, paddingBottom: 24 }}>
+      <ScrollView contentContainerStyle={[{ padding: 10, paddingBottom: 24 }, centeredForm]}>
         <Text style={styles.groupTitle}>Feedback</Text>
         <View style={styles.card}>
           <View style={styles.toggleRow}>

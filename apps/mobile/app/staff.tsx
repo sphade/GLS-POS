@@ -5,6 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { ALL_ROLES, ROLE_LABELS, ROLE_PERMISSIONS, type StoreRole } from "@gls-pos/types";
 import { colors } from "@/constants/theme";
+import { centeredContent } from "@/lib/responsive";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
 import { api, type AttachableStaff, type StoreMember } from "@/lib/api";
@@ -117,7 +118,7 @@ export default function StaffScreen() {
     <SafeAreaView edges={["top"]} style={styles.root}>
       <Toolbar title="STAFF AND PARTNERS" onBack={() => router.back()} />
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 90 }}>
+      <ScrollView contentContainerStyle={[{ paddingBottom: 90 }, centeredContent]}>
         {loading && <ActivityIndicator style={{ marginTop: 24 }} color={colors.primary} />}
 
         {error && (

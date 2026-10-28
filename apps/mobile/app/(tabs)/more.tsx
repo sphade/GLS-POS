@@ -16,6 +16,7 @@ import {
   useServerRefresh,
 } from "@/lib/sync";
 import { useWebOrders } from "@/lib/web-orders";
+import { useResponsive } from "@/lib/responsive";
 import { feedbackTap } from "@/lib/feedback";
 import { stockSummaryOf } from "@/lib/stock";
 import type { Permission } from "@gls-pos/types";
@@ -45,6 +46,7 @@ export default function MoreScreen() {
   const { products, customers } = useCatalog();
   const { can, signOut } = useAuth();
   const { store } = useStore();
+  const { isExpanded } = useResponsive();
   const { pendingCount } = useWebOrders();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
   const getPendingSnapshot = useCallback(() => getPendingSyncCount(store.id), [store.id]);
@@ -130,7 +132,7 @@ export default function MoreScreen() {
       <PosHeader />
 
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={[styles.scroll, isExpanded && styles.scrollWide]}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
@@ -207,7 +209,7 @@ export default function MoreScreen() {
           {cards.map((c) => (
             <Pressable
               key={c.key}
-              style={styles.card}
+              style={[styles.card, isExpanded && styles.cardWide]}
               onPress={() => {
                 feedbackTap();
                 if (c.route) router.push(c.route as never);
@@ -242,6 +244,14 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.grey200 },
 
   scroll: { padding: 8, paddingBottom: 20 },
+  /** More stays 2-up on phones, 4-up on a wide till. */
+  scrollWide: {
+    padding: 12,
+    paddingBottom: 20,
+    width: "100%",
+    maxWidth: 1200,
+    alignSelf: "center",
+  },
 
   syncRecoveryCard: {
     width: "100%",
@@ -312,6 +322,7 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
     shadowOffset: { width: 0, height: 1 },
   },
+  cardWide: { width: "23.5%" },
   /** 23sp, bold, primary â€” single line (item_more_base.xml value). */
   value: {
     fontSize: 23,

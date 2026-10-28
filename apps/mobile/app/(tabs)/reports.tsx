@@ -16,6 +16,7 @@ import { useStore } from "@/lib/store";
 import { getSyncActivity, subscribeSyncActivity, useServerRefresh } from "@/lib/sync";
 import { feedbackTap } from "@/lib/feedback";
 import { stockSummaryOf } from "@/lib/stock";
+import { useResponsive } from "@/lib/responsive";
 import { CentralLedgerReport } from "@/components/CentralLedgerReport";
 
 const CURRENCY = "NGN";
@@ -145,6 +146,7 @@ function ReportsScreen() {
   const { returnRevision } = useReturns();
   const { store } = useStore();
   const { refreshing, onRefresh } = useServerRefresh(store.id);
+  const { isExpanded } = useResponsive();
   const [rangeIndex, setRangeIndex] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   /** A hand-picked window. Overrides the preset while it's set. */
@@ -477,9 +479,11 @@ function ReportsScreen() {
               {syncing ? "Loading sales from the server…" : "Loading report…"}
             </Text>
           </View>
-          {[0, 1, 2, 3, 4].map((i) => (
-            <SkeletonCard key={i} />
-          ))}
+          <View style={isExpanded ? styles.metricGrid : undefined}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <SkeletonCard key={i} />
+            ))}
+          </View>
         </ScrollView>
       ) : !hasData ? (
         <ScrollView
@@ -492,81 +496,83 @@ function ReportsScreen() {
         </ScrollView>
       ) : (
         <ScrollView
-          contentContainerStyle={{ paddingBottom: 24 }}
+          contentContainerStyle={styles.reportBody}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
           }
         >
-          <MetricCard
-            label="NET SALES"
-            value={formatMoney(stats.netSales, CURRENCY)}
-            message={
-              stats.refunded > 0
-                ? `${formatMoney(stats.grossSales, CURRENCY)} sold less ${formatMoney(stats.refunded, CURRENCY)} refunded`
-                : undefined
-            }
-            onPress={() => openChart("revenue", "Total Sales")}
-          />
-          {stats.refunded > 0 && (
+          <View style={isExpanded ? styles.metricGrid : undefined}>
             <MetricCard
-              label="RETURNS"
-              value={`-${formatMoney(stats.refunded, CURRENCY)}`}
-              valueColor={colors.red500}
-              message={`${stats.returnCount} return${stats.returnCount === 1 ? "" : "s"}`}
-              onPress={() => {
-                feedbackTap();
-                router.push("/returns" as Href);
-              }}
+              label="NET SALES"
+              value={formatMoney(stats.netSales, CURRENCY)}
+              message={
+                stats.refunded > 0
+                  ? `${formatMoney(stats.grossSales, CURRENCY)} sold less ${formatMoney(stats.refunded, CURRENCY)} refunded`
+                  : undefined
+              }
+              onPress={() => openChart("revenue", "Total Sales")}
             />
-          )}
-          {stats.discounted > 0 && (
+            {stats.refunded > 0 && (
+              <MetricCard
+                label="RETURNS"
+                value={`-${formatMoney(stats.refunded, CURRENCY)}`}
+                valueColor={colors.red500}
+                message={`${stats.returnCount} return${stats.returnCount === 1 ? "" : "s"}`}
+                onPress={() => {
+                  feedbackTap();
+                  router.push("/returns" as Href);
+                }}
+              />
+            )}
+            {stats.discounted > 0 && (
+              <MetricCard
+                label="DISCOUNTS GIVEN"
+                value={`-${formatMoney(stats.discounted, CURRENCY)}`}
+                valueColor={colors.red500}
+                message={`${stats.discountRate}% of what was sold`}
+                onPress={openDiscounts}
+              />
+            )}
             <MetricCard
-              label="DISCOUNTS GIVEN"
-              value={`-${formatMoney(stats.discounted, CURRENCY)}`}
-              valueColor={colors.red500}
-              message={`${stats.discountRate}% of what was sold`}
-              onPress={openDiscounts}
+              label="RECEIPTS"
+              value={String(stats.count)}
+              onPress={() => openChart("salesCount", "Receipts")}
             />
-          )}
-          <MetricCard
-            label="RECEIPTS"
-            value={String(stats.count)}
-            onPress={() => openChart("salesCount", "Receipts")}
-          />
-          <MetricCard
-            label="AVERAGE SALE"
-            value={formatMoney(stats.avg, CURRENCY)}
-            message={`${stats.count} sale${stats.count === 1 ? "" : "s"} in this period`}
-            // The average is money ÷ sales, so the useful drill-down is when
-            // those sales happened — the time view carries both figures per
-            // bucket, which is where a quiet hour or a big-basket hour shows up.
-            onPress={() => openChart("revenue", "Average Sale", "time")}
-          />
-          <MetricCard
-            label="TOP ITEM"
-            value={stats.topItem ? stats.topItem[0] : "—"}
-            message={stats.topItem ? `${stats.topItem[1]} sold` : undefined}
-            // Opens the full what-sold breakdown rather than the stock list.
-            onPress={() => openChart("revenue", "Item Sales", "item")}
-          />
-          <MetricCard
-            label="TOP PAYMENT METHOD"
-            value={stats.topMode ? stats.topMode[0] : "—"}
-            message={stats.topMode ? formatMoney(stats.topMode[1], CURRENCY) : undefined}
-            onPress={() => openChart("revenue", "Payment Methods", "payment")}
-          />
-          <MetricCard
-            label="LOW STOCK ITEMS"
-            value={String(stats.lowStock)}
-            valueColor={stats.lowStock > 0 ? colors.red500 : undefined}
-            onPress={openInventory}
-          />
-          <MetricCard
-            label="REMAINING STOCK"
-            value={String(stats.remaining)}
-            valueColor={colors.dkGreen}
-            onPress={openInventory}
-          />
+            <MetricCard
+              label="AVERAGE SALE"
+              value={formatMoney(stats.avg, CURRENCY)}
+              message={`${stats.count} sale${stats.count === 1 ? "" : "s"} in this period`}
+              // The average is money ÷ sales, so the useful drill-down is when
+              // those sales happened — the time view carries both figures per
+              // bucket, which is where a quiet hour or a big-basket hour shows up.
+              onPress={() => openChart("revenue", "Average Sale", "time")}
+            />
+            <MetricCard
+              label="TOP ITEM"
+              value={stats.topItem ? stats.topItem[0] : "—"}
+              message={stats.topItem ? `${stats.topItem[1]} sold` : undefined}
+              // Opens the full what-sold breakdown rather than the stock list.
+              onPress={() => openChart("revenue", "Item Sales", "item")}
+            />
+            <MetricCard
+              label="TOP PAYMENT METHOD"
+              value={stats.topMode ? stats.topMode[0] : "—"}
+              message={stats.topMode ? formatMoney(stats.topMode[1], CURRENCY) : undefined}
+              onPress={() => openChart("revenue", "Payment Methods", "payment")}
+            />
+            <MetricCard
+              label="LOW STOCK ITEMS"
+              value={String(stats.lowStock)}
+              valueColor={stats.lowStock > 0 ? colors.red500 : undefined}
+              onPress={openInventory}
+            />
+            <MetricCard
+              label="REMAINING STOCK"
+              value={String(stats.remaining)}
+              valueColor={colors.dkGreen}
+              onPress={openInventory}
+            />
+          </View>
         </ScrollView>
       )}
     </SafeAreaView>
@@ -586,8 +592,9 @@ function SkeletonCard() {
     loop.start();
     return () => loop.stop();
   }, [pulse]);
+  const { isExpanded } = useResponsive();
   return (
-    <Animated.View style={[styles.metricCard, { opacity: pulse }]}>
+    <Animated.View style={[styles.metricCard, isExpanded && styles.metricCardWide, { opacity: pulse }]}>
       <View style={{ flex: 1 }}>
         <View style={[styles.skel, { width: 110, height: 12 }]} />
         <View style={[styles.skel, { width: 160, height: 22, marginTop: 10 }]} />
@@ -609,9 +616,10 @@ function MetricCard({
   message?: string;
   onPress?: () => void;
 }) {
+  const { isExpanded } = useResponsive();
   return (
     <Pressable
-      style={styles.metricCard}
+      style={[styles.metricCard, isExpanded && styles.metricCardWide]}
       android_ripple={onPress ? { color: "#00000010" } : undefined}
       onPress={onPress}
       disabled={!onPress}
@@ -667,6 +675,20 @@ const styles = StyleSheet.create({
   },
 
   emptyWrap: { flexGrow: 1, alignItems: "center", justifyContent: "center", paddingBottom: 80 },
+  reportBody: {
+    paddingBottom: 24,
+    width: "100%",
+    maxWidth: 1100,
+    alignSelf: "center",
+  },
+  /** On a wide till metrics sit two-up instead of one long stretched column. */
+  metricGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    paddingHorizontal: 8,
+    rowGap: 8,
+  },
   syncBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -690,6 +712,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     elevation: 1,
   },
+  metricCardWide: { width: "49%", marginHorizontal: 0 },
   metricLabel: { fontSize: 15, color: colors.grey800, fontWeight: "500" },
   metricValue: { fontSize: 24, color: colors.primary, fontWeight: "700", marginTop: 6 },
   metricMessage: { fontSize: 13, color: colors.grey500, marginTop: 4 },

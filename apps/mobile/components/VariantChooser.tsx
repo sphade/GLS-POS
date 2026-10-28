@@ -246,6 +246,9 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
     overflow: "hidden",
+    width: "100%",
+    maxWidth: 720,
+    alignSelf: "center",
   },
   handle: {
     alignSelf: "center",

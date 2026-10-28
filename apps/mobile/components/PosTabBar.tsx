@@ -8,6 +8,7 @@ import { useCartCount } from "@/lib/cart";
 import { quietPull } from "@/lib/sync";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { useResponsive } from "@/lib/responsive";
 import { feedbackTap } from "@/lib/feedback";
 
 /**
@@ -63,60 +64,83 @@ export function PosTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const { store } = useStore();
   const { can } = useAuth();
+  const { isExpanded } = useResponsive();
+
+  // A 1280px-wide till with five tabs spread across the whole bottom edge puts
+  // a tab under each corner of the screen. Keep the bar full-bleed (it is the
+  // safe-area owner) but centre its contents in a comfortable rail.
+  const barHeight = isExpanded ? 72 : BAR_HEIGHT;
+  const iconSize = isExpanded ? 25 : 22;
+  const labelSize = isExpanded ? 12.5 : 11.5;
 
   return (
-    <View style={[styles.bar, { height: BAR_HEIGHT + insets.bottom, paddingBottom: insets.bottom }]}>
-      {state.routes.map((route, index) => {
-        const meta = TABS[route.name];
-        if (!meta) return null;
-        // `href: null` only hides a tab from the router's linking config; a
-        // custom tab bar still receives every route, so the bar filters too.
-        if (meta.centralOnly && !store.isCentral) return null;
-        if (meta.branchOnly && store.isCentral) return null;
-        if (meta.needs && !can(meta.needs)) return null;
-        const focused = state.index === index;
+    <View style={[styles.bar, { height: barHeight + insets.bottom, paddingBottom: insets.bottom }]}>
+      <View style={styles.inner}>
+        {state.routes.map((route, index) => {
+          const meta = TABS[route.name];
+          if (!meta) return null;
+          // `href: null` only hides a tab from the router's linking config; a
+          // custom tab bar still receives every route, so the bar filters too.
+          if (meta.centralOnly && !store.isCentral) return null;
+          if (meta.branchOnly && store.isCentral) return null;
+          if (meta.needs && !can(meta.needs)) return null;
+          const focused = state.index === index;
 
-        return (
-          <Pressable
-            key={route.key}
-            accessibilityRole="button"
-            accessibilityState={focused ? { selected: true } : {}}
-            accessibilityLabel={meta.label}
-            style={styles.tab}
-            onPress={() => {
-              feedbackTap();
-              const event = navigation.emit({ type: "tabPress", target: route.key, canPreventDefault: true });
-              if (!focused && !event.defaultPrevented) navigation.navigate(route.name as never);
-              if (store?.id) InteractionManager.runAfterInteractions(() => quietPull(store.id));
-            }}
-          >
-            <View style={[styles.pill, focused && styles.pillActive]}>
-              <Ionicons
-                name={focused ? meta.iconActive : meta.icon}
-                size={22}
-                color={focused ? colors.primaryDark : colors.grey600}
-              />
-              {route.name === "counter" && <CounterBadge />}
-            </View>
-            <Text
-              style={[styles.label, focused && styles.labelActive]}
-              numberOfLines={1}
+          return (
+            <Pressable
+              key={route.key}
+              accessibilityRole="button"
+              accessibilityState={focused ? { selected: true } : {}}
+              accessibilityLabel={meta.label}
+              style={styles.tab}
+              onPress={() => {
+                feedbackTap();
+                const event = navigation.emit({ type: "tabPress", target: route.key, canPreventDefault: true });
+                if (!focused && !event.defaultPrevented) navigation.navigate(route.name as never);
+                if (store?.id) InteractionManager.runAfterInteractions(() => quietPull(store.id));
+              }}
             >
-              {meta.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+              <View
+                style={[
+                  styles.pill,
+                  isExpanded && styles.pillWide,
+                  focused && styles.pillActive,
+                ]}
+              >
+                <Ionicons
+                  name={focused ? meta.iconActive : meta.icon}
+                  size={iconSize}
+                  color={focused ? colors.primaryDark : colors.grey600}
+                />
+                {route.name === "counter" && <CounterBadge />}
+              </View>
+              <Text
+                style={[styles.label, { fontSize: labelSize }, focused && styles.labelActive]}
+                numberOfLines={1}
+              >
+                {meta.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   bar: {
-    flexDirection: "row",
     backgroundColor: colors.white,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.grey300,
+    justifyContent: "center",
+  },
+  inner: {
+    flexDirection: "row",
+    flex: 1,
+    width: "100%",
+    maxWidth: 880,
+    alignSelf: "center",
     paddingHorizontal: 4,
   },
   tab: { flex: 1, alignItems: "center", justifyContent: "center", gap: 4 },
@@ -127,6 +151,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  pillWide: { width: 64, height: 34, borderRadius: 17 },
   pillActive: { backgroundColor: "#E3F2E4" },
   label: { fontSize: 11.5, fontWeight: "600", color: colors.grey600, includeFontPadding: false },
   labelActive: { color: colors.primaryDark, fontWeight: "800" },

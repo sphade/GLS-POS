@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
+import { centeredForm } from "@/lib/responsive";
 import { EmptyState } from "@/components/EmptyState";
 import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
 import { RequirePermission } from "@/components/RequirePermission";
@@ -192,7 +193,7 @@ function DiscountsScreen() {
           data={discounted}
           keyExtractor={(receipt) => receipt.id}
           ListHeaderComponent={header}
-          contentContainerStyle={{ padding: 8, paddingBottom: 40 }}
+          contentContainerStyle={[{ padding: 8, paddingBottom: 40 }, centeredForm]}
           renderItem={({ item }) => (
             <View>
               <ReceiptDisclosureRow

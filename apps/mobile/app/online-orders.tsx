@@ -5,6 +5,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter, type Href } from "expo-router";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { colors, formatMoney } from "@/constants/theme";
+import { centeredContent } from "@/lib/responsive";
 import { loadRecentWebOrders, useWebOrders } from "@/lib/web-orders";
 import { countDocs, runAtomic } from "@/lib/db";
 import { displayItemName, useCart } from "@/lib/cart";
@@ -151,7 +152,7 @@ export default function OnlineOrdersScreen() {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 6, paddingBottom: 30 }}>
+      <ScrollView contentContainerStyle={[{ padding: 6, paddingBottom: 30 }, centeredContent]}>
         {list.length === 0 && (
           <View style={styles.setup}>
             <MaterialCommunityIcons name="qrcode-scan" size={44} color={colors.primary} />

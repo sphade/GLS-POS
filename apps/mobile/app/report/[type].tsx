@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, formatMoney } from "@/constants/theme";
+import { centeredContent } from "@/lib/responsive";
 import { BarChart, type Bar } from "@/components/BarChart";
 import { EmptyState } from "@/components/EmptyState";
 import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
@@ -496,7 +497,7 @@ function ReportDetailScreen() {
           <EmptyState text="No sales in this period" size={120} />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ paddingBottom: 90 }}>
+        <ScrollView contentContainerStyle={[{ paddingBottom: 90 }, centeredContent]}>
           {/* What the whole range came to, so drilling in never loses the total. */}
           <View style={styles.summaryCard}>
             <SummaryCell label="AMOUNT" value={formatMoney(totals.amount, CURRENCY)} emphasis />

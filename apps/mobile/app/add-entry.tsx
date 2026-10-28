@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, currencySymbol } from "@/constants/theme";
+import { centeredForm } from "@/lib/responsive";
 import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
 
 const CURRENCY = "NGN";
@@ -51,7 +52,7 @@ export default function AddEntryScreen() {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 8 }}>
+      <ScrollView contentContainerStyle={[{ padding: 8 }, centeredForm]}>
         <View style={styles.card}>
           <Text style={styles.enterAmount}>Enter Amount</Text>
 
