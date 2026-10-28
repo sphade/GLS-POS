@@ -9,6 +9,8 @@ import {
   listGlobalInventoryItems,
   updateGlobalInventoryItem,
   deleteGlobalInventoryItem,
+  adjustCentralStock,
+  listCentralStockMovements,
   listAllocations,
   createAllocation,
   fulfillAllocation,
@@ -30,6 +32,7 @@ import {
 import {
   createGlobalInventoryItemSchema,
   updateGlobalInventoryItemSchema,
+  adjustCentralStockSchema,
   createAllocationSchema,
   listAllocationsQuerySchema,
   upsertConversionRateSchema,
@@ -94,6 +97,38 @@ inventory.delete("/:id", async (c) => {
   const itemId = c.req.param("id");
   await deleteGlobalInventoryItem(c.env, central, itemId);
   return ok(c, { message: "Item deleted" });
+});
+
+// --- Central stock adjustments ---
+
+inventory.post("/:id/adjust", validate("json", adjustCentralStockSchema), async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { central } = await requireCentralSender(c.env, user.id);
+
+  const result = await adjustCentralStock(
+    c.env,
+    central,
+    c.req.param("id"),
+    c.req.valid("json"),
+    { id: user.id, name: user.name },
+  );
+  return ok(c, result, 201);
+});
+
+inventory.get("/:id/movements", async (c) => {
+  const user = c.get("user");
+  if (!user) throw HttpError.unauthorized();
+  const { central } = await requireCentralSender(c.env, user.id);
+
+  const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 100);
+  const movements = await listCentralStockMovements(
+    c.env,
+    central,
+    c.req.param("id"),
+    limit,
+  );
+  return ok(c, movements);
 });
 
 // --- Allocations ---

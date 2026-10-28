@@ -35,6 +35,37 @@ export const globalInventoryItems = sqliteTable("global_inventory_items", {
   index("global_inventory_items_store_idx").on(table.storeId),
 ]);
 
+// --- Central stock movements (add / remove ledger) ---
+
+/**
+ * One add or remove on a central item.
+ *
+ * Menu products keep their history in the store's own `stock_movements` log;
+ * central items live in D1, so they need their own ledger. Every adjustment is
+ * stored with the balance before and after, who did it and why, so the owner
+ * can see how a 5 kg item became 80 kg without guessing.
+ */
+export const centralStockMovements = sqliteTable("central_stock_movements", {
+  id: text("id").primaryKey(),
+  itemId: text("item_id")
+    .notNull()
+    .references(() => globalInventoryItems.id),
+  /** Central store that owns the item. */
+  storeId: text("store_id"),
+  /** Signed change: +50 for a delivery, -20 for a transfer or spoilage. */
+  delta: integer("delta").notNull(),
+  /** Balance before this change. */
+  baseStock: integer("base_stock").notNull(),
+  /** Balance after this change. */
+  resulting: integer("resulting").notNull(),
+  note: text("note"),
+  actorId: text("actor_id"),
+  actorName: text("actor_name"),
+  at: integer("at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("central_stock_movements_item_idx").on(table.itemId, table.at),
+]);
+
 // --- Inventory allocations (distribution tracking) ---
 
 /**

@@ -216,6 +216,133 @@ export async function deleteGlobalInventoryItem(
     .where(eq(schema.globalInventoryItems.id, itemId));
 }
 
+// --- Central stock adjustments (add / remove) ---
+
+/**
+ * Add or remove central stock and record why.
+ *
+ * The balance is moved by a signed delta rather than overwritten, so two people
+ * adding stock on two devices both count instead of the last save winning. The
+ * row is keyed by a client id: replaying the same adjustment after a dropped
+ * response cannot double the stock.
+ */
+export async function adjustCentralStock(
+  env: Env,
+  central: CentralStore,
+  itemId: string,
+  input: { id?: string; delta: number; note?: string },
+  actor: { id: string; name: string },
+) {
+  const db = createDb(env.DB);
+
+  const delta = Math.trunc(input.delta);
+  if (!Number.isFinite(delta) || delta === 0) {
+    throw HttpError.badRequest("Enter an amount to add or remove", "invalid_delta");
+  }
+
+  const [item] = await db
+    .select()
+    .from(schema.globalInventoryItems)
+    .where(and(eq(schema.globalInventoryItems.id, itemId), centralItemScope(central)))
+    .limit(1);
+  if (!item) {
+    throw HttpError.notFound("Central inventory item not found", "item_not_found");
+  }
+
+  // Replaying a queued adjustment returns the original row and changes nothing.
+  if (input.id) {
+    const [existing] = await db
+      .select()
+      .from(schema.centralStockMovements)
+      .where(eq(schema.centralStockMovements.id, input.id))
+      .limit(1);
+    if (existing) {
+      return { item, movement: existing, duplicate: true };
+    }
+  }
+
+  const base = item.totalStock;
+  const now = new Date();
+  const id = input.id ?? newId("mov");
+  const note = input.note?.trim().slice(0, 240) || null;
+
+  // Move the balance with SQL arithmetic and a guard, so two devices adding at
+  // the same time both count and a removal can never push the total below zero.
+  const [updated] = await db
+    .update(schema.globalInventoryItems)
+    .set({
+      totalStock: sql`${schema.globalInventoryItems.totalStock} + ${delta}`,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.globalInventoryItems.id, itemId),
+        gte(sql`${schema.globalInventoryItems.totalStock} + ${delta}`, 0),
+      ),
+    )
+    .returning();
+
+  if (!updated) {
+    throw HttpError.badRequest(
+      `Only ${base} ${item.unit} of "${item.name}" in stock`,
+      "insufficient_stock",
+    );
+  }
+
+  const resulting = updated.totalStock;
+
+  await db.insert(schema.centralStockMovements).values({
+    id,
+    itemId,
+    storeId: central.id,
+    delta,
+    baseStock: resulting - delta,
+    resulting,
+    note,
+    actorId: actor.id,
+    actorName: actor.name,
+    at: now,
+  });
+
+  const [movement] = await db
+    .select()
+    .from(schema.centralStockMovements)
+    .where(eq(schema.centralStockMovements.id, id))
+    .limit(1);
+
+  return {
+    item: updated,
+    movement,
+    duplicate: false,
+  };
+}
+
+/** Recent add/remove entries for one central item, newest first. */
+export async function listCentralStockMovements(
+  env: Env,
+  central: CentralStore,
+  itemId: string,
+  limit = 50,
+) {
+  const db = createDb(env.DB);
+
+  const [item] = await db
+    .select({ id: schema.globalInventoryItems.id })
+    .from(schema.globalInventoryItems)
+    .where(and(eq(schema.globalInventoryItems.id, itemId), centralItemScope(central)))
+    .limit(1);
+  if (!item) {
+    throw HttpError.notFound("Central inventory item not found", "item_not_found");
+  }
+
+  return db
+    .select()
+    .from(schema.centralStockMovements)
+    .where(eq(schema.centralStockMovements.itemId, itemId))
+    .orderBy(desc(schema.centralStockMovements.at))
+    .limit(limit);
+}
+
 // --- Inventory Allocations ---
 
 export type AllocationFilters = {

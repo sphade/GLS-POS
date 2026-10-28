@@ -84,6 +84,28 @@ export type CentralItem = {
 
 export type CentralAllocationStatus = "pending" | "fulfilled" | "cancelled";
 
+/**
+ * One add or remove on a central item.
+ *
+ * `delta` is signed (+50 arrived, -20 spoilt), and the before/after balances are
+ * stored with it so the owner sees how the total got where it is.
+ */
+export type CentralStockMovement = {
+  id: string;
+  itemId: string;
+  storeId?: string | null;
+  delta: number;
+  baseStock: number;
+  resulting: number;
+  note: string | null;
+  actorId?: string | null;
+  actorName: string | null;
+  at: string | number;
+  /** Local-only: the server refused this change, so it was undone. */
+  failed?: boolean;
+  syncError?: string;
+};
+
 /** A send from the centre to a branch, enriched with names for list screens. */
 export type CentralAllocation = {
   id: string;
@@ -279,6 +301,16 @@ export const api = {
     request<CentralItem[]>(`/inventory/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteCentralItem: (id: string) =>
     request<{ message: string }>(`/inventory/${id}`, { method: "DELETE" }),
+  adjustCentralStock: (itemId: string, body: { id?: string; delta: number; note?: string }) =>
+    // The server writes the balance and the ledger row together. Retrying is
+    // safe because the row id is minted on the device.
+    request<{ item: CentralItem; movement: CentralStockMovement; duplicate: boolean }>(
+      `/inventory/${itemId}/adjust`,
+      { method: "POST", body: JSON.stringify(body) },
+      30_000,
+    ),
+  listCentralStockMovements: (itemId: string, limit = 50) =>
+    request<CentralStockMovement[]>(`/inventory/${itemId}/movements?limit=${limit}`),
 
   listAllocations: (query?: { toStoreId?: string; fromStoreId?: string; status?: CentralAllocationStatus }) => {
     const params = new URLSearchParams();

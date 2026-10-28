@@ -78,6 +78,13 @@
       "when": 1793222010906,
       "tag": "0010_good_menace",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1793224298577,
+      "tag": "0011_small_synch",
+      "breakpoints": true
     }
   ]
 }

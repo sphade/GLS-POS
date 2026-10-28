@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, confirmDelete, formStyles } from "@/components/form";
 import { CENTRAL_UNITS, type CentralItem } from "@/lib/api";
@@ -70,6 +71,16 @@ export default function CentralItemEditorScreen() {
     })();
   }, [central?.id, id]);
 
+  // Coming back from Add/Remove, the cached item has the new balance; refresh
+  // the header so the editor never shows the old total.
+  useFocusEffect(
+    useCallback(() => {
+      if (!central || !id) return;
+      const cached = centralItem(central.id, id);
+      if (cached) setExisting(cached);
+    }, [central, id]),
+  );
+
   if (!canManage) {
     return (
       <SafeAreaView edges={["top"]} style={formStyles.screen}>
@@ -98,7 +109,10 @@ export default function CentralItemEditorScreen() {
 
   const total = Number.parseInt(totalStock, 10);
   const min = Number.parseInt(minStock, 10);
-  const validTotal = totalStock.trim() === "" || (Number.isInteger(total) && total >= 0);
+  // An existing item's balance only moves through Add/Remove, so the editor
+  // never overwrites it with a typed total.
+  const validTotal =
+    !!existing || totalStock.trim() === "" || (Number.isInteger(total) && total >= 0);
   const validMin = minStock.trim() === "" || (Number.isInteger(min) && min >= 0);
   const dirty = name.trim().length > 0 && touched && validTotal && validMin && !saving;
 
@@ -111,7 +125,7 @@ export default function CentralItemEditorScreen() {
         id: existing?.id,
         name: name.trim(),
         unit,
-        totalStock: totalStock.trim() === "" ? 0 : total,
+        totalStock: existing ? existing.totalStock : totalStock.trim() === "" ? 0 : total,
         minStock: minStock.trim() === "" ? 0 : min,
         description: description.trim() || undefined,
       },
@@ -202,19 +216,45 @@ export default function CentralItemEditorScreen() {
           </View>
         </View>
 
-        <FieldCard
-          label={`Total Stock (${unit}) *`}
-          hint="0"
-          value={totalStock}
-          onChangeText={(t) => {
-            setTotalStock(t);
-            setTouched(true);
-          }}
-          keyboardType="numeric"
-          decimals={false}
-          showTick={false}
-        />
-        {!validTotal && <Text style={styles.warn}>Enter a whole number, 0 or more.</Text>}
+        {existing ? (
+          <Pressable
+            style={styles.stockCard}
+            onPress={() => {
+              feedbackTap();
+              router.push({
+                pathname: "/central-adjust-stock",
+                params: { id: existing.id },
+              } as never);
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.stockLabel}>CURRENT STOCK</Text>
+              <Text style={styles.stockValue} numberOfLines={1} adjustsFontSizeToFit>
+                {existing.totalStock} <Text style={styles.stockUnit}>{unit}</Text>
+              </Text>
+            </View>
+            <View style={styles.stockBtn}>
+              <Ionicons name="add-circle-outline" size={16} color={colors.white} />
+              <Text style={styles.stockBtnText}>ADD / REMOVE</Text>
+            </View>
+          </Pressable>
+        ) : (
+          <>
+            <FieldCard
+              label={`Opening Stock (${unit})`}
+              hint="0"
+              value={totalStock}
+              onChangeText={(t) => {
+                setTotalStock(t);
+                setTouched(true);
+              }}
+              keyboardType="numeric"
+              decimals={false}
+              showTick={false}
+            />
+            {!validTotal && <Text style={styles.warn}>Enter a whole number, 0 or more.</Text>}
+          </>
+        )}
         <FieldCard
           label={`Low Stock Alert (${unit})`}
           hint="5"
@@ -245,6 +285,29 @@ export default function CentralItemEditorScreen() {
 
 const styles = StyleSheet.create({
   card: { backgroundColor: colors.card, borderRadius: 4, padding: 12, marginBottom: 8, elevation: 1 },
+  stockCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: colors.card,
+    borderRadius: 4,
+    padding: 14,
+    marginBottom: 8,
+    elevation: 1,
+  },
+  stockLabel: { fontSize: 11, fontWeight: "800", color: colors.grey600, letterSpacing: 0.6 },
+  stockValue: { fontSize: 26, fontWeight: "800", color: colors.grey900, marginTop: 2 },
+  stockUnit: { fontSize: 14, fontWeight: "700", color: colors.grey500 },
+  stockBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: colors.primary,
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  stockBtnText: { color: colors.white, fontSize: 10.5, fontWeight: "800", letterSpacing: 0.5 },
   sectionLabel: { fontSize: 12, fontWeight: "700", color: colors.grey600, letterSpacing: 0.6, marginBottom: 10 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {

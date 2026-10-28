@@ -6,6 +6,7 @@ import {
   type CentralConversion,
   type CentralConversionRate,
   type CentralItem,
+  type CentralStockMovement,
 } from "./api";
 import {
   localDocCount,
@@ -37,6 +38,7 @@ const ITEMS = "central_items";
 const ALLOCATIONS = "central_allocations";
 const CONVERSIONS = "central_conversions";
 const RATES = "central_conversion_rates";
+const MOVEMENTS = "central_stock_movements";
 const OUTBOX = "central_outbox";
 
 export type CentralActor = {
@@ -70,6 +72,11 @@ type NewCentralOp =
   | { kind: "item.create"; item: CentralItem }
   | { kind: "item.update"; itemId: string; patch: ItemPatch }
   | { kind: "item.delete"; itemId: string }
+  | {
+      kind: "item.adjust";
+      itemId: string;
+      movement: CentralStockMovement;
+    }
   | { kind: "allocation.create"; allocation: CentralAllocation }
   | {
       kind: "allocation.fulfill" | "allocation.cancel";
@@ -132,6 +139,16 @@ export function centralItems(scopeId: string): CentralItem[] {
 
 export function centralItem(scopeId: string, id: string): CentralItem | null {
   return localDocGet<CentralItem>(scopeId, ITEMS, id);
+}
+
+/** Add/remove history for one central item, newest first. */
+export function centralStockMovements(
+  scopeId: string,
+  itemId: string,
+): CentralStockMovement[] {
+  return localDocLoadAll<CentralStockMovement>(scopeId, MOVEMENTS)
+    .filter((movement) => movement.itemId === itemId && !movement.failed)
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
 }
 
 export function centralAllocations(scopeId: string): CentralAllocation[] {
@@ -285,6 +302,79 @@ export function deleteCentralItemLocal(
   saveOp(scopeId, op);
   localDocDelete(scopeId, ITEMS, itemId);
   emitCentralChange(true);
+}
+
+export type AdjustCentralStockInput = {
+  itemId: string;
+  /** Positive to add, negative to remove. */
+  delta: number;
+  note?: string;
+};
+
+/**
+ * Add or remove central stock offline, exactly like a menu item adjustment.
+ *
+ * The balance moves by the delta (not to an absolute value), so two people
+ * adding stock do not overwrite each other. The ledger row is written locally
+ * first and the server replays it with the same id when the queue drains.
+ */
+export function adjustCentralStockLocal(
+  scopeId: string,
+  input: AdjustCentralStockInput,
+  actor: CentralActor,
+): { ok: true; item: CentralItem; movement: CentralStockMovement } | { ok: false; error: string } {
+  const delta = Math.trunc(input.delta);
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: false, error: "Enter an amount to add or remove." };
+  }
+
+  const item = centralItem(scopeId, input.itemId);
+  if (!item) {
+    return { ok: false, error: "This item is no longer on this device." };
+  }
+
+  const base = item.totalStock;
+  const resulting = base + delta;
+  if (resulting < 0) {
+    return {
+      ok: false,
+      error: `Only ${base} ${item.unit} of "${item.name}" in stock.`,
+    };
+  }
+
+  const now = new Date();
+  const movement: CentralStockMovement = {
+    id: uid("mov"),
+    itemId: item.id,
+    storeId: scopeId,
+    delta,
+    baseStock: base,
+    resulting,
+    note: input.note?.trim().slice(0, 240) || null,
+    actorId: actor.id,
+    actorName: actor.name,
+    at: now.toISOString(),
+  };
+
+  const updated: CentralItem = {
+    ...item,
+    totalStock: resulting,
+    updatedAt: now.toISOString(),
+  };
+
+  const op = newOp(scopeId, actor, {
+    kind: "item.adjust",
+    itemId: item.id,
+    movement,
+  });
+
+  localDocWriteBatch(scopeId, [
+    { collection: ITEMS, item: updated },
+    { collection: MOVEMENTS, item: movement },
+    { collection: OUTBOX, item: op },
+  ]);
+  emitCentralChange(true);
+  return { ok: true, item: updated, movement };
 }
 
 export type CreateCentralTransferInput = {
@@ -564,6 +654,7 @@ const ROLLBACK_CODES = new Set([
   "invalid_destination",
   "not_in_tree",
   "invalid_quantity",
+  "invalid_delta",
   "duplicate_id",
   "not_a_member",
   "sender_role_required",
@@ -611,6 +702,36 @@ async function applyCentralOp(op: CentralOp): Promise<OpResult> {
       return res.ok || res.error.code === "item_not_found"
         ? { ok: true }
         : failure(res.error);
+    }
+    case "item.adjust": {
+      const res = await api.adjustCentralStock(op.itemId, {
+        id: op.movement.id,
+        delta: op.movement.delta,
+        note: op.movement.note ?? undefined,
+      });
+      if (res.ok) {
+        // Keep the server's balances: another device may have moved the stock
+        // between this adjustment being queued and it being applied.
+        localDocPut(op.scopeId, ITEMS, res.data.item);
+        localDocPut(op.scopeId, MOVEMENTS, {
+          ...op.movement,
+          ...res.data.movement,
+          failed: undefined,
+          syncError: undefined,
+        });
+        return { ok: true };
+      }
+      if (res.error.code === "item_not_found") {
+        // The item was deleted elsewhere; the adjustment has nothing to apply.
+        localDocPut(op.scopeId, MOVEMENTS, { ...op.movement, failed: true });
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: res.error.message,
+        permanent: !TRANSIENT_CODES.has(res.error.code),
+        rollback: ROLLBACK_CODES.has(res.error.code),
+      };
     }
     case "allocation.create": {
       const res = await api.createAllocation({
@@ -701,12 +822,41 @@ function rollbackAllocationCreate(
   emitCentralChange();
 }
 
+function rollbackCentralAdjust(
+  scopeId: string,
+  op: Extract<CentralOp, { kind: "item.adjust" }>,
+  error: string,
+): void {
+  const item = centralItem(scopeId, op.itemId);
+  const writes: { collection: string; item: CentralItem | CentralStockMovement }[] = [
+    {
+      collection: MOVEMENTS,
+      item: { ...op.movement, failed: true, syncError: error },
+    },
+  ];
+  if (item) {
+    // Undo exactly the delta this op applied. Clamped at zero because another
+    // device may have removed stock in the meantime.
+    writes.push({
+      collection: ITEMS,
+      item: {
+        ...item,
+        totalStock: Math.max(0, item.totalStock - op.movement.delta),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
+  localDocWriteBatch(scopeId, writes);
+  emitCentralChange();
+}
+
 function opAllowed(op: CentralOp, memberships: readonly CentralMembership[]): boolean {
   const member = (id: string) => memberships.some((m) => m.id === id);
   switch (op.kind) {
     case "item.create":
     case "item.update":
     case "item.delete":
+    case "item.adjust":
     case "allocation.create":
     case "conversion.create":
       return member(op.scopeId);
@@ -796,6 +946,14 @@ export async function flushCentralOutbox(
       continue;
     }
 
+    if (result.rollback && op.kind === "item.adjust") {
+      // The server has less stock than this device thought (another till got
+      // there first). Undo the change so the balance matches the server.
+      rollbackCentralAdjust(scopeId, op, result.error);
+      localDocDelete(scopeId, OUTBOX, op.id);
+      continue;
+    }
+
     const next: CentralOp = {
       ...op,
       attempts: op.attempts + 1,
@@ -853,6 +1011,34 @@ export async function refreshCentralConversionRates(scopeId: string): Promise<bo
   const res = await api.listConversionRates(scopeId);
   if (!res.ok) return false;
   localDocReplaceAll(scopeId, RATES, res.data);
+  emitCentralChange();
+  return true;
+}
+
+/**
+ * Replace one item's add/remove history with the server's copy.
+ *
+ * The ledger is per item, so only that item's local rows are replaced; other
+ * items keep theirs. Local writes waiting in the outbox block the refresh so an
+ * unsynced adjustment cannot disappear.
+ */
+export async function refreshCentralStockMovements(
+  scopeId: string,
+  itemId: string,
+): Promise<boolean> {
+  if (OFFLINE_MODE || localDocCount(scopeId, OUTBOX) > 0) return false;
+  const res = await api.listCentralStockMovements(itemId);
+  if (!res.ok) return false;
+
+  for (const movement of localDocLoadAll<CentralStockMovement>(scopeId, MOVEMENTS)) {
+    if (movement.itemId === itemId) localDocDelete(scopeId, MOVEMENTS, movement.id);
+  }
+  if (res.data.length > 0) {
+    localDocWriteBatch(
+      scopeId,
+      res.data.map((movement) => ({ collection: MOVEMENTS, item: movement })),
+    );
+  }
   emitCentralChange();
   return true;
 }

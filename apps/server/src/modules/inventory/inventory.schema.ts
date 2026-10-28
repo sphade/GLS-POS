@@ -29,6 +29,25 @@ export const updateGlobalInventoryItemSchema = z.object({
 export type CreateGlobalInventoryItemInput = z.infer<typeof createGlobalInventoryItemSchema>;
 export type UpdateGlobalInventoryItemInput = z.infer<typeof updateGlobalInventoryItemSchema>;
 
+/**
+ * Add or remove central stock by a signed amount.
+ *
+ * `delta` is positive to add (a delivery arrived) and negative to remove
+ * (spoilage, a correction). Zero is rejected so an empty submit cannot write a
+ * meaningless ledger row.
+ */
+export const adjustCentralStockSchema = z.object({
+  /** Client-generated idempotency key; retrying the same id is safe. */
+  id: clientId.optional(),
+  delta: z
+    .number()
+    .int("Enter a whole number")
+    .refine((value) => value !== 0, "Enter an amount to add or remove"),
+  note: z.string().max(240).optional(),
+});
+
+export type AdjustCentralStockInput = z.infer<typeof adjustCentralStockSchema>;
+
 // --- Allocations ---
 
 export const createAllocationSchema = z.object({

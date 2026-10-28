@@ -134,6 +134,22 @@ export function CentralItemsView() {
                       </View>
                     ) : null}
                     <Pressable
+                      style={styles.adjustBtn}
+                      hitSlop={6}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Add or remove ${item.name} stock`}
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        feedbackTap();
+                        router.push({
+                          pathname: "/central-adjust-stock",
+                          params: { id: item.id },
+                        } as never);
+                      }}
+                    >
+                      <Text style={styles.adjustBtnText}>±</Text>
+                    </Pressable>
+                    <Pressable
                       style={styles.sendBtn}
                       hitSlop={6}
                       accessibilityRole="button"
@@ -176,6 +192,17 @@ const styles = StyleSheet.create({
   lowPill: { backgroundColor: colors.red500, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
   lowPillText: { color: colors.white, fontSize: 10, fontWeight: "800" },
   rowTrailing: { flexDirection: "row", alignItems: "center", gap: 8 },
+  adjustBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.white,
+  },
+  adjustBtnText: { color: colors.primary, fontSize: 17, fontWeight: "800", lineHeight: 20 },
   sendBtn: {
     flexDirection: "row",
     alignItems: "center",
