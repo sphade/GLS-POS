@@ -304,7 +304,9 @@ function RootStack() {
         options={{ presentation: "fullScreenModal", gestureEnabled: false }}
       />
       <Stack.Screen name="settings" options={MODAL} />
+      <Stack.Screen name="copy-menu" options={MODAL} />
       <Stack.Screen name="printer-setup" options={MODAL} />
+      <Stack.Screen name="diagnostics" options={MODAL} />
       <Stack.Screen name="online-orders" options={MODAL} />
       <Stack.Screen name="table-qr" options={MODAL} />
       <Stack.Screen name="report/[type]" options={MODAL} />

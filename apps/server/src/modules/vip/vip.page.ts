@@ -20,15 +20,16 @@ const money = (minor: number) => {
 };
 
 /**
- * Premium dark-luxe theme: near-black canvas, warm gold accents, a serif
- * display face for headings against a clean sans for UI. Aims to feel like
- * high-end table service rather than a utility ordering form.
+ * GLS brand theme: white canvas, brand green accents, serif display face for
+ * headings against a clean sans for UI. Same structure as the original
+ * dark-luxe layout — only the palette changed, so guests get the shop's usual
+ * colours instead of a one-off gold-on-black look.
  */
 const STYLES = `
   :root {
-    --ink:#0E0F0C; --ink-2:#16180F; --card:#1C1E16; --line:rgba(255,255,255,.09);
-    --gold:#C9A227; --gold-soft:#E4C767; --green:#5AA02C; --green-soft:#7CC24A;
-    --text:#F4F1E8; --muted:#9A9787; --danger:#E05A4E;
+    --ink:#FFFFFF; --ink-2:#FFFFFF; --card:#F5F5F5; --line:rgba(0,0,0,.09);
+    --gold:#4CAF50; --gold-soft:#2E7D32; --green:#4CAF50; --green-soft:#66BB6A;
+    --text:#212121; --muted:#757575; --danger:#D32F2F;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html { -webkit-text-size-adjust:100%; }
@@ -43,8 +44,8 @@ const STYLES = `
   header {
     position:relative; padding:34px 22px 26px; text-align:center;
     background:
-      radial-gradient(120% 90% at 50% 0%, rgba(201,162,39,.16) 0%, rgba(201,162,39,0) 60%),
-      linear-gradient(180deg,#14160F 0%, var(--ink) 100%);
+      radial-gradient(120% 90% at 50% 0%, rgba(76,175,80,.16) 0%, rgba(76,175,80,0) 60%),
+      linear-gradient(180deg,#F1F9F1 0%, #FFFFFF 100%);
     border-bottom:1px solid var(--line);
   }
   .crest {
@@ -58,28 +59,28 @@ const STYLES = `
   header h1 {
     margin:0; font-size:30px; font-weight:400; letter-spacing:.4px; line-height:1.18;
   }
-  .rule { width:44px; height:1px; background:var(--gold); margin:16px auto 12px; opacity:.75; }
+  .rule { width:44px; height:1px; background:var(--gold); margin:16px auto 12px; opacity:.85; }
   .seated { font-size:12px; letter-spacing:1.6px; color:var(--muted); text-transform:uppercase; }
   .seated strong { color:var(--text); font-weight:600; letter-spacing:1.6px; }
 
   /* ---------- category rail ---------- */
   nav {
     position:sticky; top:0; z-index:20; display:flex; gap:8px; overflow-x:auto;
-    padding:13px 18px; background:rgba(14,15,12,.94); backdrop-filter:blur(14px);
+    padding:13px 18px; background:rgba(255,255,255,.95); backdrop-filter:blur(14px);
     border-bottom:1px solid var(--line); scrollbar-width:none;
   }
   nav::-webkit-scrollbar { display:none; }
   nav button {
-    flex:0 0 auto; border:1px solid var(--line); background:transparent; color:var(--muted);
+    flex:0 0 auto; border:1px solid var(--line); background:#FFFFFF; color:var(--muted);
     border-radius:100px; padding:9px 16px; font-size:11px; font-weight:700; letter-spacing:1.3px;
     text-transform:uppercase; transition:all .22s ease;
   }
-  nav button.on { color:var(--ink); background:var(--gold); border-color:var(--gold); font-weight:800; }
+  nav button.on { color:#FFFFFF; background:var(--green); border-color:var(--green); font-weight:800; }
 
   /* ---------- menu ---------- */
   h2 {
     display:flex; align-items:center; gap:14px; margin:34px 22px 14px;
-    font-size:11px; font-weight:700; letter-spacing:3px; color:var(--gold); text-transform:uppercase;
+    font-size:11px; font-weight:700; letter-spacing:3px; color:var(--gold-soft); text-transform:uppercase;
   }
   h2::after { content:""; flex:1; height:1px; background:var(--line); }
 
@@ -90,7 +91,7 @@ const STYLES = `
   .item:last-child { border-bottom:none; }
   .item .info { flex:1; min-width:0; }
   .item .nm { font-size:16px; font-weight:500; letter-spacing:.2px; line-height:1.3; }
-  .item .pr { margin-top:6px; font-size:15px; color:var(--gold-soft); letter-spacing:.4px; }
+  .item .pr { margin-top:6px; font-size:15px; color:var(--gold-soft); letter-spacing:.4px; font-weight:600; }
   .item .out {
     margin-top:6px; font-size:10px; font-weight:700; letter-spacing:1.6px;
     color:var(--muted); text-transform:uppercase;
@@ -98,12 +99,12 @@ const STYLES = `
   .item.gone .nm { color:var(--muted); }
 
   .add {
-    flex:0 0 auto; border:1px solid var(--gold); background:transparent; color:var(--gold);
+    flex:0 0 auto; border:1px solid var(--green); background:var(--green); color:#FFFFFF;
     border-radius:100px; padding:10px 20px; font-size:11px; font-weight:800; letter-spacing:1.4px;
     text-transform:uppercase; transition:all .2s ease;
   }
-  .add:active { background:var(--gold); color:var(--ink); }
-  .add:disabled { border-color:var(--line); color:var(--muted); }
+  .add:active { background:var(--gold-soft); border-color:var(--gold-soft); color:#FFFFFF; }
+  .add:disabled { background:#FFFFFF; border-color:var(--line); color:var(--muted); }
 
   .item.choices { display:block; }
   .variant-list { margin-top:13px; border-top:1px solid var(--line); }
@@ -120,21 +121,21 @@ const STYLES = `
              background:var(--card); border:1px solid var(--line); border-radius:100px; padding:4px; }
   .stepper button {
     width:34px; height:34px; border-radius:50%; border:none; background:transparent;
-    color:var(--gold); font-size:19px; font-weight:400; line-height:1;
+    color:var(--gold-soft); font-size:19px; font-weight:400; line-height:1;
   }
-  .stepper button:active { background:rgba(201,162,39,.16); }
+  .stepper button:active { background:rgba(76,175,80,.14); }
   .stepper .q { min-width:26px; text-align:center; font-weight:700; font-size:15px; }
 
   /* ---------- sticky order bar ---------- */
   footer {
     position:fixed; left:0; right:0; bottom:0; z-index:30; padding:14px 18px 22px;
-    background:linear-gradient(180deg, rgba(14,15,12,.4) 0%, var(--ink) 34%);
+    background:linear-gradient(180deg, rgba(255,255,255,0) 0%, #FFFFFF 34%);
   }
   .cta {
     width:100%; border:none; height:56px; border-radius:100px; letter-spacing:1.6px;
-    font-size:12px; font-weight:800; text-transform:uppercase; color:var(--ink);
-    background:linear-gradient(135deg,var(--gold-soft),var(--gold));
-    box-shadow:0 10px 30px rgba(201,162,39,.22); transition:opacity .2s ease;
+    font-size:12px; font-weight:800; text-transform:uppercase; color:#FFFFFF;
+    background:linear-gradient(135deg,var(--green-soft),var(--gold-soft));
+    box-shadow:0 10px 30px rgba(76,175,80,.24); transition:opacity .2s ease;
   }
   .cta:disabled {
     background:var(--card); color:var(--muted); box-shadow:none; border:1px solid var(--line);
@@ -144,11 +145,12 @@ const STYLES = `
   dialog {
     border:none; padding:0; width:min(96vw,470px); background:var(--ink-2); color:var(--text);
     border-radius:20px; border:1px solid var(--line);
+    box-shadow:0 24px 60px rgba(0,0,0,.18);
   }
-  dialog::backdrop { background:rgba(0,0,0,.72); backdrop-filter:blur(3px); }
+  dialog::backdrop { background:rgba(0,0,0,.42); backdrop-filter:blur(3px); }
   .sheet-h {
     padding:22px 22px 0; font-size:11px; font-weight:700; letter-spacing:3px;
-    color:var(--gold); text-transform:uppercase; text-align:center;
+    color:var(--gold-soft); text-transform:uppercase; text-align:center;
   }
   .sheet-t { text-align:center; font-size:24px; font-weight:400; margin:8px 0 18px; }
   .sheet-b { padding:0 22px; max-height:56vh; overflow:auto; }
@@ -156,7 +158,7 @@ const STYLES = `
          font-size:14px; border-bottom:1px solid var(--line); }
   .row span:first-child { color:var(--text); }
   .row span:last-child { color:var(--muted); white-space:nowrap; }
-  .row.tot { border-bottom:none; margin-top:10px; padding-top:16px; border-top:1px solid var(--gold);
+  .row.tot { border-bottom:none; margin-top:10px; padding-top:16px; border-top:1px solid var(--green);
              font-size:19px; }
   .row.tot span { color:var(--text) !important; }
   .row.tot span:last-child { color:var(--gold-soft) !important; font-weight:700; }
@@ -167,8 +169,8 @@ const STYLES = `
     width:100%; border:none; border-bottom:1px solid var(--line); padding:11px 0;
     font-size:15px; font-family:inherit; background:transparent; color:var(--text);
   }
-  input:focus, textarea:focus { outline:none; border-bottom-color:var(--gold); }
-  input::placeholder, textarea::placeholder { color:#6B6959; }
+  input:focus, textarea:focus { outline:none; border-bottom-color:var(--green); }
+  input::placeholder, textarea::placeholder { color:#9E9E9E; }
   textarea { resize:vertical; min-height:54px; }
   .ghost { background:none; border:none; color:var(--muted); font-weight:600;
            padding:14px; width:100%; font-size:13px; letter-spacing:.4px; }
@@ -177,16 +179,17 @@ const STYLES = `
   .ok { text-align:center; padding:40px 26px 30px; }
   .ok .seal {
     width:66px; height:66px; margin:0 auto 20px; border-radius:50%;
-    border:1px solid var(--gold); display:flex; align-items:center; justify-content:center;
-    font-size:28px; color:var(--gold);
+    border:1px solid var(--green); background:rgba(76,175,80,.08);
+    display:flex; align-items:center; justify-content:center;
+    font-size:28px; color:var(--gold-soft);
   }
   .ok .lead { font-size:11px; letter-spacing:3px; color:var(--muted); text-transform:uppercase; }
-  .ok .code { font-size:38px; color:var(--gold); margin:10px 0 18px; letter-spacing:2px; }
+  .ok .code { font-size:38px; color:var(--gold-soft); margin:10px 0 18px; letter-spacing:2px; }
   .ok p { color:var(--muted); font-size:14px; line-height:1.65; margin:6px 0; }
   .ok p strong { color:var(--text); font-weight:600; }
 
   .err { margin:80px 26px; text-align:center; }
-  .err h2 { display:block; margin:0 0 12px; color:var(--gold); }
+  .err h2 { display:block; margin:0 0 12px; color:var(--gold-soft); }
   .err p { color:var(--muted); line-height:1.6; }
 `;
 
@@ -197,7 +200,7 @@ export function renderVipPage(
   if ("error" in input) {
     return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<meta name="theme-color" content="#0E0F0C" />
+<meta name="theme-color" content="#4CAF50" />
 <title>VIP Service</title><style>${STYLES}</style></head>
 <body><div class="err"><h2 class="serif">Something isn't right</h2>
 <p>${esc(input.error)}</p><p>Please ask a member of our team for assistance.</p></div></body></html>`;
@@ -281,7 +284,7 @@ export function renderVipPage(
 
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<meta name="theme-color" content="#0E0F0C" />
+<meta name="theme-color" content="#4CAF50" />
 <title>${esc(menu.storeName)} · VIP Service</title>
 <style>${STYLES}</style></head>
 <body>

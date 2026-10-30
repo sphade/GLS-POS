@@ -5,6 +5,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { centeredForm } from "@/lib/responsive";
+import { usePermission } from "@/lib/auth";
 import {
   feedbackTap,
   getLastAudioError,
@@ -46,6 +47,8 @@ const GROUPS: { title: string; rows: { label: string; icon: React.ComponentProps
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const can = usePermission();
+  const canWriteCatalog = can("catalog:write");
   const [sound, setSound] = useState(isSoundEnabled());
   const [haptics, setHaptics] = useState(isHapticsEnabled());
   /** Result of the last audio self-test, shown inline. */
@@ -118,6 +121,30 @@ export default function SettingsScreen() {
           </Pressable>
           {audioStatus ? <Text style={styles.audioStatus}>{audioStatus}</Text> : null}
         </View>
+
+        {/* Opening a branch should not mean re-typing a whole menu. Only shown
+            to roles that can actually write the catalogue, because the server
+            refuses the copy for anyone else. */}
+        {canWriteCatalog ? (
+          <>
+            <Text style={styles.groupTitle}>Menu</Text>
+            <View style={styles.card}>
+              <Pressable
+                style={styles.row}
+                onPress={() => {
+                  feedbackTap();
+                  router.push("/copy-menu");
+                }}
+                android_ripple={{ color: "#00000010" }}
+                accessibilityRole="button"
+              >
+                <MaterialCommunityIcons name="content-copy" size={24} color={colors.primary} />
+                <Text style={styles.rowLabel}>Copy menu from shop</Text>
+                <Ionicons name="chevron-forward" size={20} color={colors.grey400} />
+              </Pressable>
+            </View>
+          </>
+        ) : null}
 
         {GROUPS.map((g) => (
           <View key={g.title}>

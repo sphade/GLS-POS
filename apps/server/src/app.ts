@@ -18,6 +18,7 @@ import { v1 } from "./modules/integration/v1.routes.js";
 import { integrations } from "./modules/integration/integration.routes.js";
 import { inventory } from "./modules/inventory/inventory.routes.js";
 import { admin } from "./modules/admin/admin.routes.js";
+import { catalog } from "./modules/stores/catalog.routes.js";
 import { withApiKey } from "./middleware/api-key.js";
 
 /**
@@ -48,7 +49,19 @@ export function createApp() {
   );
 
   app.get("/", (c) => c.json({ ok: true, service: "gls-pos-server" }));
-  app.get("/health", (c) => c.json({ ok: true, status: "healthy" }));
+  /**
+   * Health doubles as an environment probe. A phone (or a person) pointing at a
+   * URL can now confirm which Worker answers: `production` is the live store,
+   * `staging` is the separate copy. Without this, a custom domain that resolved
+   * to the wrong Worker was indistinguishable from a sync problem.
+   */
+  app.get("/health", (c) =>
+    c.json({
+      ok: true,
+      status: "healthy",
+      environment: c.env.ENVIRONMENT ?? "development",
+    }),
+  );
 
   // VIP guest ordering is intentionally PUBLIC (guests scan a QR at the table),
   // so it is mounted before the auth middleware. Its own module documents the
@@ -96,6 +109,11 @@ export function createApp() {
   // Business profile: name, address, contact, receipt lines. Owner-only to write.
   api.use("/business", requireAuth, withStore);
   api.route("/business", business);
+
+  // Menu operations that span two shops (copying a menu into a new branch).
+  api.use("/catalog", requireAuth, withStore);
+  api.use("/catalog/*", requireAuth, withStore);
+  api.route("/catalog", catalog);
 
   // The caller's role + effective permissions for the selected store, so the
   // client can shape its UI from the same matrix the server enforces.

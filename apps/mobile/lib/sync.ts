@@ -1,5 +1,5 @@
 import * as Network from "expo-network";
-import { AppState } from "react-native";
+import { AppState, type AppStateStatus } from "react-native";
 import { useCallback, useState } from "react";
 import type {
   StoreRole,
@@ -49,6 +49,15 @@ const activeReadScopeKey = (storeId: string) => `active_read_scope_v2_${storeId}
 const completedReadScopeKey = (storeId: string) => `completed_read_scope_v2_${storeId}`;
 const pendingReadScopeKey = (storeId: string) => `pending_read_scope_v2_${storeId}`;
 const replayHeadKey = (storeId: string) => `replay_head_v2_${storeId}`;
+/**
+ * Separate cursor for the first-sync reference pass (menu, categories, tables,
+ * staff, customers). It is deliberately NOT the main cursor: the reference pass
+ * skips trading history, so advancing the real cursor here would strand it.
+ */
+const referenceCursorKey = (storeId: string) => `reference_cursor_v1_${storeId}`;
+const referenceDoneKey = (storeId: string) => `reference_done_v1_${storeId}`;
+/** Cursor for the newest-first trading pass; never the main replay cursor. */
+const recentCursorKey = (storeId: string) => `recent_cursor_v1_${storeId}`;
 const readProjectionPolicyKey = (storeId: string) => `read_projection_policy_v2_${storeId}`;
 const readableCollectionsKey = (storeId: string) => `readable_collections_v2_${storeId}`;
 const readScopeForRole = (role: StoreRole) =>
@@ -459,12 +468,21 @@ export type SyncActivity = {
   errorKind: SyncErrorKind | null;
   /** Store that produced the error; screens ignore stale failures after a switch. */
   errorStoreId: string | null;
+  /**
+   * First-download progress in 0..1, or null when no replay is running.
+   *
+   * A fresh till downloads the store's whole document set, which is minutes of
+   * work on a real store. Without this the strip said "SYNCING…" and staff had
+   * no way to tell a slow first boot from a stuck one.
+   */
+  replayProgress: number | null;
 };
 let activity: SyncActivity = {
   busy: false,
   error: null,
   errorKind: null,
   errorStoreId: null,
+  replayProgress: null,
 };
 const activityListeners = new Set<() => void>();
 
@@ -474,7 +492,8 @@ function setActivity(patch: Partial<SyncActivity>): void {
     next.busy === activity.busy &&
     next.error === activity.error &&
     next.errorKind === activity.errorKind &&
-    next.errorStoreId === activity.errorStoreId
+    next.errorStoreId === activity.errorStoreId &&
+    next.replayProgress === activity.replayProgress
   ) {
     return;
   }
@@ -495,6 +514,33 @@ export function subscribeSyncActivity(cb: () => void): () => void {
 
 export function getSyncActivity(): SyncActivity {
   return activity;
+}
+
+/** Snapshot of this device's sync position, for the Diagnostics screen. */
+export type SyncDiagnostics = {
+  /** Highest server sequence this device has applied. */
+  cursor: number;
+  /** Frozen head of an in-progress first download, otherwise null. */
+  head: number | null;
+  /** 0..1 while a first download runs, otherwise null. */
+  progress: number | null;
+  pending: number;
+  busy: boolean;
+  error: string | null;
+};
+
+export function getSyncDiagnostics(storeId: string): SyncDiagnostics {
+  const db = storeScope(storeId);
+  const rawHead = db.metaGet(replayHeadKey(storeId));
+  const head = rawHead && rawHead !== "invalid" ? Number(rawHead) : null;
+  return {
+    cursor: Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0,
+    head: head !== null && Number.isFinite(head) && head > 0 ? head : null,
+    progress: activity.replayProgress,
+    pending: getPendingSyncCount(storeId),
+    busy: activity.busy,
+    error: activity.error,
+  };
 }
 
 /**
@@ -559,9 +605,16 @@ async function applyPulled(
   uploadedCollections: ReadonlySet<SyncCollection> = EMPTY_SYNC_COLLECTIONS,
   replayHead?: FrozenReplayHead,
   uploadedIds: ReadonlyMap<SyncCollection, readonly string[]> = EMPTY_SYNC_IDS,
+  /**
+   * Which local cursor this page advances. The first-sync reference pass keeps
+   * its own cursor so it can skip trading history without stranding the main
+   * replay cursor behind it.
+   */
+  options?: { cursorKey?: string },
 ): Promise<ApplyPulledResult> {
   const db = storeScope(storeId);
-  const prior = Number(db.metaGet(cursorKey(storeId)) ?? "0") || 0;
+  const metaCursorKey = options?.cursorKey ?? cursorKey(storeId);
+  const prior = Number(db.metaGet(metaCursorKey) ?? "0") || 0;
 
   // Era guard: never re-store the stale response cursor after rewinding. The
   // caller will immediately request zero and re-apply the rebuilt oplog.
@@ -570,7 +623,7 @@ async function applyPulled(
     if (!epochIsCurrent(epoch)) {
       return { appliedCount: 0, cursor: prior, reset: false, cancelled: true };
     }
-    db.metaSet(cursorKey(storeId), "0");
+    db.metaSet(metaCursorKey, "0");
     if (notify && uploadedCollections.size > 0) {
       emitSynced({
         storeId,
@@ -633,7 +686,7 @@ async function applyPulled(
   // chunk, the old cursor causes an idempotent refetch rather than a lost tail.
   let committedCursor = prior;
   if (data.cursor > prior) {
-    db.metaSet(cursorKey(storeId), String(data.cursor));
+    db.metaSet(metaCursorKey, String(data.cursor));
     committedCursor = data.cursor;
   }
 
@@ -710,8 +763,22 @@ async function fetchWithTimeout(
  * bytes), so a full catch-up — including product photos — arrives across
  * several bounded requests instead of one multi-megabyte reply that always
  * overran the request timeout.
+ *
+ * A first download of a long-running store needs well over a thousand pages.
+ * With 60 per cycle the replay still finished, but only after a dozen cycles,
+ * and each cycle waited on a timer that dies when the app leaves the
+ * foreground. 200 pages lets one foreground session finish a real store while
+ * still yielding between cycles.
  */
-const PULL_MAX_PAGES = 60;
+const PULL_MAX_PAGES = 200;
+
+/**
+ * Page budget for the newest-first trading pass that runs before a first
+ * replay. 20 pages is up to 10,000 recent receipts/returns — enough to cover
+ * the current shift on any real shop, and bounded so it can never become the
+ * slow part itself.
+ */
+const RECENT_PULL_PAGES = 20;
 
 type PullError = {
   kind: SyncErrorKind;
@@ -915,6 +982,15 @@ async function performPull(
 
       appliedTotal += applied.appliedCount;
       successfulPages += 1;
+
+      // A replay is the first download, so surface how much of the store's
+      // history has landed. Measured against the frozen head so a live kitchen
+      // adding rows mid-replay cannot make the bar run backwards.
+      if (replay && typeof replay.frozenHead === "number" && replay.frozenHead > 0) {
+        setActivity({
+          replayProgress: Math.max(0, Math.min(1, body.data.cursor / replay.frozenHead)),
+        });
+      }
 
       // Hidden rows may yield no documents while still advancing. Completion
       // requires exact equality; a smaller cursor is a protocol error above.
@@ -1805,6 +1881,7 @@ export function startAutoSync(
     if (replayCompleted || !isCurrent()) return;
     replayCompleted = true;
     cancelReplayRetry();
+    setActivity({ replayProgress: null });
 
     // These synchronous writes cannot interleave with a role transition. The
     // pending marker opens last, only after a no-progress page has completed.
@@ -1859,6 +1936,9 @@ export function startAutoSync(
       error: result.error.message,
       errorKind: result.error.kind,
       errorStoreId: storeId,
+      // A stalled replay must not keep claiming a percentage it is no longer
+      // making progress on; the error strip takes over instead.
+      replayProgress: null,
     });
     const ladder = transientReplayLadder(result.error);
     if (!ladder) {
@@ -1875,6 +1955,102 @@ export function startAutoSync(
     scheduleReplay(delay);
   };
 
+  /**
+   * First-sync priority data: what makes a brand-new till usable in seconds.
+   *
+   * A fresh install used to replay the whole store in sequence order. On a
+   * long-running shop that meant the menu arrived interleaved with years of
+   * receipts, and — because today's sales carry the highest sequence numbers —
+   * the current shift's receipts arrived dead last. Staff saw a partial menu and
+   * no sales at all, which is indistinguishable from the wrong database.
+   *
+   * Two bounded passes fix the order, not the data:
+   *   1. the shop's description (menu, categories, tables, staff, customers)
+   *   2. the newest trading documents, walking backwards from the head
+   *
+   * Both are accelerators, never gates: any failure falls through to the
+   * ascending replay below, which remains the single source of truth.
+   */
+  let priorityReady = db.metaGet(referenceDoneKey(storeId)) === scope;
+
+  const ensureFirstSyncPriority = async (): Promise<void> => {
+    if (priorityReady || !isCurrent()) return;
+    const cookie = authCookie();
+    if (!cookie) return;
+    try {
+      for (let page = 0; page < PULL_MAX_PAGES; page += 1) {
+        if (!isCurrent()) return;
+        const cursor = Number(db.metaGet(referenceCursorKey(storeId)) ?? "0") || 0;
+        const res = await fetchWithTimeout(
+          `${API_URL}/api/sync/reference?cursor=${cursor}`,
+          { headers: { Cookie: cookie, "x-store-id": storeId } },
+          epoch,
+        );
+        const body = (await res.json()) as
+          | { ok: true; data: SyncPullResponse }
+          | { ok: false; error?: { message?: string } };
+        if (!res.ok || !body.ok) break;
+        if (!isValidHead(body.data.cursor) || !isValidHead(body.data.head)) break;
+
+        const applied = await applyPulled(
+          storeId,
+          body.data,
+          epoch,
+          true,
+          EMPTY_SYNC_COLLECTIONS,
+          "invalid",
+          EMPTY_SYNC_IDS,
+          { cursorKey: referenceCursorKey(storeId) },
+        );
+        if (applied.cancelled) return;
+        if (body.data.cursor >= body.data.head) {
+          db.metaSet(referenceDoneKey(storeId), scope);
+          break;
+        }
+      }
+
+      // Newest trading first: today's receipts land before yesterday's.
+      let before = 0;
+      for (let page = 0; page < RECENT_PULL_PAGES; page += 1) {
+        if (!isCurrent()) return;
+        const res = await fetchWithTimeout(
+          `${API_URL}/api/sync/recent?before=${before}`,
+          { headers: { Cookie: cookie, "x-store-id": storeId } },
+          epoch,
+        );
+        const body = (await res.json()) as
+          | { ok: true; data: SyncPullResponse }
+          | { ok: false; error?: { message?: string } };
+        if (!res.ok || !body.ok) break;
+        if (body.data.changes.length === 0) break;
+        if (!isValidHead(body.data.cursor)) break;
+
+        const applied = await applyPulled(
+          storeId,
+          body.data,
+          epoch,
+          true,
+          EMPTY_SYNC_COLLECTIONS,
+          "invalid",
+          EMPTY_SYNC_IDS,
+          { cursorKey: recentCursorKey(storeId) },
+        );
+        if (applied.cancelled) return;
+
+        const next = body.data.cursor;
+        // Zero means the trading history is exhausted; a non-decreasing bound
+        // would loop forever, so stop on either.
+        if (next === 0 || (before !== 0 && next >= before)) break;
+        before = next;
+      }
+    } catch {
+      // Offline, timeout, bad payload: the replay below still delivers every
+      // document, just in sequence order. Try again on the next cold start.
+    }
+    // One attempt per session; a partial pass resumes from its own cursor.
+    priorityReady = true;
+  };
+
   const requestReplay = (manual = false): Promise<PullResult> => {
     if (!replayContext || !isCurrent()) return Promise.resolve(cancelledPull());
     if (terminalReplayResult && !manual) return Promise.resolve(terminalReplayResult);
@@ -1884,7 +2060,10 @@ export function startAutoSync(
     }
     cancelReplayRetry();
     const key = `${storeId}|${epoch.generation}|pull|replay|${scope}|notify`;
-    const promise = enqueueJob(key, () => performPull(storeId, true, epoch, replayContext!));
+    const promise = enqueueJob(key, async () => {
+      await ensureFirstSyncPriority();
+      return performPull(storeId, true, epoch, replayContext!);
+    });
     void promise.then(handleReplayResult);
     return promise;
   };
@@ -1925,9 +2104,29 @@ export function startAutoSync(
     }, 1200);
   });
 
+  /**
+   * A replay continues on a timer, and mobile OSes suspend timers when the app
+   * leaves the foreground. The safety poll below deliberately only uploads
+   * mid-replay, so without this listener a half-downloaded first sync stayed
+   * frozen until someone pulled to refresh. That is how a brand-new till could
+   * sit on a handful of receipts for a whole day: a few seconds of progress per
+   * visit, never a full download.
+   */
+  const onAppActive = (state: AppStateStatus) => {
+    if (state !== "active" || !isCurrent()) return;
+    if (replayController && activeReplayControllers.get(storeId) === replayController) {
+      void replayController.request(false);
+      return;
+    }
+    void syncNow(storeId);
+  };
+  const appStateSub = AppState.addEventListener("change", onAppActive);
+
   return () => {
     stopped = true;
     cancelReplayRetry();
+    appStateSub.remove();
+    setActivity({ replayProgress: null });
     if (replayController && activeReplayControllers.get(storeId) === replayController) {
       activeReplayControllers.delete(storeId);
     }

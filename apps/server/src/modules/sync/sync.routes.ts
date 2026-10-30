@@ -4,7 +4,7 @@ import { ok } from "../../lib/response.js";
 import { validate } from "../../lib/validator.js";
 import { HttpError } from "../../lib/http-error.js";
 import type { PushResult } from "../../durable-objects/store.do.js";
-import { syncPullQuerySchema, syncPushSchema } from "./sync.schema.js";
+import { syncPullQuerySchema, syncPushSchema, syncRecentQuerySchema } from "./sync.schema.js";
 
 /**
  * Offline-first sync endpoint. One round-trip uploads the device's dirty
@@ -54,4 +54,23 @@ export const sync = new Hono<AppEnv>()
   .get("/", validate("query", syncPullQuerySchema), async (c) => {
     const { cursor } = c.req.valid("query");
     return ok(c, await c.get("store").pull(cursor, c.get("role")));
+  })
+  /**
+   * First-sync reference page: the shop's description (menu, categories, tables,
+   * staff, customers, modifiers, ingredients, held orders) without its trading
+   * history. A new till loads this first so it is usable in seconds; the normal
+   * replay still follows and remains authoritative.
+   */
+  .get("/reference", validate("query", syncPullQuerySchema), async (c) => {
+    const { cursor } = c.req.valid("query");
+    return ok(c, await c.get("store").pullReference(cursor, c.get("role")));
+  })
+  /**
+   * First-sync recent trading, newest first: today's receipts and returns before
+   * the years of history behind them. `before=0` starts at the head; the reply's
+   * `cursor` is the next lower bound, and 0 means the pass is exhausted.
+   */
+  .get("/recent", validate("query", syncRecentQuerySchema), async (c) => {
+    const { before } = c.req.valid("query");
+    return ok(c, await c.get("store").pullRecent(before, c.get("role")));
   });

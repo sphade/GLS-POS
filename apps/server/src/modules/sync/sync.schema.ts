@@ -18,6 +18,14 @@ export const syncPullQuerySchema = z.object({
   cursor: z.coerce.number().int().nonnegative().finite().default(0),
 });
 
+/**
+ * `before` is an exclusive upper bound on `server_seq` for the newest-first
+ * first-sync pass. 0 means "start at the current head".
+ */
+export const syncRecentQuerySchema = z.object({
+  before: z.coerce.number().int().nonnegative().finite().default(0),
+});
+
 export const syncPushSchema = z.object({
   cursor: z.number().int().nonnegative().default(0),
   changes: z.array(syncChangeSchema).default([]),

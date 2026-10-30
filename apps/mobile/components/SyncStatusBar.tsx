@@ -48,11 +48,20 @@ export function SyncStatusBar() {
     setDismissed(false);
   }, [activity.error]);
 
-  if (activity.busy && showBusy) {
+  // A first download can take minutes on a real store. It stays visible for the
+  // whole replay and reports progress, because "SYNCING…" alone looks stuck.
+  // It is shown even between pages: the engine goes idle for 250ms after each
+  // one, and a strip that vanished and reappeared every page read as a glitch.
+  const progress = activity.replayProgress;
+  const catchingUp = progress !== null;
+
+  if (catchingUp || (activity.busy && showBusy)) {
     return (
       <View style={[styles.strip, styles.busy, { top: insets.top }]}>
         <ActivityIndicator size="small" color={colors.white} />
-        <Text style={styles.text}>SYNCING…</Text>
+        <Text style={styles.text}>
+          {catchingUp ? `CATCHING UP ${Math.round((progress ?? 0) * 100)}%` : "SYNCING…"}
+        </Text>
       </View>
     );
   }

@@ -206,6 +206,17 @@ export type ProductionResult = {
 
 export const CENTRAL_UNITS = ["kg", "liters", "pieces", "bags", "boxes", "cans"] as const;
 
+/** Result of copying another shop's menu into this one. */
+export type CopyCatalogResult = {
+  fromStoreId: string;
+  toStoreId: string;
+  categories: number;
+  products: number;
+  modifiers: number;
+  /** Rows the destination refused (role limits, or a newer local edit won). */
+  refused: number;
+};
+
 export const api = {
   /** Stores the signed-in user belongs to. */
   listStores: () => request<StoreMembership[]>("/stores"),
@@ -282,6 +293,24 @@ export const api = {
       headers: { "x-store-id": storeId },
       body: JSON.stringify(body),
     }),
+
+  /**
+   * Copy another shop's menu (categories, products, modifiers) into this one.
+   *
+   * Runs server-side through the same write path a till uses, so it takes as
+   * long as a large catalogue needs to be written. The caller must be able to
+   * write the menu here and read it there.
+   */
+  copyCatalog: (storeId: string, fromStoreId: string) =>
+    request<CopyCatalogResult>(
+      "/catalog/copy",
+      {
+        method: "POST",
+        headers: { "x-store-id": storeId },
+        body: JSON.stringify({ fromStoreId }),
+      },
+      120_000,
+    ),
 
   // --- Central stock hub (warehouse -> branches) ---------------------------
   //

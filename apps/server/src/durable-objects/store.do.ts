@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type {
   ApiCategory,
   ApiProduct,
@@ -13,6 +13,7 @@ import type {
   StockState,
   StoreRole,
   SyncChange,
+  SyncCollection,
   SyncDeniedChange,
   SyncPullChange,
   SyncPullResponse,
@@ -33,6 +34,26 @@ import migrations from "./migrations/migrations.js";
 /** Public VIP endpoint throttle: at most N orders per table per window. */
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_ORDERS = 5;
+
+/**
+ * Guest (VIP) prices carry a markup over the counter price.
+ *
+ * Table service costs more than the counter: someone carries the food, sets the
+ * table and cleans up after. The markup is applied in one place, used by BOTH
+ * the guest menu and the order that comes back from it, so the price on the
+ * guest's screen is exactly the price the receipt is billed at. Applying it to
+ * only one of those would let a guest be shown one total and charged another.
+ *
+ * In basis points so the percentage can be changed without floating-point
+ * fiddling: 2000 = +20%.
+ */
+const VIP_MARKUP_BPS = 2000;
+
+/** Counter price -> guest price, rounded to the nearest whole naira. */
+function guestPrice(counterPrice: number): number {
+  const marked = (counterPrice * (10_000 + VIP_MARKUP_BPS)) / 10_000;
+  return Math.round(marked / 100) * 100;
+}
 
 /**
  * Collections that record trading activity, as opposed to the ones that
@@ -72,9 +93,15 @@ const CLOCK_SKEW_MS = 2 * 60_000;
  * capped by row count and encoded size; the cursor advances to the last row
  * sent, so devices make incremental progress every cycle instead of failing
  * as a block.
+ *
+ * The cap is a balance, not a hard limit. 100 rows made a first download of a
+ * long-running store take ~1,400 round trips (tens of minutes), so the budget
+ * is 500 rows / 768KB — still comfortably inside the client's 15s timeout on
+ * mobile data, and ~5x fewer round trips. Photos stay excluded from sync pulls
+ * (see `changesSincePage`), so the byte cap is not dominated by images.
  */
-const PULL_MAX_ROWS = 100;
-const PULL_MAX_BYTES = 256 * 1024;
+const PULL_MAX_ROWS = 500;
+const PULL_MAX_BYTES = 768 * 1024;
 
 /** The product fields the server cares about; the doc may carry more. */
 type StoredProduct = {
@@ -370,6 +397,12 @@ export type PushOptions = {
    * the entire request. See `SYNC_PROTOCOL_VERSION`.
    */
   partial?: boolean;
+  /**
+   * Internal bulk writers (catalog copies between stores) only need the write
+   * half. Skipping the download half stops them returning a page of the store's
+   * entire history that nobody reads.
+   */
+  skipPull?: boolean;
 };
 
 /** DB row → role-projected wire change (parse stored JSON only after authorization). */
@@ -471,28 +504,158 @@ export class StoreDurableObject extends DurableObject<Env> {
       .limit(PULL_MAX_ROWS)
       .all();
 
+    const page = this.fitPage(rows);
+    let nextCursor = page.length > 0 ? page[page.length - 1]!.serverSeq : cursor;
+
+    // A short, fully-consumed filtered page proves there are no more readable
+    // rows. Skip the hidden suffix in one step instead of returning empty pages.
+    if (page.length === rows.length && rows.length < PULL_MAX_ROWS) {
+      nextCursor = head;
+    }
+
+    return { changes: page.map((row) => toChange(row, role)), cursor: nextCursor };
+  }
+
+  /**
+   * Trim a page of rows to the response budget, always returning at least one
+   * row so a single oversized document cannot stall the cursor.
+   */
+  private fitPage(rows: DocumentRow[]): DocumentRow[] {
     let bytes = 0;
-    let nextCursor = cursor;
-    let consumedRows = 0;
     const page: DocumentRow[] = [];
     for (const row of rows) {
       const rowBytes = row.data.length + 96;
       if (page.length > 0 && bytes + rowBytes > PULL_MAX_BYTES) break;
       page.push(row);
-      consumedRows += 1;
       bytes += rowBytes;
-      nextCursor = row.serverSeq;
       // Always make progress even if one permitted document exceeds the budget.
       if (rowBytes > PULL_MAX_BYTES) break;
     }
+    return page;
+  }
 
-    // A short, fully-consumed filtered page proves there are no more readable
-    // rows. Skip the hidden suffix in one step instead of returning empty pages.
-    if (consumedRows === rows.length && rows.length < PULL_MAX_ROWS) {
-      nextCursor = head;
+  /**
+   * Collections that describe the shop rather than record its trading.
+   *
+   * A till needs these before it can open: the menu, categories, tables, staff,
+   * customers and modifier groups. The complement — receipts, returns, stock
+   * movements, web orders, audit log, held orders — grows without bound and is
+   * what made a first sync take many minutes.
+   */
+  private referenceCollections(role: StoreRole): SyncCollection[] {
+    return readableSyncCollections(role).filter(
+      (collection) =>
+        collection !== "product_images" &&
+        !(SALES_COLLECTIONS as readonly string[]).includes(collection),
+    );
+  }
+
+  /** High-water mark across only the given collections. */
+  private referenceHead(collections: readonly SyncCollection[]): number {
+    const [row] = this.db
+      .select({ max: sql<number>`coalesce(max(${schema.documents.serverSeq}), 0)` })
+      .from(schema.documents)
+      .where(inArray(schema.documents.collection, collections))
+      .all();
+    return row?.max ?? 0;
+  }
+
+  /**
+   * Trading collections that belong to the current shift: sales, credit notes,
+   * held orders and online orders. `stock_movements` and `audit_log` are
+   * history views rather than shift data, so the newest-first pass skips them
+   * and leaves them to the ascending replay — otherwise ten thousand rows would
+   * cover a few hours of log instead of days of sales.
+   */
+  private recentCollections(role: StoreRole): SyncCollection[] {
+    const wanted: readonly string[] = ["receipts", "returns", "held_orders", "web_orders"];
+    return readableSyncCollections(role).filter((collection) => wanted.includes(collection));
+  }
+
+  /**
+   * First-sync recent-trading page, NEWEST first.
+   *
+   * The normal replay walks the store oldest-first, which is correct for a
+   * cursor but wrong for a till that has just been installed: today's receipts
+   * carry the highest sequence numbers, so they arrived dead last — after
+   * minutes of downloading history. A new till therefore showed no sales at all
+   * while it caught up, which reads as "my data is gone".
+   *
+   * This pass walks backwards from the head over the trading collections so the
+   * current shift's sales land first. It is bounded by the caller and purely an
+   * accelerator: the ascending replay still delivers everything afterwards.
+   *
+   * `before` is an exclusive upper bound; 0 means "start at the head".
+   */
+  async pullRecent(before: number, role: StoreRole): Promise<SyncPullResponse> {
+    const collections = this.recentCollections(role);
+    const head = this.currentSeq();
+    const upper = before > 0 ? Math.min(before, head + 1) : head + 1;
+    if (collections.length === 0 || upper <= 1) {
+      return { changes: [], cursor: 0, head };
     }
 
-    return { changes: page.map((row) => toChange(row, role)), cursor: nextCursor };
+    const rows = this.db
+      .select()
+      .from(schema.documents)
+      .where(
+        and(
+          lt(schema.documents.serverSeq, upper),
+          inArray(schema.documents.collection, collections),
+        ),
+      )
+      .orderBy(desc(schema.documents.serverSeq))
+      .limit(PULL_MAX_ROWS)
+      .all();
+
+    const page = this.fitPage(rows);
+    // `cursor` is the next (lower) bound. Zero means the caller has reached the
+    // start of the trading history.
+    const next = page.length > 0 ? page[page.length - 1]!.serverSeq : 0;
+    return { changes: page.map((row) => toChange(row, role)), cursor: next, head };
+  }
+
+  /**
+   * First-sync reference page: the shop's current description, paged by
+   * `server_seq`, with no jump to the global head.
+   *
+   * This exists because a brand-new till used to replay the whole store in
+   * sequence order. On a long-running shop that meant the menu arrived
+   * interleaved with years of receipts, and an item added this morning — which
+   * carries a high sequence — only appeared near the very end. Staff read that
+   * as "my items are missing", which is indistinguishable from the wrong
+   * database. Loading the reference set first makes the till usable in seconds
+   * while the trading history continues to stream in behind it.
+   *
+   * The device keeps its own cursor for this pass, so the normal replay still
+   * runs from zero afterwards and remains the single source of truth.
+   */
+  async pullReference(cursor: number, role: StoreRole): Promise<SyncPullResponse> {
+    const collections = this.referenceCollections(role);
+    if (collections.length === 0) return { changes: [], cursor, head: 0 };
+
+    const head = this.referenceHead(collections);
+    // An ahead cursor means this store's oplog was rebuilt; the device restarts
+    // this pass from zero rather than waiting for a cursor that will never come.
+    if (cursor > head) return { changes: [], cursor, head };
+    if (cursor === head) return { changes: [], cursor: head, head };
+
+    const rows = this.db
+      .select()
+      .from(schema.documents)
+      .where(
+        and(
+          gt(schema.documents.serverSeq, cursor),
+          inArray(schema.documents.collection, collections),
+        ),
+      )
+      .orderBy(schema.documents.serverSeq)
+      .limit(PULL_MAX_ROWS)
+      .all();
+
+    const page = this.fitPage(rows);
+    const nextCursor = page.length > 0 ? page[page.length - 1]!.serverSeq : cursor;
+    return { changes: page.map((row) => toChange(row, role)), cursor: nextCursor, head };
   }
 
   /**
@@ -678,6 +841,15 @@ export class StoreDurableObject extends DurableObject<Env> {
     // The download half of the round-trip is paged exactly like a pull, so an
     // upload can never be killed by an oversized response. Anything past the
     // page arrives on the device's next cycle.
+    if (options?.skipPull) {
+      return {
+        denied: [],
+        deniedIds,
+        changes: [],
+        cursor: request.cursor,
+        head: this.currentSeq(),
+      };
+    }
     const page = this.changesSincePage(request.cursor, role);
     return {
       denied: [],
@@ -952,14 +1124,15 @@ export class StoreDurableObject extends DurableObject<Env> {
         ? p.variants.map((variant) => ({
             id: variant.id,
             name: variant.name,
-            price: variant.price,
+            // Guests pay the table-service price; see VIP_MARKUP_BPS.
+            price: guestPrice(variant.price),
             available: variant.stock == null || variant.stock > 0,
           }))
         : undefined;
       return {
         id: p.id,
         name: p.name,
-        price: p.price,
+        price: guestPrice(p.price),
         categoryId: p.categoryId,
         variants,
         // Variant products are available when at least one choice is sellable.
@@ -1041,7 +1214,8 @@ export class StoreDurableObject extends DurableObject<Env> {
         variantId: variant?.id,
         variantName: variant?.name,
         name: product.name,
-        unitPrice: variant?.price ?? product.price,
+        // Same markup the guest menu showed; see VIP_MARKUP_BPS.
+        unitPrice: guestPrice(variant?.price ?? product.price),
         quantity,
         stock,
         note: existing?.note ?? wanted.note?.slice(0, 140),
@@ -2127,6 +2301,36 @@ export class StoreDurableObject extends DurableObject<Env> {
         deleted: number;
         server_seq: number;
       }>;
+    return { rows, head: this.currentSeq() };
+  }
+
+  /**
+   * Read-only export of selected collections, oldest first, with the same
+   * cursor contract as `adminExportPage`.
+   *
+   * A catalog copy needs the menu, not the store's sales history. Filtering in
+   * SQL keeps the copy to a handful of pages instead of walking every receipt.
+   */
+  adminExportCollections(collections: string[], afterSeq: number, limit: number) {
+    if (collections.length === 0) return { rows: [], head: this.currentSeq() };
+    const placeholders = collections.map(() => "?").join(",");
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT collection, id, data, updated_at, deleted, server_seq FROM documents
+         WHERE server_seq > ? AND collection IN (${placeholders})
+         ORDER BY server_seq ASC LIMIT ?`,
+        afterSeq,
+        ...collections,
+        Math.min(Math.max(limit, 1), 500),
+      )
+      .toArray() as Array<{
+      collection: string;
+      id: string;
+      data: string;
+      updated_at: number;
+      deleted: number;
+      server_seq: number;
+    }>;
     return { rows, head: this.currentSeq() };
   }
 

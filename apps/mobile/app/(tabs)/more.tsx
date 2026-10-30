@@ -129,6 +129,7 @@ export default function MoreScreen() {
     { key: "expense", value: "Expenses", title: "Record & View", route: "/expense-categories", needs: "expenses:manage" },
     { key: "audit", value: "Activity", title: "Who did what", route: "/audit", needs: "audit:view" },
     { key: "settings", value: "Settings", title: "Business & Preferences", route: "/settings", needs: "settings:manage" },
+    { key: "diagnostics", value: "Diagnostics", title: "Server & Sync", route: "/diagnostics", needs: "settings:manage" },
   ];
 
   // Staff only see what their role allows. The server enforces the same matrix.
