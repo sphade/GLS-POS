@@ -93,8 +93,10 @@ export function createApp() {
   api.use("/stores", requireAuth);
   api.route("/stores", stores);
 
-  // Push-token registration for staff devices.
-  api.use("/push/*", requireAuth, withStore);
+  // Push-token registration for staff devices. Register/unregister are
+  // intentionally not store-scoped: one phone covers every branch its user
+  // belongs to. `/test` applies `withStore` itself, since it targets one shop.
+  api.use("/push/*", requireAuth);
   api.route("/push", push);
 
   // Staff manage API keys + webhooks for external systems here.

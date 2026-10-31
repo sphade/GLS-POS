@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne, notInArray } from "drizzle-orm";
 import type { StoreRole } from "@gls-pos/types";
 import { createDb, schema } from "../../db/index.js";
 import type { Env } from "../../env.js";
@@ -16,30 +16,119 @@ import type { Env } from "../../env.js";
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
-/** Register (or refresh) a device token for a store. */
+/**
+ * Channel ids created by the app (`apps/mobile/lib/push.ts`). They must match
+ * or Android falls back to a default channel and plays the system tone.
+ *
+ * VIP orders use a dedicated channel so they ring the shop's chime and can be
+ * muted independently of stock alerts.
+ */
+const VIP_CHANNEL_ID = "vip-orders-v2";
+const STORE_CHANNEL_ID = "vip-orders";
+/** Android raw resource bundled by app.json → expo-notifications.sounds. */
+const VIP_SOUND_FILE = "vip_order.wav";
+
+/**
+ * Which alert tone a notification carries.
+ *
+ * `vip` rings the shop's own chime; `default` is the phone's normal tone. It is
+ * a property of the Android channel, so this choice is what actually decides
+ * whether a locked phone sounds like a guest order or like an email.
+ */
+export type PushTone = "vip" | "default";
+
+/**
+ * Register (or refresh) a device token for every store the user belongs to.
+ *
+ * The device used to be registered for whichever shop was selected at the time,
+ * and switching shops moved the token — so one phone could only ever hear one
+ * branch. A manager covering two branches then had to choose which shop to be
+ * deaf to. Registering across all memberships removes that choice.
+ *
+ * Rows for stores the user has since left are dropped, so a device that was
+ * removed from a shop stops hearing it on the next registration.
+ */
 export async function savePushToken(
   env: Env,
-  input: { token: string; userId: string; storeId: string; platform?: string },
+  input: { token: string; userId: string; platform?: string },
+): Promise<{ stores: number }> {
+  const db = createDb(env.DB);
+
+  const memberships = await db
+    .select({ storeId: schema.member.storeId })
+    .from(schema.member)
+    .where(eq(schema.member.userId, input.userId));
+  const storeIds = memberships.map((row) => row.storeId);
+
+  const now = new Date();
+
+  // A device is one person at a time. If sign-out could not reach the network,
+  // the previous account's rows would linger on this token and the phone would
+  // keep receiving that person's alerts. Registration is the point where the
+  // device becomes authoritative for exactly one account.
+  await db
+    .delete(schema.pushToken)
+    .where(
+      and(
+        eq(schema.pushToken.token, input.token),
+        ne(schema.pushToken.userId, input.userId),
+      ),
+    );
+
+  for (const storeId of storeIds) {
+    await db
+      .insert(schema.pushToken)
+      .values({
+        token: input.token,
+        userId: input.userId,
+        storeId,
+        platform: input.platform,
+        createdAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [schema.pushToken.token, schema.pushToken.storeId],
+        set: { userId: input.userId, platform: input.platform, createdAt: now },
+      });
+  }
+
+  // Prune the branches this user is no longer a member of. Without this a phone
+  // that left a shop would keep receiving its alerts forever.
+  await db
+    .delete(schema.pushToken)
+    .where(
+      storeIds.length > 0
+        ? and(
+            eq(schema.pushToken.token, input.token),
+            eq(schema.pushToken.userId, input.userId),
+            notInArray(schema.pushToken.storeId, storeIds),
+          )
+        : and(
+            eq(schema.pushToken.token, input.token),
+            eq(schema.pushToken.userId, input.userId),
+          ),
+    );
+
+  return { stores: storeIds.length };
+}
+
+/**
+ * Remove a device. Passing `userId` limits the delete to that person's rows, so
+ * one account cannot unregister another account's phone; the push service's own
+ * dead-token pruning calls it without one.
+ */
+export async function deletePushToken(
+  env: Env,
+  token: string,
+  userId?: string,
 ): Promise<void> {
   const db = createDb(env.DB);
   await db
-    .insert(schema.pushToken)
-    .values({
-      token: input.token,
-      userId: input.userId,
-      storeId: input.storeId,
-      platform: input.platform,
-      createdAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: schema.pushToken.token,
-      set: { userId: input.userId, storeId: input.storeId, createdAt: new Date() },
-    });
-}
-
-export async function deletePushToken(env: Env, token: string): Promise<void> {
-  const db = createDb(env.DB);
-  await db.delete(schema.pushToken).where(eq(schema.pushToken.token, token));
+    .delete(schema.pushToken)
+    .where(
+      userId
+        ? and(eq(schema.pushToken.token, token), eq(schema.pushToken.userId, userId))
+        : eq(schema.pushToken.token, token),
+    );
 }
 
 /** Tokens belonging to a store's staff. */
@@ -106,13 +195,21 @@ export type PushAudience = {
 export async function notifyStore(
   env: Env,
   storeId: string,
-  message: { title: string; body: string; data?: Record<string, unknown> },
+  message: {
+    title: string;
+    body: string;
+    data?: Record<string, unknown>;
+    /** Defaults to the phone's normal notification tone. */
+    tone?: PushTone;
+  },
   audience: PushAudience = {},
 ): Promise<{ sent: number }> {
   const tokens = audience.roles
     ? await tokensForRoles(env, storeId, audience.roles)
     : await tokensForStore(env, storeId);
   if (tokens.length === 0) return { sent: 0 };
+
+  const vip = message.tone === "vip";
 
   let sent = 0;
   for (let i = 0; i < tokens.length; i += 100) {
@@ -122,10 +219,11 @@ export async function notifyStore(
       title: message.title,
       body: message.body,
       data: message.data,
-      sound: "default",
+      // iOS plays this file directly; Android resolves the channel's sound.
+      sound: vip ? VIP_SOUND_FILE : "default",
       priority: "high",
       // Android: show on the lock screen and make some noise.
-      channelId: "vip-orders",
+      channelId: vip ? VIP_CHANNEL_ID : STORE_CHANNEL_ID,
     }));
 
     try {

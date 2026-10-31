@@ -74,7 +74,11 @@
       ],
       [
         "expo-notifications",
-        {}
+        {
+          "sounds": [
+            "./assets/sounds/vip_order.wav"
+          ]
+        }
       ],
       [
         "react-native-ble-plx",

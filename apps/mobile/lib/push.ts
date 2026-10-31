@@ -22,13 +22,29 @@ import { OFFLINE_MODE } from "./offline";
  * with the other two alert paths.
  */
 
+/**
+ * Channel ids shared with the server (`push.service.ts`). They must match, or
+ * Android silently falls back to a default channel — and a default channel
+ * means the system tone, which is the thing this exists to avoid.
+ */
+const VIP_CHANNEL_ID = "vip-orders-v2";
+const STORE_CHANNEL_ID = "vip-orders";
+/** Android raw resource bundled by app.json → expo-notifications.sounds. */
+const VIP_SOUND_FILE = "vip_order.wav";
+
 /** Show an alert even when the app is foregrounded. */
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-  }),
+  handleNotification: async (notification) => {
+    // A VIP order already rings the ten-second in-app alarm, so the push tone
+    // would only fight it. Stock and low-stock alerts have no in-app sound, so
+    // they keep the notification tone.
+    const kind = notification.request.content.data?.kind;
+    return {
+      shouldShowAlert: true,
+      shouldPlaySound: kind !== "web_order",
+      shouldSetBadge: true,
+    };
+  },
 });
 
 function projectId(): string | undefined {
@@ -38,15 +54,31 @@ function projectId(): string | undefined {
 
 /**
  * Android needs an explicit high-importance channel to make sound on the lock
- * screen. The id stays `vip-orders` for compatibility with builds that already
- * created it; the label is what staff see in Android settings, and every store
- * alert now shares it.
+ * screen, and the sound is a property of the channel, not the notification.
+ *
+ * VIP orders get their own channel so they ring the shop's chime instead of the
+ * phone's email tone — and so staff can mute stock alerts without also muting
+ * guest orders. The channel id is new (`-v2`) because Android freezes a
+ * channel's sound once it exists: the original `vip-orders` channel was created
+ * with the default tone and can never be changed, only replaced.
  */
 async function ensureAndroidChannel(): Promise<void> {
   if (Platform.OS !== "android") return;
-  await Notifications.setNotificationChannelAsync("vip-orders", {
+
+  await Notifications.setNotificationChannelAsync(VIP_CHANNEL_ID, {
+    name: "VIP orders",
+    description: "New orders placed from a table's QR code.",
+    importance: Notifications.AndroidImportance.MAX,
+    vibrationPattern: [0, 250, 200, 250],
+    lightColor: "#4CAF50",
+    sound: VIP_SOUND_FILE,
+  });
+
+  // Everything else (stock transfers, low stock, conversions, test alerts).
+  // Kept on the original id so devices that already have it keep their settings.
+  await Notifications.setNotificationChannelAsync(STORE_CHANNEL_ID, {
     name: "Store alerts",
-    description: "New orders, stock transfers and low-stock warnings.",
+    description: "Stock transfers and low-stock warnings.",
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 250, 200, 250],
     lightColor: "#5AA02C",
@@ -82,7 +114,6 @@ function registrationIsCurrent(
 }
 
 async function performPushRegistration(
-  storeId: string,
   credential: BoundAuthCredential,
   signal: AbortSignal,
 ): Promise<string | null> {
@@ -116,12 +147,13 @@ async function performPushRegistration(
   // This final exact-token check and fetch call are synchronous with respect to
   // each other. A later credential revision aborts the fetch through cleanup.
   if (!registrationIsCurrent(credential, signal)) return null;
+  // No store header: the server registers this device for every branch the user
+  // belongs to, so one phone hears all of them.
   const res = await fetch(`${API_URL}/api/push/register`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Cookie: credential.cookie,
-      "x-store-id": storeId,
     },
     body: JSON.stringify({ token, platform: Platform.OS }),
     signal,
@@ -142,11 +174,11 @@ export function cancelAndDrainPushRegistration(): Promise<void> {
 }
 
 /**
- * Ask permission, get the Expo token, and register it against the active store.
- * Every await is fenced by the exact credential captured by StoreProvider.
+ * Ask permission, get the Expo token, and register it for every branch the
+ * signed-in user belongs to. Every await is fenced by the exact credential
+ * captured by StoreProvider.
  */
 export async function registerForPush(
-  storeId: string,
   options: PushRegistrationOptions,
 ): Promise<string | null> {
   const startRevision = ++registrationRevision;
@@ -166,7 +198,7 @@ export async function registerForPush(
   options.signal.addEventListener("abort", forwardAbort, { once: true });
   if (options.signal.aborted) controller.abort();
 
-  const raw = performPushRegistration(storeId, options.credential, controller.signal);
+  const raw = performPushRegistration(options.credential, controller.signal);
   const drain = raw.then(
     () => undefined,
     () => undefined,
@@ -193,6 +225,7 @@ export async function registerForPush(
 type UnregisterPushOptions = {
   /** Captured before local binding and Better Auth storage are revoked. */
   credential?: BoundAuthCredential | null;
+  /** Accepted for callers that still pass it; registration is per user now. */
   storeId?: string | null;
   timeoutMs?: number;
 };
@@ -205,8 +238,7 @@ export async function unregisterPush(options: UnregisterPushOptions = {}): Promi
     // Capture synchronously before the first token/permission await. Sign-out
     // passes an even earlier object that remains valid for unregister only.
     const credential = options.credential ?? captureBoundAuthCredential();
-    const storeId = options.storeId ?? null;
-    if (!credential || !storeId || !Device.isDevice) return;
+    if (!credential || !Device.isDevice) return;
 
     const id = projectId();
     if (!id) return;
@@ -224,7 +256,6 @@ export async function unregisterPush(options: UnregisterPushOptions = {}): Promi
         headers: {
           "Content-Type": "application/json",
           Cookie: credential.cookie,
-          "x-store-id": storeId,
         },
         body: JSON.stringify({ token }),
         signal: controller.signal,

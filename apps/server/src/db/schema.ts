@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core";
 
 /**
  * Control-plane schema (Cloudflare D1). Holds cross-store data only:
@@ -110,17 +110,35 @@ export const store = sqliteTable("store", {
  * phone when a VIP order arrives. One row per device per store; the token is
  * the natural key because Expo reissues it per install.
  */
-export const pushToken = sqliteTable("push_token", {
-  token: text("token").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  storeId: text("store_id")
-    .notNull()
-    .references(() => store.id, { onDelete: "cascade" }),
-  platform: text("platform"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-});
+/**
+ * One row per (device, store).
+ *
+ * A phone can work in several branches, so the token is no longer unique on its
+ * own: registering in a second shop adds a row instead of moving the first one.
+ * That is what lets one phone receive alerts from every branch its user belongs
+ * to, which is how a manager covering two shops actually works.
+ *
+ * `token` is still part of the key so re-registering the same device updates the
+ * row rather than duplicating it, and deleting a device removes all its rows.
+ */
+export const pushToken = sqliteTable(
+  "push_token",
+  {
+    token: text("token").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    storeId: text("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "cascade" }),
+    platform: text("platform"),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.token, table.storeId] }),
+    index("push_token_user_idx").on(table.userId, table.storeId),
+  ],
+);
 
 /**
  * API keys for external systems (delivery apps, marketplaces, dashboards).

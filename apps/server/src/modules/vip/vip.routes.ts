@@ -103,6 +103,8 @@ vip.post(
             store.currency
           } ${(result.order.total / 100).toLocaleString()}`,
           data: { kind: "web_order", orderId: result.order.id, storeId },
+          // Ring the shop's own chime, not the phone's email tone.
+          tone: "vip",
         },
         // Floor leads act on orders; owners and cashiers are not interrupted.
         { roles: ["manager", "supervisor"] },

@@ -16,8 +16,14 @@ const sources: Record<SoundName, number> = {
   beep: require("../assets/sounds/beep.mp3"),
   coin: require("../assets/sounds/coin.mp3"),
   celebration: require("../assets/sounds/sfx_zd_celebration.ogg"),
-  /** Original four-second chime synthesized specifically for VIP table orders. */
-  vip: require("../assets/sounds/vip-order.wav"),
+  /**
+   * Original four-second chime synthesized specifically for VIP table orders.
+   *
+   * The filename is also the Android notification resource, which is why it is
+   * underscore-separated: Android raw resources cannot contain a hyphen. It is
+   * bundled for push by app.json → expo-notifications.sounds.
+   */
+  vip: require("../assets/sounds/vip_order.wav"),
 };
 
 const players: Partial<Record<SoundName, AudioPlayer>> = {};
@@ -215,12 +221,30 @@ export function feedbackTap() {
  * premium door chime, then repeats a brighter two-note call so it remains
  * recognisable in a noisy restaurant without sounding like a barcode scanner.
  * Device media volume/DND still sets the physical upper limit.
+ *
+ * It rings for ten seconds, not four. A guest order is the one event nobody may
+ * miss, and four seconds is easily lost to a busy kitchen: a chime that stops
+ * before anyone looks is the same as no chime. The sound loops and the haptics
+ * keep pulsing until someone acknowledges it (or the ten seconds run out).
  */
+const VIP_ALARM_MS = 10_000;
+const VIP_HAPTIC_MS = 850;
+
 let vipHapticTimer: ReturnType<typeof setInterval> | null = null;
 let vipStopTimer: ReturnType<typeof setTimeout> | null = null;
 
 function playVipSound() {
   if (!soundEnabled) return;
+  // Loop the chime; startVipOrderAlarm stops it after VIP_ALARM_MS. Setting
+  // loop only here (and clearing it in stopVipOrderAlarm) keeps the shared
+  // player safe for every other one-shot sound.
+  const player = players.vip;
+  if (!player) return;
+  try {
+    player.loop = true;
+  } catch (error) {
+    noteAudioError("loopVip", error);
+  }
   // Haptics still draw attention if audio is unavailable; the cause is recorded.
   restartAndPlay("vip", 1);
 }
@@ -233,9 +257,9 @@ export function startVipOrderAlarm() {
   void initAudio().then(playVipSound);
   vipHapticTimer = setInterval(
     () => vibrate(Haptics.ImpactFeedbackStyle.Heavy),
-    850,
+    VIP_HAPTIC_MS,
   );
-  vipStopTimer = setTimeout(stopVipOrderAlarm, 4200);
+  vipStopTimer = setTimeout(stopVipOrderAlarm, VIP_ALARM_MS);
   notify(Haptics.NotificationFeedbackType.Warning);
 }
 
@@ -247,6 +271,7 @@ export function stopVipOrderAlarm() {
   const player = players.vip;
   if (!player) return;
   try {
+    player.loop = false;
     player.pause();
     void Promise.resolve(player.seekTo(0)).catch(() => {});
   } catch (error) {

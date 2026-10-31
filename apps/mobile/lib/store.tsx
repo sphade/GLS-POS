@@ -121,6 +121,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [operational, store.id]);
 
   // Register this device for push, so a locked phone still gets alerted.
+  //
+  // Registration is per user, not per store: the server adds a row for every
+  // branch the user belongs to, so switching shops no longer makes the phone
+  // deaf to the other one. `store.id` stays in the deps so a switch re-runs
+  // registration, which picks up any membership added since launch.
   useEffect(() => {
     if (OFFLINE_MODE || !operational || !user) return;
 
@@ -130,7 +135,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!credential) return;
 
     const controller = new AbortController();
-    void registerForPush(store.id, { credential, signal: controller.signal });
+    void registerForPush({ credential, signal: controller.signal });
 
     return () => {
       controller.abort();
