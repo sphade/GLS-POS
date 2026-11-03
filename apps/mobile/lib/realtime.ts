@@ -23,6 +23,14 @@ let attempts = 0;
 let stopped = false;
 let currentStore: string | null = null;
 let generation = 0;
+let pullDebounce: ReturnType<typeof setTimeout> | null = null;
+/** How long a burst of change notices is gathered into one pull. */
+const PULL_COALESCE_MS = 1500;
+
+/** True while the realtime socket is open, so polling can back off. */
+export function isRealtimeOpen(): boolean {
+  return !!socket && socket.readyState === 1;
+}
 
 /**
  * Every connection attempt is stamped with a generation.
@@ -45,6 +53,10 @@ function clearTimers() {
   if (retryTimer) {
     clearTimeout(retryTimer);
     retryTimer = null;
+  }
+  if (pullDebounce) {
+    clearTimeout(pullDebounce);
+    pullDebounce = null;
   }
 }
 
@@ -129,7 +141,26 @@ function connect(storeId: string) {
     // Any change notification triggers a pull-only catch-up. Local writes have
     // their own debounced upload path, so a rejected edit cannot delay inbound
     // operational updates.
-    void pullNow(storeId);
+    //
+    // Coalesced: one sale on another till sends several notices in a row, and
+    // a busy floor sends dozens a minute. Pulling once per notice made an old
+    // till download, apply and re-render back to back until it froze. A new
+    // VIP order still pulls straight away; everything else waits briefly so a
+    // burst becomes a single pull.
+    let urgent = false;
+    try {
+      urgent = (JSON.parse(String(event.data)) as { event?: string }).event === "web_order";
+    } catch {
+      /* plain-text notice */
+    }
+    if (pullDebounce) clearTimeout(pullDebounce);
+    pullDebounce = setTimeout(
+      () => {
+        pullDebounce = null;
+        if (isCurrent(gen)) void pullNow(storeId);
+      },
+      urgent ? 0 : PULL_COALESCE_MS,
+    );
   };
 
   ws.onerror = () => {

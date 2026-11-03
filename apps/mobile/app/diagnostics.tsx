@@ -20,6 +20,7 @@ import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
 import { feedbackTap } from "@/lib/feedback";
 import { getSyncDiagnostics } from "@/lib/sync";
+import { clearFreezeLog, readFreezeLog } from "@/lib/freeze-log";
 
 /**
  * Which server is this phone actually talking to?
@@ -44,6 +45,7 @@ export default function DiagnosticsScreen() {
   const { user } = useAuth();
   const [health, setHealth] = useState<Health>({ state: "checking" });
   const [sync, setSync] = useState(() => getSyncDiagnostics(store.id));
+  const [freezes, setFreezes] = useState(readFreezeLog);
 
   const check = useCallback(async () => {
     setHealth({ state: "checking" });
@@ -80,7 +82,10 @@ export default function DiagnosticsScreen() {
   // Sync numbers move while a first download runs, so refresh them on a slow
   // tick rather than pretending this is a static page.
   useEffect(() => {
-    const timer = setInterval(() => setSync(getSyncDiagnostics(store.id)), 2_000);
+    const timer = setInterval(() => {
+      setSync(getSyncDiagnostics(store.id));
+      setFreezes(readFreezeLog());
+    }, 2_000);
     return () => clearInterval(timer);
   }, [store.id]);
 
@@ -194,6 +199,50 @@ export default function DiagnosticsScreen() {
             label="Device"
             value={`${Device.manufacturer ?? ""} ${Device.modelName ?? Platform.OS}`.trim()}
           />
+          <Row
+            label="Memory"
+            value={
+              Device.totalMemory
+                ? `${(Device.totalMemory / 1024 ** 3).toFixed(1)} GB · Android ${Device.osVersion ?? "?"}`
+                : "—"
+            }
+          />
+        </Card>
+
+        <Card title="FREEZES & RESTARTS">
+          {freezes.length === 0 ? (
+            <Row label="Recorded" value="none" />
+          ) : (
+            freezes.slice(0, 15).map((f, i) => (
+              <Row
+                key={`${f.at}-${i}`}
+                label={new Date(f.at).toLocaleString([], {
+                  day: "2-digit",
+                  month: "short",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+                value={
+                  f.kind === "restart"
+                    ? `App closed unexpectedly (gone ${Math.round(f.ms / 1000)}s)`
+                    : `Froze ${(f.ms / 1000).toFixed(1)}s${f.syncing ? " · while syncing" : ""}`
+                }
+                emphasis
+              />
+            ))
+          )}
+          {freezes.length > 0 ? (
+            <Pressable
+              onPress={() => {
+                feedbackTap();
+                clearFreezeLog();
+                setFreezes([]);
+              }}
+              accessibilityRole="button"
+            >
+              <Text style={{ color: colors.primary, fontWeight: "700", paddingVertical: 8 }}>Clear log</Text>
+            </Pressable>
+          ) : null}
         </Card>
 
         <Pressable

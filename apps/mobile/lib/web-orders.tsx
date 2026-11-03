@@ -21,6 +21,7 @@ import {
   put as dbPut,
 } from "./db";
 import { onSynced, pullNow, SYNC_ENABLED } from "./sync";
+import { isRealtimeOpen } from "./realtime";
 import { useStore } from "./store";
 
 /**
@@ -168,8 +169,15 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!SYNC_ENABLED) return;
 
+    // While the realtime socket is open it already announces every new order,
+    // so the poll only runs as a fallback: every 4s when the socket is down,
+    // and once every ~30s as a belt-and-braces check when it is up. Polling
+    // every 4s regardless kept old tills busy downloading for nothing.
+    let ticks = 0;
     const timer = setInterval(() => {
       if (AppState.currentState !== "active") return;
+      ticks += 1;
+      if (isRealtimeOpen() && ticks % 8 !== 0) return;
       void pullNow(store.id);
     }, 4000);
     return () => clearInterval(timer);

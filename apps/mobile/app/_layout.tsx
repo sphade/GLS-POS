@@ -14,6 +14,7 @@ import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { prepareHistoryIndexes, setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
+import { startFreezeMonitor } from "@/lib/freeze-log";
 import { NotificationRouter } from "@/components/NotificationRouter";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
@@ -49,6 +50,8 @@ export default function RootLayout() {
   // first alert (a VIP order) isn't the thing that has to load the audio stack.
   useEffect(() => {
     void initAudio();
+    // Logs freezes and unexpected restarts to Diagnostics (see freeze-log.ts).
+    startFreezeMonitor();
   }, []);
 
   if (!fontsLoaded) {
