@@ -9,7 +9,7 @@
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import type { ProductVariant, WebOrder } from "@gls-pos/types";
+import type { ProductVariant, RecipeLine, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
 import {
   loadAll,
@@ -75,6 +75,8 @@ export type Item = {
   stockQuantity: number | null;
   /** Simple items decrement stock on sale unless explicitly disabled. */
   autoUpdateStock?: boolean;
+  /** Ingredients used per one unit sold. The server deducts them on each sale. */
+  recipe?: RecipeLine[];
   /** Warn/flag when stock drops to or below this (only when tracked). */
   lowStockAt?: number;
   /** Free-text label when sellBy === "unit" (e.g. "plate", "cup"). */

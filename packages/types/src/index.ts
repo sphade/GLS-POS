@@ -81,6 +81,8 @@ export interface Product {
   autoUpdateStock?: boolean;
   /** When present, the base product is not directly sellable. */
   variants?: ProductVariant[];
+  /** Ingredients used per one unit sold. Deducted by the server on each sale. */
+  recipe?: RecipeLine[];
   taxRateBps?: number; // tax rate in basis points (e.g. 750 = 7.5%)
   isActive: boolean;
   createdAt: string;
@@ -133,6 +135,108 @@ export interface StockMovement {
   actorName?: string;
   actorEmail?: string;
   actorRole?: StoreRole;
+}
+
+// ---------------------------------------------------------------------------
+// Ingredients & central stock
+// ---------------------------------------------------------------------------
+
+/**
+ * Base units for raw stock. Quantities are always whole numbers in these units
+ * (2.5 kg is stored as 2500 g), so no stock figure is ever a float.
+ */
+export type IngredientUnit = "g" | "ml" | "pcs";
+
+export const INGREDIENT_UNITS: readonly IngredientUnit[] = ["g", "ml", "pcs"];
+
+/**
+ * A raw stock item held by one store: rice, flour, oil, cups. Lives in that
+ * store's Durable Object. The central store and every branch use the same shape.
+ * `stock` is materialized by the server from `ingredient_movements` only.
+ */
+export interface Ingredient {
+  id: ID;
+  name: string;
+  unit: IngredientUnit;
+  /** Whole base units on hand. Server-authoritative. */
+  stock: number;
+  /** Alert when stock is at or below this many base units. */
+  lowAt: number;
+  /** Optional display pack, e.g. "Bag" of 50000 g. Display only. */
+  packName?: string;
+  packSize?: number;
+  /** For a branch copy created by a transfer: the central ingredient it mirrors. */
+  sourceIngredientId?: ID;
+  sourceStoreId?: ID;
+  /** Hidden from lists but kept so history still resolves. Never hard-deleted. */
+  archived?: boolean;
+}
+
+/** One ingredient used by a recipe, in the ingredient's base unit. */
+export interface RecipeLine {
+  ingredientId: ID;
+  /** Whole base units consumed per one unit sold/made. */
+  qty: number;
+}
+
+export type IngredientMovementReason =
+  | "initial"
+  | "restock"
+  | "adjustment"
+  | "waste"
+  /** Consumed by a sale or a production batch through a recipe. */
+  | "recipe"
+  /** Server-only: left the central store in a transfer. */
+  | "transfer_out"
+  /** Server-only: arrived at a branch from a transfer. */
+  | "transfer_in";
+
+/** Append-only ingredient ledger entry. Same contract as `StockMovement`. */
+export interface IngredientMovement {
+  id: ID;
+  ingredientId: ID;
+  ingredientName: string;
+  reason: IngredientMovementReason;
+  /** Whole base units. Negative removes stock. */
+  delta: number;
+  resulting: number;
+  baseStock?: number;
+  requestedDelta?: number;
+  at: number;
+  /** Receipt id, transfer id, or batch id. */
+  ref?: string;
+  note?: string;
+  actorId?: ID;
+  actorName?: string;
+  actorEmail?: string;
+  actorRole?: StoreRole;
+}
+
+export type StockTransferStatus = "sent" | "received";
+
+/**
+ * A movement of one ingredient from the central store to a branch. Both stores
+ * hold a copy (server-authored, read-only to devices): `direction` says which
+ * side this copy belongs to.
+ */
+export interface StockTransfer {
+  id: ID;
+  direction: "out" | "in";
+  status: StockTransferStatus;
+  fromStoreId: ID;
+  fromStoreName: string;
+  toStoreId: ID;
+  toStoreName: string;
+  /** Ingredient id in THIS store (central item for "out", branch copy for "in"). */
+  ingredientId: ID;
+  ingredientName: string;
+  unit: IngredientUnit;
+  quantity: number;
+  note?: string;
+  sentAt: number;
+  receivedAt?: number;
+  actorId: ID;
+  actorName: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +351,8 @@ export const SYNC_COLLECTIONS = [
   "web_orders",
   "audit_log",
   "held_orders",
+  "ingredient_movements",
+  "stock_transfers",
 ] as const;
 
 export type SyncCollection = (typeof SYNC_COLLECTIONS)[number];
@@ -400,7 +506,7 @@ const SYNC_WRITE_PERMISSIONS = {
   audit_log: "catalog:read",
   held_orders: "sale:create",
 } as const satisfies Record<
-  Exclude<SyncCollection, "products" | "stock_movements">,
+  Exclude<SyncCollection, "products" | "stock_movements" | "ingredient_movements" | "stock_transfers">,
   Permission
 >;
 
@@ -433,6 +539,32 @@ function syncReceiptHasDiscount(data: unknown): boolean {
         (typeof line?.orderDiscountShare === "number" && line.orderDiscountShare > 0),
     )
   );
+}
+
+/**
+ * Who may log an ingredient movement. Transfers are server-only, a recipe
+ * deduction rides with a sale, and everything else is a stock adjustment.
+ */
+function syncIngredientMovementPermission(change: SyncChange): Permission | null {
+  if (change.deleted || !change.data || typeof change.data !== "object") return null;
+  const m = change.data as { id?: unknown; reason?: unknown; delta?: unknown };
+  if (m.id !== change.id || typeof m.delta !== "number" || !Number.isInteger(m.delta) || m.delta === 0) {
+    return null;
+  }
+  switch (m.reason) {
+    case "recipe":
+      return m.delta < 0 ? "sale:create" : null;
+    case "waste":
+      return m.delta < 0 ? "inventory:adjust" : null;
+    case "initial":
+    case "restock":
+      return m.delta > 0 ? "inventory:adjust" : null;
+    case "adjustment":
+      return "inventory:adjust";
+    default:
+      // transfer_in / transfer_out are server-only; unknown reasons fail closed.
+      return null;
+  }
 }
 
 function syncMovementPermission(change: SyncChange): Permission | null {
@@ -485,6 +617,10 @@ export function roleCanWriteSyncCollection(
   if (collection === "products") {
     return roleCan(role, "catalog:write") || roleCan(role, "sale:create");
   }
+  if (collection === "stock_transfers") return false;
+  if (collection === "ingredient_movements") {
+    return roleCan(role, "inventory:adjust") || roleCan(role, "sale:create");
+  }
   if (collection === "stock_movements") {
     return (
       roleCan(role, "sale:create") ||
@@ -507,6 +643,15 @@ export function syncWriteDisposition(
 
   if (change.collection === "stock_movements") {
     const required = syncMovementPermission(change);
+    return required && roleCan(role, required) ? "allowed" : "denied";
+  }
+
+  // Transfers are written only by the server, inside the two stores' Durable
+  // Objects. No device may create or edit one.
+  if (change.collection === "stock_transfers") return "denied";
+
+  if (change.collection === "ingredient_movements") {
+    const required = syncIngredientMovementPermission(change);
     return required && roleCan(role, required) ? "allowed" : "denied";
   }
 
@@ -694,6 +839,8 @@ const SYNC_READ_PERMISSIONS = {
   web_orders: ["sale:create", "kitchen:view"],
   audit_log: ["audit:view"],
   held_orders: ["sale:create"],
+  ingredient_movements: ["inventory:adjust"],
+  stock_transfers: ["inventory:adjust"],
 } as const satisfies Record<SyncCollection, readonly Permission[]>;
 
 /** Unknown collection names fail closed. */

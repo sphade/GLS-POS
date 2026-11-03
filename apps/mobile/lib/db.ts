@@ -36,6 +36,8 @@ export const COLLECTIONS = [
   "web_orders",
   "audit_log",
   "held_orders",
+  "ingredient_movements",
+  "stock_transfers",
 ] as const;
 
 export type Collection = (typeof COLLECTIONS)[number];
@@ -87,6 +89,14 @@ const HISTORY_INDEXES: readonly { collection: Collection; statement: string }[] 
        ON stock_movements (
          json_extract(data, '$.productId'),
          json_extract(data, '$.variantId'),
+         json_extract(data, '$.at') DESC
+       );`,
+  },
+  {
+    collection: "ingredient_movements",
+    statement: `CREATE INDEX IF NOT EXISTS ingredient_movements_item_at_idx
+       ON ingredient_movements (
+         json_extract(data, '$.ingredientId'),
          json_extract(data, '$.at') DESC
        );`,
   },

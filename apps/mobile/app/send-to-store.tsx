@@ -1,44 +1,42 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors } from "@/constants/theme";
 import { EditorToolbar, FieldCard, PickerCard, formStyles } from "@/components/form";
 import { PickerSheet, type PickerOption } from "@/components/PickerSheet";
-import type { CentralItem } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
-import {
-  centralItems,
-  createCentralTransferLocal,
-  flushCentralOutbox,
-  refreshCentralItems,
-  useCentralRevision,
-} from "@/lib/central";
+import { api } from "@/lib/api";
+import { useCatalog } from "@/lib/catalog";
+import { useStore } from "@/lib/store";
+import { syncNow } from "@/lib/sync";
+import { uid } from "@/lib/ids";
 import { feedbackTap } from "@/lib/feedback";
+import { DISPLAY_UNIT, formatQty, toBase } from "@/lib/stock-units";
 
 /**
- * Transfer stock from the central store to one branch.
+ * Send stock from the Central Store to one branch.
  *
- * The form asks only three things: which central item, which shop, and how
- * much. There is no destination product picker and no unit conversion: 80 kg of
- * beans sent is 80 kg of beans received. The delivery is recorded in the shop's
- * own Stock Room, not in its menu, so the branch does not need a matching
- * product for the transfer to work.
+ * Runs inside the Central Store, so the item list is simply this store's
+ * ingredients. The server deducts the centre and credits the branch through
+ * the two stores' Durable Objects; the branch gets the item under the same name
+ * and unit, created on first delivery. Sending needs a connection because it
+ * moves stock between two stores; the transfer id is minted here, so tapping
+ * Send again after a dropped response can never send twice.
  */
 export default function SendToStoreScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ globalItemId?: string }>();
-  const { stores, user } = useAuth();
-  const central = stores.find((s) => s.isCentral);
-  const destinations = stores.filter((s) => !s.isCentral);
-  const revision = useCentralRevision();
+  const params = useLocalSearchParams<{ ingredientId?: string }>();
+  const { store } = useStore();
+  const { ingredients } = useCatalog();
 
-  const [items, setItems] = useState<CentralItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [branches, setBranches] = useState<{ id: string; name: string }[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // One id per attempt: reused on retry, replaced after a success.
+  const [transferId, setTransferId] = useState(() => uid("tx"));
 
-  const [itemId, setItemId] = useState<string | undefined>(params.globalItemId);
+  const [itemId, setItemId] = useState<string | undefined>(params.ingredientId);
   const [toStoreId, setToStoreId] = useState<string | undefined>(undefined);
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
@@ -50,120 +48,88 @@ export default function SendToStoreScreen() {
   }>(null);
 
   useEffect(() => {
-    if (!central) {
-      setItems([]);
-      setLoading(false);
-      return;
-    }
-    const cached = centralItems(central.id);
-    setItems(cached);
-    setLoading(false);
-    if (params.globalItemId && !cached.some((i) => i.id === params.globalItemId)) {
-      setItemId(undefined);
-    }
-  }, [central?.id, params.globalItemId, revision]);
-
-  useEffect(() => {
-    if (!central) return;
+    if (!store.isCentral) return;
     void (async () => {
-      await refreshCentralItems(central.id);
-      const fresh = centralItems(central.id);
-      setItems(fresh);
-      setLoading(false);
-      if (params.globalItemId && !fresh.some((i) => i.id === params.globalItemId)) {
-        setItemId(undefined);
-      }
+      const res = await api.listTransferBranches(store.id);
+      if (res.ok) setBranches(res.data);
+      else setLoadError("Connect to the internet to load your shops.");
     })();
-  }, [central?.id, params.globalItemId]);
+  }, [store.id, store.isCentral]);
 
-  const item = items.find((i) => i.id === itemId);
-  const toStore = stores.find((s) => s.id === toStoreId);
+  const item = ingredients.find((i) => i.id === itemId);
+  const toStore = branches?.find((s) => s.id === toStoreId);
 
-  const qty = Number.parseInt(quantity, 10);
-  const validQty = Number.isInteger(qty) && qty >= 1 && !!item && qty <= item.totalStock;
+  const qty = item ? toBase(quantity, item.unit) : null;
+  const validQty = !!item && qty !== null && qty >= 1 && qty <= item.stock;
   const valid = !!item && !!toStoreId && validQty && !sending;
 
   const openPicker = (title: string, options: PickerOption[], onPick: (id: string) => void) => {
     feedbackTap();
     setPicker({ title, options, onPick });
   };
-
   const closePicker = () => setPicker(null);
 
-  const submit = () => {
-    if (!valid || !item || !toStoreId || !central) return;
-    const actor = user ? { id: user.id, name: user.name, email: user.email } : null;
-    if (!actor) return;
-
+  const submit = async () => {
+    if (!valid || !item || !toStoreId || qty === null) return;
     setSending(true);
-    const res = createCentralTransferLocal(
-      central.id,
-      central.name,
-      {
-        globalItemId: item.id,
-        toStoreId,
-        toStoreName: toStore?.name ?? "Branch",
-        quantity: qty,
-        notes: notes.trim() || undefined,
-      },
-      actor,
-    );
+    const res = await api.sendTransfer(store.id, {
+      id: transferId,
+      ingredientId: item.id,
+      toStoreId,
+      quantity: qty,
+      note: notes.trim() || undefined,
+    });
     setSending(false);
     if (!res.ok) {
-      Alert.alert("Could not transfer", res.error);
+      Alert.alert(
+        "Could not send",
+        res.error?.message ?? "Check your connection and try again. Nothing was sent twice.",
+      );
       return;
     }
-
     feedbackTap();
-    void flushCentralOutbox(
-      central.id,
-      actor,
-      stores.map((membership) => ({ id: membership.id })),
-    );
+    setTransferId(uid("tx"));
+    // Pull the new balance and the transfer row straight away.
+    void syncNow(store.id);
     Alert.alert(
-      "Transfer sent",
-      `${qty} ${item.unit} ${item.name} is now in ${toStore?.name ?? "the shop"}'s Stock Room.`,
+      "Stock sent",
+      `${formatQty(qty, item.unit)} of ${item.name} sent to ${toStore?.name ?? "the shop"}.`,
       [{ text: "OK", onPress: () => router.back() }],
     );
   };
 
-  if (!central) {
-    return (
-      <SafeAreaView edges={["top"]} style={formStyles.screen}>
-        <EditorToolbar title="Transfer" onClose={() => router.back()} onSave={() => {}} />
-        <View style={styles.blocked}>
-          <MaterialCommunityIcons name="crown-outline" size={44} color={colors.grey400} />
-          <Text style={styles.blockedTitle}>Central Store not set up</Text>
-          <Text style={styles.blockedText}>
-            Open the Central Store once to create it, then transfer stock to your shops.
-          </Text>
-        </View>
-      </SafeAreaView>
+  const blocked = (title: string, text: string) => (
+    <SafeAreaView edges={["top"]} style={formStyles.screen}>
+      <EditorToolbar title="Send stock" onClose={() => router.back()} onSave={() => {}} />
+      <View style={styles.blocked}>
+        <MaterialCommunityIcons name="crown-outline" size={44} color={colors.grey400} />
+        <Text style={styles.blockedTitle}>{title}</Text>
+        <Text style={styles.blockedText}>{text}</Text>
+      </View>
+    </SafeAreaView>
+  );
+
+  if (!store.isCentral) {
+    return blocked(
+      "Switch to the Central Store",
+      "Stock is sent from the Central Store. Pick it from the shop switcher first.",
     );
   }
-
-  if (destinations.length === 0) {
-    return (
-      <SafeAreaView edges={["top"]} style={formStyles.screen}>
-        <EditorToolbar title="Transfer" onClose={() => router.back()} onSave={() => {}} />
-        <View style={styles.blocked}>
-          <Text style={styles.blockedTitle}>No branch shops yet</Text>
-          <Text style={styles.blockedText}>Create a shop first, then transfer stock from the centre.</Text>
-        </View>
-      </SafeAreaView>
-    );
+  if (loadError) return blocked("Offline", loadError);
+  if (branches && branches.length === 0) {
+    return blocked("No branch shops yet", "Create a shop first, then send it stock from the centre.");
   }
 
   return (
     <SafeAreaView edges={["top"]} style={formStyles.screen}>
       <EditorToolbar
-        title="Transfer"
+        title="Send stock"
         dirty={valid}
         onClose={() => router.back()}
         onSave={() => void submit()}
       />
 
-      {loading ? (
+      {!branches ? (
         <ActivityIndicator style={{ marginTop: 40 }} color={colors.primary} />
       ) : (
         <ScrollView contentContainerStyle={formStyles.body} keyboardShouldPersistTaps="handled">
@@ -174,7 +140,7 @@ export default function SendToStoreScreen() {
               </View>
               <Text style={styles.flowLabel}>FROM</Text>
               <Text style={styles.flowName} numberOfLines={1}>
-                {central.name}
+                {store.name}
               </Text>
               <Text style={styles.flowHint}>Central Store</Text>
             </View>
@@ -194,14 +160,16 @@ export default function SendToStoreScreen() {
           </View>
 
           <PickerCard
-            label="CENTRAL ITEM *"
-            value={item ? `${item.name} (${item.totalStock} ${item.unit})` : undefined}
-            hint="Choose what to transfer"
+            label="ITEM *"
+            value={item ? `${item.name} (${formatQty(item.stock, item.unit)})` : undefined}
+            hint="Choose what to send"
             valid={!!item}
             onPress={() =>
               openPicker(
-                "Central item",
-                items.map((i) => ({ id: i.id, label: i.name, hint: `${i.totalStock} ${i.unit}` })),
+                "Central stock",
+                ingredients
+                  .filter((i) => i.stock > 0)
+                  .map((i) => ({ id: i.id, label: i.name, hint: formatQty(i.stock, i.unit) })),
                 (id) => {
                   setItemId(id);
                   closePicker();
@@ -215,36 +183,31 @@ export default function SendToStoreScreen() {
             value={toStore?.name}
             hint="Choose the branch that receives it"
             valid={!!toStoreId}
-            onPress={() => {
-              if (destinations.length === 0) {
-                Alert.alert("No shop", "Create a branch shop first.");
-                return;
-              }
+            onPress={() =>
               openPicker(
                 "Receiving shop",
-                destinations.map((s) => ({ id: s.id, label: s.name, hint: s.role })),
+                branches.map((s) => ({ id: s.id, label: s.name })),
                 (id) => {
                   setToStoreId(id);
                   closePicker();
                 },
-              );
-            }}
+              )
+            }
           />
 
           <FieldCard
-            label={`QUANTITY (${item?.unit ?? "units"}) *`}
-            hint={item ? `Up to ${item.totalStock} available` : "Choose an item first"}
+            label={`QUANTITY (${item ? DISPLAY_UNIT[item.unit] : "units"}) *`}
+            hint={item ? `Up to ${formatQty(item.stock, item.unit)}` : "Choose an item first"}
             value={quantity}
             onChangeText={setQuantity}
             keyboardType="numeric"
-            decimals={false}
             showTick={false}
           />
-          {item && quantity.trim() !== "" && !validQty && (
+          {item && quantity.trim() !== "" && !validQty ? (
             <Text style={styles.warn}>
-              Enter a whole number from 1 to {item.totalStock} ({item.unit} available).
+              Enter an amount up to {formatQty(item.stock, item.unit)}.
             </Text>
-          )}
+          ) : null}
 
           <FieldCard
             label="Note"
@@ -254,7 +217,7 @@ export default function SendToStoreScreen() {
             showTick={false}
           />
 
-          {sending && <ActivityIndicator style={{ marginTop: 12 }} color={colors.primary} />}
+          {sending ? <ActivityIndicator style={{ marginTop: 12 }} color={colors.primary} /> : null}
         </ScrollView>
       )}
 

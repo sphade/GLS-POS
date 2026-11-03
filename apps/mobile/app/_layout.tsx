@@ -14,7 +14,6 @@ import { StoreProvider, useStore } from "@/lib/store";
 import { WebOrdersProvider } from "@/lib/web-orders";
 import { prepareHistoryIndexes, setActiveStore } from "@/lib/db";
 import { NewOrderBanner } from "@/components/NewOrderBanner";
-import { CentralSyncBridge } from "@/components/CentralSyncBridge";
 import { NotificationRouter } from "@/components/NotificationRouter";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { initAudio } from "@/lib/feedback";
@@ -133,7 +132,6 @@ function StoreScopedData() {
         >
           <WebOrdersProvider key={`orders-${dataScope}`}>
             <CartCatalogBridge />
-            <CentralSyncBridge />
             {/* Opens the screen a tapped push is about, switching store first. */}
             <NotificationRouter />
             <StatusBar style="light" backgroundColor={colors.primaryDark} />

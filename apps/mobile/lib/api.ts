@@ -1,4 +1,4 @@
-import type { ApiResult, StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
+import type { ApiResult, StockTransfer, StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
 import { API_URL, authCookie } from "./auth-client";
 import { OFFLINE_MODE } from "./offline";
 
@@ -349,6 +349,25 @@ export const api = {
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     return request<CentralAllocation[]>(`/inventory/allocations${suffix}`);
   },
+  // --- Central store transfers (stock lives in each store's DO) ---
+  listTransferBranches: (centralStoreId: string) =>
+    request<{ id: string; name: string }[]>("/transfers/branches", {
+      headers: { "x-store-id": centralStoreId },
+    }),
+  sendTransfer: (
+    centralStoreId: string,
+    body: { id: string; ingredientId: string; toStoreId: string; quantity: number; note?: string },
+  ) =>
+    request<StockTransfer>("/transfers", {
+      method: "POST",
+      headers: { "x-store-id": centralStoreId, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  importLegacyCentralStock: (centralStoreId: string) =>
+    request<{ imported: number }>("/transfers/import-legacy", {
+      method: "POST",
+      headers: { "x-store-id": centralStoreId },
+    }),
   createAllocation: (body: {
     id?: string;
     globalItemId: string;

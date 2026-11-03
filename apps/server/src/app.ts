@@ -17,6 +17,7 @@ import { push } from "./modules/push/push.routes.js";
 import { v1 } from "./modules/integration/v1.routes.js";
 import { integrations } from "./modules/integration/integration.routes.js";
 import { inventory } from "./modules/inventory/inventory.routes.js";
+import { transfers } from "./modules/transfers/transfers.routes.js";
 import { admin } from "./modules/admin/admin.routes.js";
 import { catalog } from "./modules/stores/catalog.routes.js";
 import { withApiKey } from "./middleware/api-key.js";
@@ -149,7 +150,13 @@ export function createApp() {
   api.use("/sync/*", requireAuth, withStore);
   api.route("/sync", sync);
 
-  // Centralized inventory distribution management.
+  // Central-store transfers between Durable Objects. x-store-id = the centre.
+  api.use("/transfers", requireAuth, withStore);
+  api.use("/transfers/*", requireAuth, withStore);
+  api.route("/transfers", transfers);
+
+  // LEGACY central inventory (D1). Read-only once /transfers/import-legacy has
+  // run; kept so old app builds don't break. Remove after every till updates.
   api.use("/inventory", requireAuth);
   api.use("/inventory/*", requireAuth);
   api.route("/inventory", inventory);

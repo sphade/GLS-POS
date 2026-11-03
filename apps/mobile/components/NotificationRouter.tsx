@@ -28,14 +28,14 @@ function routeFor(data: Record<string, unknown>): string | null {
   switch (kind) {
     case "web_order":
       return "/online-orders";
+    case "transfer_in":
+      return "/transfers";
     case "stock_arrived":
     case "conversion_done":
-      return "/stock-room";
+      return "/inventory";
     case "central_low_stock": {
       const itemId = typeof data.itemId === "string" ? data.itemId : null;
-      return itemId
-        ? `/central-item-editor?id=${encodeURIComponent(itemId)}`
-        : "/(tabs)";
+      return itemId ? `/ingredient-editor?id=${encodeURIComponent(itemId)}` : "/(tabs)";
     }
     default:
       return null;

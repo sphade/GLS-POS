@@ -11,8 +11,8 @@ import { swatches, useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { MEASURES, newVariant, type Measure, type SellBy, type Variant } from "@/lib/cart";
 import { feedbackTap } from "@/lib/feedback";
-
-
+import { RecipeCard } from "@/components/RecipeCard";
+import type { RecipeLine } from "@gls-pos/types";
 
 /**
  * Product editor, shared by the Items tab and Inventory ▸ Items.
@@ -37,6 +37,7 @@ export default function ItemEditorScreen() {
   const [sellBy, setSellBy] = useState<SellBy>(existing?.sellBy ?? "unit");
   const [measure, setMeasure] = useState<Measure>(existing?.measure ?? MEASURES[0]!);
   const [variants, setVariants] = useState<Variant[]>(existing?.variants ?? []);
+  const [recipe, setRecipe] = useState<RecipeLine[]>(existing?.recipe ?? []);
 
   // Simple-mode stock control.
   const [trackStock, setTrackStock] = useState(existing ? existing.stockQuantity !== null : false);
@@ -226,6 +227,8 @@ export default function ItemEditorScreen() {
       sellBy,
       measure: isFraction ? measure : undefined,
       variants: savedVariants,
+      // Variants get per-variant recipes later; a simple item keeps its own.
+      recipe: mode === "left" ? recipe.filter((r) => r.qty > 0) : undefined,
       // Only meaningful with variants, so it's cleared alongside them.
       chooseOne: mode === "right" ? chooseOne : undefined,
       stockQuantity: nextStock,
@@ -430,6 +433,8 @@ export default function ItemEditorScreen() {
                 Stock goes down automatically with each sale{isFraction ? ` (per ${measure.unit})` : ""}.
               </Text>
             </FeatureCard>
+
+            <RecipeCard recipe={recipe} onChange={edit(setRecipe)} />
 
             <View style={styles.tipBanner}>
               <MaterialCommunityIcons name="lightbulb-on-outline" size={22} color={colors.primary} />
