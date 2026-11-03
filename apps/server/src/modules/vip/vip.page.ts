@@ -97,6 +97,13 @@ const STYLES = `
     color:var(--muted); text-transform:uppercase;
   }
   .item.gone .nm { color:var(--muted); }
+  .item.gone { opacity:.75; }
+  .soldout {
+    display:inline-block; margin-top:6px; padding:4px 10px; border-radius:100px;
+    background:#FDECEA; color:#C62828; font-size:10px; font-weight:800;
+    letter-spacing:1.4px; text-transform:uppercase;
+  }
+  .variant-row .soldout { margin-top:0; }
 
   .add {
     flex:0 0 auto; border:1px solid var(--green); background:var(--green); color:#FFFFFF;
@@ -230,7 +237,7 @@ export function renderVipPage(
                      <span class="q" data-qty="${esc(key)}">0</span>
                      <button data-inc="${esc(key)}" aria-label="one more">+</button>
                    </div>`
-                : `<button class="add" disabled>Unavailable</button>`
+                : `<span class="soldout">Out of stock</span>`
             }
           </div>`;
         })
@@ -239,7 +246,7 @@ export function renderVipPage(
       return `<div class="item choices${i.available ? "" : " gone"}" data-id="${esc(i.id)}">
         <div class="info">
           <div class="nm serif">${esc(i.name)}</div>
-          <div class="out">${i.available ? "Choose a variant" : "Unavailable"}</div>
+          <div class="out">${i.available ? "Choose a variant" : "Out of stock"}</div>
           <div class="variant-list">${variants}</div>
         </div>
       </div>`;
@@ -251,7 +258,7 @@ export function renderVipPage(
         ${
           i.available
             ? `<div class="pr">${sym}${money(i.price)}</div>`
-            : `<div class="out">Unavailable</div>`
+            : `<div class="soldout">Out of stock</div>`
         }
       </div>
       ${
@@ -262,7 +269,7 @@ export function renderVipPage(
                <span class="q" data-qty="${esc(i.id)}">0</span>
                <button data-inc="${esc(i.id)}" aria-label="one more">+</button>
              </div>`
-          : `<button class="add" disabled>Add</button>`
+          : ``
       }
     </div>`;
   };
@@ -480,6 +487,8 @@ function clientScript(storeId: string, tableId: string, currency: string): strin
         btn.textContent = "Send to kitchen";
         if (!body.ok) {
           alert((body.error && body.error.message) || "We couldn't send your order. Please let a member of our team know.");
+          // Something sold out since the page loaded: reload so it shows as out of stock.
+          if (body.error && body.error.code === "insufficient_stock") location.reload();
           return;
         }
         cart = {};

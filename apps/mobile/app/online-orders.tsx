@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useRouter, type Href } from "expo-router";
+import { useRouter } from "expo-router";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
 import { colors, formatMoney } from "@/constants/theme";
 import { centeredContent } from "@/lib/responsive";
@@ -13,14 +13,14 @@ import { useCatalog } from "@/lib/catalog";
 import { useStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
 import { sendTestPush } from "@/lib/push";
-import { feedbackError, feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
+import { feedbackSaleComplete, feedbackTap } from "@/lib/feedback";
 
 const WEB_ORDER_PAGE = 100;
 
 /**
- * VIP orders placed from the guest website. Staff see them here, move them
- * through preparing → ready, then bill them — which raises a normal unpaid
- * receipt (the guest pays against the printed slip) and deducts stock.
+ * VIP orders placed from the guest website. Staff accept them (which takes the
+ * items out of menu stock, so the guest menu shows sold-out items straight
+ * away), mark them ready, then bill them as a normal unpaid receipt.
  */
 export default function OnlineOrdersScreen() {
   const router = useRouter();
@@ -41,7 +41,7 @@ export default function OnlineOrdersScreen() {
   const totalCount = useMemo(() => countDocs("web_orders"), [webOrderRevision]);
   const list = showDone ? history : active;
 
-  /** Turn a web order into a real (unpaid) receipt and deduct stock. */
+  /** Turn a web order into a real (unpaid) receipt. */
   const bill = (order: WebOrder) => {
     feedbackTap();
     Alert.alert(
@@ -52,9 +52,8 @@ export default function OnlineOrdersScreen() {
         {
           text: "Create receipt",
           onPress: () => {
-            // Receipt, stock movements, audit entry and the order's receipt link
-            // commit as one unit, so a web order can never end up billed without
-            // its stock moved (or the reverse).
+            // Receipt, any stock movements, audit entry and the order's receipt
+            // link commit as one unit.
             const receipt = runAtomic(() => {
               const billed = billWebOrder({
                 order,
@@ -62,14 +61,19 @@ export default function OnlineOrdersScreen() {
                 storeReference: store.reference,
                 servedBy: user?.name ?? "Staff",
               });
-              recordSale(
-                order.lines.map((l) => ({
-                  productId: l.productId,
-                  variantId: l.variantId,
-                  qty: l.quantity,
-                })),
-                billed.id,
-              );
+              // The server took the stock when the order was accepted. Only an
+              // order this phone hasn't heard that about yet records the sale;
+              // the server voids that copy if it turns out to be a duplicate.
+              if (!order.stockDeductedAt) {
+                recordSale(
+                  order.lines.map((l) => ({
+                    productId: l.productId,
+                    variantId: l.variantId,
+                    qty: l.quantity,
+                  })),
+                  billed.id,
+                );
+              }
               attachReceipt(order.id, billed.id);
               return billed;
             });
@@ -100,16 +104,23 @@ export default function OnlineOrdersScreen() {
 
   const cancel = (order: WebOrder) => {
     feedbackTap();
-    Alert.alert("Cancel order?", `${order.code} from ${order.tableName} will be marked cancelled.`, [
-      { text: "Keep", style: "cancel" },
-      { text: "Cancel order", style: "destructive", onPress: () => setStatus(order.id, "cancelled") },
-    ]);
+    const accepted = order.status !== "received";
+    Alert.alert(
+      "Cancel order?",
+      `${order.code} from ${order.tableName} will be marked cancelled.${
+        accepted ? "\n\nIts items go back into stock." : ""
+      }`,
+      [
+        { text: "Keep", style: "cancel" },
+        { text: "Cancel order", style: "destructive", onPress: () => setStatus(order.id, "cancelled") },
+      ],
+    );
   };
 
   if (!can("sale:create")) {
     return (
       <SafeAreaView edges={["top"]} style={styles.root}>
-        <Toolbar title="VIP ORDERS" onBack={() => router.back()} onRefresh={reload} />
+        <Toolbar title="VIP Orders" onBack={() => router.back()} onRefresh={reload} />
         <View style={styles.empty}>
           <Ionicons name="lock-closed-outline" size={44} color={colors.grey400} />
           <Text style={styles.emptyText}>Your role can't take orders.</Text>
@@ -120,46 +131,40 @@ export default function OnlineOrdersScreen() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root}>
-      <Toolbar
-        title="VIP ORDERS"
-        onBack={() => router.back()}
-        onRefresh={reload}
-        onTestPush={testPush}
-      />
+      <Toolbar title="VIP Orders" onBack={() => router.back()} onRefresh={reload} onTestPush={testPush} />
 
       <View style={styles.filterBar}>
-        <Pressable
-          style={[styles.filter, !showDone && styles.filterOn]}
-          onPress={() => {
-            feedbackTap();
-            setShowDone(false);
-          }}
-        >
-          <Text style={[styles.filterText, !showDone && styles.filterTextOn]}>
-            OPEN ({active.length})
-          </Text>
-        </Pressable>
-        <Pressable
-          style={[styles.filter, showDone && styles.filterOn]}
-          onPress={() => {
-            feedbackTap();
-            setShowDone(true);
-          }}
-        >
-          <Text style={[styles.filterText, showDone && styles.filterTextOn]}>
-            ALL ({totalCount})
-          </Text>
-        </Pressable>
+        <View style={styles.segment}>
+          {(
+            [
+              [false, `Open · ${active.length}`],
+              [true, `All · ${totalCount}`],
+            ] as const
+          ).map(([done, label]) => (
+            <Pressable
+              key={label}
+              style={[styles.segBtn, showDone === done && styles.segBtnOn]}
+              onPress={() => {
+                feedbackTap();
+                setShowDone(done);
+              }}
+            >
+              <Text style={[styles.segText, showDone === done && styles.segTextOn]}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={[{ padding: 6, paddingBottom: 30 }, centeredContent]}>
+      <ScrollView contentContainerStyle={[styles.listBody, centeredContent]}>
         {list.length === 0 && (
           <View style={styles.setup}>
-            <MaterialCommunityIcons name="qrcode-scan" size={44} color={colors.primary} />
-            <Text style={styles.setupTitle}>No VIP orders yet</Text>
+            <View style={styles.setupIcon}>
+              <MaterialCommunityIcons name="qrcode-scan" size={30} color={colors.primaryDark} />
+            </View>
+            <Text style={styles.setupTitle}>{showDone ? "No VIP orders yet" : "No open VIP orders"}</Text>
             <Text style={styles.setupText}>
-              Guests order by scanning the QR code on their table. Each table has its own code —
-              that's how the order arrives labelled for the right table.
+              Guests order by scanning the QR code on their table. Each table has its own code, so
+              the order arrives labelled for the right table.
             </Text>
 
             <View style={styles.steps}>
@@ -176,7 +181,7 @@ export default function OnlineOrdersScreen() {
               }}
             >
               <MaterialCommunityIcons name="table-furniture" size={18} color={colors.white} />
-              <Text style={styles.setupBtnText}>OPEN TABLE MANAGEMENT</Text>
+              <Text style={styles.setupBtnText}>Open Table Management</Text>
             </Pressable>
 
             <Text style={styles.setupNote}>
@@ -228,12 +233,12 @@ function Toolbar({
   return (
     <View style={styles.toolbar}>
       <Pressable onPress={onBack} style={styles.toolbarBtn} hitSlop={8}>
-        <Ionicons name="arrow-back" size={24} color={colors.primary} />
+        <Ionicons name="arrow-back" size={24} color={colors.grey900} />
       </Pressable>
       <Text style={styles.toolbarTitle}>{title}</Text>
       {onTestPush && (
         <Pressable onPress={onTestPush} style={styles.toolbarBtn} hitSlop={8}>
-          <Ionicons name="notifications-outline" size={21} color={colors.primary} />
+          <Ionicons name="notifications-outline" size={21} color={colors.grey700} />
         </Pressable>
       )}
       <Pressable
@@ -244,19 +249,21 @@ function Toolbar({
         style={styles.toolbarBtn}
         hitSlop={8}
       >
-        <Ionicons name="refresh" size={22} color={colors.primary} />
+        <Ionicons name="refresh" size={22} color={colors.grey700} />
       </Pressable>
     </View>
   );
 }
 
-const STATUS_META: Record<WebOrderStatus, { label: string; color: string }> = {
-  received: { label: "NEW", color: "#E53935" },
-  preparing: { label: "PREPARING", color: "#EF6C00" },
-  ready: { label: "READY", color: "#0277BD" },
-  served: { label: "SERVED", color: "#2E7D32" },
-  cancelled: { label: "CANCELLED", color: "#9E9E9E" },
+const STATUS_META: Record<WebOrderStatus, { label: string; color: string; tint: string }> = {
+  received: { label: "New", color: "#D32F2F", tint: "#FDECEA" },
+  preparing: { label: "Preparing", color: "#E65100", tint: "#FFF3E0" },
+  ready: { label: "Ready", color: "#0277BD", tint: "#E1F5FE" },
+  served: { label: "Billed", color: "#2E7D32", tint: "#E8F5E9" },
+  cancelled: { label: "Cancelled", color: "#757575", tint: "#F1F1F1" },
 };
+
+const FLOW: readonly WebOrderStatus[] = ["received", "preparing", "ready", "served"];
 
 /** How long ago, in plain words. */
 function ago(ts: number): string {
@@ -283,32 +290,52 @@ function OrderCard({
 }) {
   const meta = STATUS_META[order.status];
   const open = order.status === "received" || order.status === "preparing" || order.status === "ready";
+  const step = FLOW.indexOf(order.status);
+  const itemCount = order.lines.reduce((n, l) => n + l.quantity, 0);
+  const isNew = order.status === "received";
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, isNew && styles.cardNew]}>
       <View style={styles.cardTop}>
-        <View style={{ flex: 1 }}>
-          <View style={styles.codeRow}>
-            <Text style={styles.code}>{order.code}</Text>
-            <View style={[styles.pill, { backgroundColor: meta.color }]}>
-              <Text style={styles.pillText}>{meta.label}</Text>
-            </View>
-          </View>
-          <Text style={styles.table}>
-            {order.tableName} · {ago(order.createdAt)}
-          </Text>
-          {order.guestName ? <Text style={styles.guest}>Guest: {order.guestName}</Text> : null}
+        <View style={[styles.tableBadge, { backgroundColor: meta.tint }]}>
+          <MaterialCommunityIcons name="table-furniture" size={20} color={meta.color} />
         </View>
-        <Text style={styles.total}>{formatMoney(order.total, order.currency)}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.table} numberOfLines={1}>
+            {order.tableName}
+          </Text>
+          <Text style={styles.sub} numberOfLines={1}>
+            {order.code} · {ago(order.createdAt)}
+            {order.guestName ? ` · ${order.guestName}` : ""}
+          </Text>
+        </View>
+        <View style={[styles.pill, { backgroundColor: meta.tint }]}>
+          <View style={[styles.pillDot, { backgroundColor: meta.color }]} />
+          <Text style={[styles.pillText, { color: meta.color }]}>{meta.label}</Text>
+        </View>
       </View>
+
+      {step >= 0 ? (
+        <View style={styles.progress}>
+          {FLOW.map((s, i) => (
+            <View
+              key={s}
+              style={[styles.progressSeg, { backgroundColor: i <= step ? meta.color : colors.grey100 }]}
+            />
+          ))}
+        </View>
+      ) : null}
 
       <View style={styles.lines}>
         {order.lines.map((l, i) => (
           <View key={i} style={styles.lineRow}>
             <Text style={styles.lineQty}>{l.quantity}×</Text>
-            <Text style={styles.lineName} numberOfLines={1}>
-              {displayItemName(l.name, l.variantName)}
-            </Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.lineName} numberOfLines={2}>
+                {displayItemName(l.name, l.variantName)}
+              </Text>
+              {l.note ? <Text style={styles.lineNote}>{l.note}</Text> : null}
+            </View>
             <Text style={styles.lineTotal}>{formatMoney(l.lineTotal, order.currency)}</Text>
           </View>
         ))}
@@ -316,32 +343,40 @@ function OrderCard({
 
       {order.note ? (
         <View style={styles.note}>
-          <MaterialCommunityIcons name="chef-hat" size={15} color={colors.primary} />
+          <MaterialCommunityIcons name="chef-hat" size={15} color={colors.grey700} />
           <Text style={styles.noteText}>{order.note}</Text>
         </View>
       ) : null}
 
+      <View style={styles.totalRow}>
+        <Text style={styles.totalLabel}>
+          {itemCount} item{itemCount === 1 ? "" : "s"}
+        </Text>
+        <Text style={styles.total}>{formatMoney(order.total, order.currency)}</Text>
+      </View>
+
       {open && (
         <View style={styles.actions}>
           {order.status === "received" && (
-            <Action label="START PREPARING" onPress={() => onAdvance("preparing")} tone="primary" />
+            <Action icon="check" label="Accept order" onPress={() => onAdvance("preparing")} tone="primary" />
           )}
           {order.status === "preparing" && (
-            <Action label="MARK READY" onPress={() => onAdvance("ready")} tone="primary" />
+            <Action icon="bell-check-outline" label="Mark ready" onPress={() => onAdvance("ready")} tone="primary" />
           )}
           {order.status === "ready" && (
-            <Action label="BILL & PRINT" onPress={onBill} tone="green" />
+            <Action icon="receipt" label="Bill & print" onPress={onBill} tone="green" />
           )}
-          <Pressable style={styles.cancelBtn} onPress={onCancel} hitSlop={6}>
-            <Ionicons name="close" size={18} color={colors.grey500} />
+          <Pressable style={styles.cancelBtn} onPress={onCancel} hitSlop={6} accessibilityLabel="Cancel order">
+            <Ionicons name="close" size={20} color={colors.grey600} />
           </Pressable>
         </View>
       )}
 
       {order.status === "served" && order.receiptId ? (
         <Pressable style={styles.receiptLink} onPress={onOpenReceipt}>
-          <Ionicons name="receipt-outline" size={16} color={colors.primary} />
-          <Text style={styles.receiptLinkText}>VIEW RECEIPT</Text>
+          <Ionicons name="receipt-outline" size={16} color={colors.primaryDark} />
+          <Text style={styles.receiptLinkText}>View receipt</Text>
+          <Ionicons name="chevron-forward" size={16} color={colors.primaryDark} />
         </Pressable>
       ) : null}
     </View>
@@ -361,20 +396,23 @@ function Step({ n, text }: { n: number; text: string }) {
 }
 
 function Action({
+  icon,
   label,
   onPress,
   tone,
 }: {
+  icon: ComponentProps<typeof MaterialCommunityIcons>["name"];
   label: string;
   onPress: () => void;
   tone: "primary" | "green";
 }) {
   return (
     <Pressable
-      style={[styles.action, { backgroundColor: tone === "green" ? colors.green : colors.primary }]}
+      style={[styles.action, { backgroundColor: tone === "green" ? colors.green : colors.primaryDark }]}
       onPress={onPress}
       android_ripple={{ color: "#FFFFFF33" }}
     >
+      <MaterialCommunityIcons name={icon} size={18} color={colors.white} />
       <Text style={styles.actionText}>{label}</Text>
     </Pressable>
   );
@@ -385,140 +423,136 @@ const styles = StyleSheet.create({
   toolbar: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.grey50,
+    backgroundColor: colors.white,
     height: 56,
     paddingHorizontal: 4,
-    elevation: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.grey100,
   },
   toolbarBtn: { width: 44, alignItems: "center" },
-  toolbarTitle: { flex: 1, fontSize: 17, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
+  toolbarTitle: { flex: 1, fontSize: 18, fontWeight: "800", color: colors.grey900 },
 
-  filterBar: {
-    flexDirection: "row",
-    gap: 8,
-    padding: 8,
-    backgroundColor: colors.card,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.grey300,
-  },
-  filter: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: colors.grey300,
-    alignItems: "center",
-  },
-  filterOn: { backgroundColor: colors.primary, borderColor: colors.primary },
-  filterText: { fontSize: 12, fontWeight: "800", color: colors.grey700, letterSpacing: 0.4 },
-  filterTextOn: { color: colors.white },
+  filterBar: { paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.white },
+  segment: { flexDirection: "row", backgroundColor: colors.grey100, borderRadius: 12, padding: 3 },
+  segBtn: { flex: 1, paddingVertical: 8, borderRadius: 10, alignItems: "center" },
+  segBtnOn: { backgroundColor: colors.white, elevation: 1 },
+  segText: { fontSize: 13, fontWeight: "700", color: colors.grey600 },
+  segTextOn: { color: colors.grey900 },
 
+  listBody: { padding: 12, paddingBottom: 30 },
   empty: { alignItems: "center", justifyContent: "center", padding: 40, gap: 14 },
   emptyText: { color: colors.grey600, fontSize: 14, textAlign: "center", lineHeight: 20 },
 
-  setup: {
-    alignItems: "center",
-    backgroundColor: colors.card,
-    borderRadius: 6,
-    margin: 6,
-    padding: 22,
-    elevation: 1,
-  },
-  setupTitle: { fontSize: 17, fontWeight: "800", color: colors.grey900, marginTop: 12 },
-  setupText: {
-    fontSize: 13,
-    color: colors.grey600,
-    textAlign: "center",
-    lineHeight: 19,
-    marginTop: 6,
-  },
-  steps: { alignSelf: "stretch", gap: 10, marginTop: 18 },
-  stepRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  stepNum: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: colors.primary,
+  setup: { alignItems: "center", backgroundColor: colors.white, borderRadius: 18, padding: 22 },
+  setupIcon: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: colors.grey100,
     alignItems: "center",
     justifyContent: "center",
   },
-  stepNumText: { color: colors.white, fontSize: 11, fontWeight: "800" },
+  setupTitle: { fontSize: 17, fontWeight: "800", color: colors.grey900, marginTop: 12 },
+  setupText: { fontSize: 13, color: colors.grey600, textAlign: "center", lineHeight: 19, marginTop: 6 },
+  steps: { alignSelf: "stretch", gap: 10, marginTop: 18 },
+  stepRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  stepNum: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.primaryDark,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepNumText: { color: colors.white, fontSize: 12, fontWeight: "800" },
   stepText: { flex: 1, fontSize: 13, color: colors.grey800 },
   setupBtn: {
     alignSelf: "stretch",
     flexDirection: "row",
     gap: 8,
-    height: 46,
-    borderRadius: 6,
-    backgroundColor: colors.green,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: colors.primaryDark,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 20,
   },
-  setupBtnText: { color: colors.white, fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
+  setupBtnText: { color: colors.white, fontSize: 14, fontWeight: "800" },
   setupNote: { fontSize: 11, color: colors.grey500, textAlign: "center", marginTop: 12 },
 
   card: {
-    backgroundColor: colors.card,
-    borderRadius: 5,
-    marginBottom: 8,
-    padding: 12,
-    elevation: 1,
+    backgroundColor: colors.white,
+    borderRadius: 18,
+    marginBottom: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.grey100,
   },
-  cardTop: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
-  codeRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  code: { fontSize: 18, fontWeight: "800", color: colors.grey900, letterSpacing: 0.5 },
-  pill: { borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
-  pillText: { color: colors.white, fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
-  table: { fontSize: 13, color: colors.grey700, marginTop: 3, fontWeight: "600" },
-  guest: { fontSize: 12, color: colors.grey600, marginTop: 1 },
-  total: { fontSize: 17, fontWeight: "800", color: colors.green },
+  cardNew: { borderColor: "#F5B7B1", borderWidth: 1.5 },
+  cardTop: { flexDirection: "row", alignItems: "center", gap: 12 },
+  tableBadge: { width: 42, height: 42, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  table: { fontSize: 17, fontWeight: "800", color: colors.grey900 },
+  sub: { fontSize: 12, color: colors.grey600, marginTop: 2 },
+  pill: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
+  pillDot: { width: 6, height: 6, borderRadius: 3 },
+  pillText: { fontSize: 12, fontWeight: "800" },
 
-  lines: {
-    marginTop: 10,
-    paddingTop: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.grey300,
-    gap: 3,
-  },
-  lineRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  lineQty: { fontSize: 13, fontWeight: "800", color: colors.primary, minWidth: 26 },
-  lineName: { flex: 1, fontSize: 14, color: colors.grey800 },
+  progress: { flexDirection: "row", gap: 4, marginTop: 12 },
+  progressSeg: { flex: 1, height: 4, borderRadius: 2 },
+
+  lines: { marginTop: 12, gap: 8 },
+  lineRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  lineQty: { fontSize: 14, fontWeight: "800", color: colors.primaryDark, minWidth: 26 },
+  lineName: { fontSize: 14, fontWeight: "600", color: colors.grey900 },
+  lineNote: { fontSize: 12, color: colors.grey600, marginTop: 1 },
   lineTotal: { fontSize: 13, color: colors.grey700, fontWeight: "600" },
 
   note: {
     flexDirection: "row",
     gap: 7,
-    alignItems: "center",
-    backgroundColor: colors.blue50,
-    borderRadius: 4,
-    padding: 8,
-    marginTop: 9,
+    alignItems: "flex-start",
+    backgroundColor: colors.grey50,
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 10,
   },
-  noteText: { flex: 1, fontSize: 12, color: colors.primary },
+  noteText: { flex: 1, fontSize: 13, color: colors.grey800 },
+
+  totalRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.grey100,
+  },
+  totalLabel: { fontSize: 13, color: colors.grey600, fontWeight: "600" },
+  total: { fontSize: 19, fontWeight: "900", color: colors.grey900 },
 
   actions: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
   action: {
     flex: 1,
-    height: 42,
-    borderRadius: 4,
+    height: 48,
+    borderRadius: 14,
+    flexDirection: "row",
+    gap: 7,
     alignItems: "center",
     justifyContent: "center",
   },
-  actionText: { color: colors.white, fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
+  actionText: { color: colors.white, fontSize: 15, fontWeight: "800" },
   cancelBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: colors.grey300,
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: colors.grey100,
     alignItems: "center",
     justifyContent: "center",
   },
 
   more: { alignItems: "center", paddingVertical: 16 },
-  moreText: { color: colors.primary, fontWeight: "700", fontSize: 15 },
+  moreText: { color: colors.primaryDark, fontWeight: "700", fontSize: 15 },
 
   receiptLink: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingVertical: 4 },
-  receiptLinkText: { color: colors.primary, fontSize: 12, fontWeight: "800", letterSpacing: 0.4 },
+  receiptLinkText: { color: colors.primaryDark, fontSize: 14, fontWeight: "700" },
 });

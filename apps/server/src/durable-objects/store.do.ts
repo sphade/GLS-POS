@@ -24,6 +24,7 @@ import type {
   SyncPushRequest,
   WebOrder,
   WebOrderLine,
+  WebOrderStatus,
 } from "@gls-pos/types";
 import {
   readableSyncCollections,
@@ -761,6 +762,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     const newMovements: SyncChange[] = [];
     const newMovementIds = new Set<string>();
     const newIngredientMovements: IngredientMovement[] = [];
+    const webOrderStock: { id: string; prevStatus?: WebOrderStatus; status: WebOrderStatus }[] = [];
     const newReceipts: unknown[] = [];
     const now = Date.now();
 
@@ -826,6 +828,18 @@ export class StoreDurableObject extends DurableObject<Env> {
       if (change.collection === "held_orders" && !change.deleted) {
         data = stripHeldOrderCosts(data);
       }
+      if (change.collection === "web_orders" && !change.deleted && data && typeof data === "object") {
+        // Stock bookkeeping is server-owned: a device copy that predates it
+        // must never wipe the markers, or the stock would move twice.
+        const prev = existing ? (JSON.parse(existing.data) as WebOrder) : null;
+        const next = data as WebOrder;
+        data = {
+          ...next,
+          stockDeductedAt: prev?.stockDeductedAt,
+          stockRestoredAt: prev?.stockRestoredAt,
+        };
+        webOrderStock.push({ id: change.id, prevStatus: prev?.status, status: next.status });
+      }
       if (change.collection === "ingredients" && !change.deleted) {
         data = sanitizeIngredient(change.data, existing?.data) ?? change.data;
       }
@@ -873,8 +887,33 @@ export class StoreDurableObject extends DurableObject<Env> {
         .run();
     }
 
+    // VIP orders move menu stock on acceptance (and put it back on a cancel)
+    // before device movements are applied, so the billing guard below can see
+    // that an order's stock has already left.
+    for (const entry of webOrderStock) {
+      const before = seq;
+      seq = this.syncWebOrderStock(entry.id, entry.prevStatus, entry.status, seq, actor, role);
+      if (seq !== before) appliedAny = true;
+    }
+
     // Apply the new movements' deltas to the (now-written) product docs.
     for (const movement of newMovements) {
+      if (this.isDuplicateVipSale(movement)) {
+        // An older app build billed a VIP order and recorded the sale again.
+        // The stock already left when the order was accepted: void the copy.
+        seq += 1;
+        this.db
+          .update(schema.documents)
+          .set({ deleted: true, serverSeq: seq, updatedAt: Date.now() })
+          .where(
+            and(
+              eq(schema.documents.collection, "stock_movements"),
+              eq(schema.documents.id, movement.id),
+            ),
+          )
+          .run();
+        continue;
+      }
       seq = this.applyMovementDelta(movement, seq);
     }
 
@@ -1156,6 +1195,107 @@ export class StoreDurableObject extends DurableObject<Env> {
       .run();
 
     return nextSeq;
+  }
+
+  // --- VIP order stock ------------------------------------------------------
+
+  /**
+   * Move menu stock for a VIP order when staff act on it.
+   *
+   *  - Leaving "received" (accepted, ready or served) takes the items out of
+   *    stock once, so the guest menu shows them sold out straight away.
+   *  - Cancelling after that puts them back once.
+   *
+   * A brand-new order never touches stock: a prank or mistaken order costs
+   * nothing until someone accepts it. Movement ids are derived from the order,
+   * so a retried push moves nothing twice.
+   */
+  private syncWebOrderStock(
+    orderId: string,
+    prevStatus: WebOrderStatus | undefined,
+    status: WebOrderStatus,
+    seq: number,
+    actor: StockActor | undefined,
+    role: StoreRole,
+  ): number {
+    const order = this.doc<WebOrder>("web_orders", orderId);
+    if (!order || prevStatus === status) return seq;
+
+    const accept = status !== "received" && status !== "cancelled" && !order.stockDeductedAt;
+    const restore = status === "cancelled" && !!order.stockDeductedAt && !order.stockRestoredAt;
+    if (!accept && !restore) return seq;
+
+    let next = seq;
+    const now = Date.now();
+    order.lines.forEach((line, index) => {
+      const product = this.doc<StoredProduct>("products", line.productId);
+      if (!product || line.quantity <= 0) return;
+      const variant = line.variantId
+        ? product.variants?.find((v) => v.id === line.variantId)
+        : undefined;
+      const tracked = line.variantId
+        ? variant != null && variant.stock != null && variant.autoUpdateStock !== false
+        : product.stockQuantity != null && product.autoUpdateStock !== false;
+      if (!tracked) return;
+
+      const id = `mov_vip${accept ? "" : "ret"}_${order.id}_${index}`;
+      if (this.doc("stock_movements", id)) return;
+      const movement: StockMovement = {
+        id,
+        productId: product.id,
+        productName: product.name,
+        ...(variant ? { variantId: variant.id, variantName: variant.name } : {}),
+        reason: accept ? "sale" : "return",
+        delta: accept ? -line.quantity : line.quantity,
+        resulting: 0,
+        at: now,
+        ref: `vip:${order.id}`,
+        note: accept
+          ? `VIP order ${order.code} accepted (${order.tableName})`
+          : `VIP order ${order.code} cancelled`,
+        ...(actor
+          ? { actorId: actor.id, actorName: actor.name, actorEmail: actor.email, actorRole: role }
+          : {}),
+      };
+      next += 1;
+      this.writeDoc("stock_movements", id, movement, next);
+      next = this.applyMovementDelta(
+        { collection: "stock_movements", id, data: movement, updatedAt: now, deleted: false },
+        next,
+      );
+    });
+
+    // Keep the order's own edit clock: bumping it to server time could make a
+    // phone's next status change look older and get dropped.
+    next += 1;
+    const marked = { ...order, ...(accept ? { stockDeductedAt: now } : { stockRestoredAt: now }) };
+    this.db
+      .update(schema.documents)
+      .set({ data: JSON.stringify(marked), serverSeq: next })
+      .where(and(eq(schema.documents.collection, "web_orders"), eq(schema.documents.id, order.id)))
+      .run();
+    return next;
+  }
+
+  /**
+   * True for a device "sale" movement that bills a VIP order whose stock the
+   * server already took on acceptance. Older app builds still record one.
+   */
+  private isDuplicateVipSale(movement: SyncChange): boolean {
+    const data = movement.data as { reason?: unknown; ref?: unknown } | null;
+    if (!data || data.reason !== "sale" || typeof data.ref !== "string" || !data.ref) return false;
+    const row = this.db
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "web_orders"),
+          sql`json_extract(${schema.documents.data}, '$.receiptId') = ${data.ref}`,
+          sql`json_extract(${schema.documents.data}, '$.stockDeductedAt') IS NOT NULL`,
+        ),
+      )
+      .get();
+    return !!row;
   }
 
   // --- Ingredient ledger & central transfers ---------------------------------

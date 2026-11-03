@@ -8,6 +8,7 @@ import { HttpError } from "../../lib/http-error.js";
 import { placeWebOrderSchema } from "./vip.schema.js";
 import { renderVipPage } from "./vip.page.js";
 import { notifyStore } from "../push/push.service.js";
+import { VIP_ORDER_ROLES } from "@gls-pos/types";
 
 /**
  * VIP guest ordering — the only PUBLIC part of the API.
@@ -87,6 +88,12 @@ vip.post(
       if (result.error === "rate_limited") {
         throw new HttpError(429, "rate_limited", "Too many orders just now — please wait a moment.");
       }
+      if (result.error === "insufficient_stock") {
+        throw HttpError.badRequest(
+          "Sorry, something in your order just sold out. The menu will refresh.",
+          "insufficient_stock",
+        );
+      }
       throw HttpError.badRequest("None of those items are available right now", result.error);
     }
     // Alert staff phones even if the app is closed or the screen is locked.
@@ -106,8 +113,8 @@ vip.post(
           // Ring the shop's own chime, not the phone's email tone.
           tone: "vip",
         },
-        // Floor leads act on orders; owners and cashiers are not interrupted.
-        { roles: ["manager", "supervisor"] },
+        // Only the roles that receive VIP orders; see VIP_ORDER_ROLES.
+        { roles: [...VIP_ORDER_ROLES] },
       ).catch(() => undefined),
     );
 
