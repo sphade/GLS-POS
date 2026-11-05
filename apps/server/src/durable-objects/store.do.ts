@@ -7,6 +7,10 @@ import type {
   ApiCategory,
   ApiProduct,
   ApiStockAdjustment,
+  Ingredient,
+  IngredientMovement,
+  RecipeLine,
+  StockTransfer,
   PlaceWebOrderRequest,
   PublicMenu,
   StockMovement,
@@ -20,6 +24,7 @@ import type {
   SyncPushRequest,
   WebOrder,
   WebOrderLine,
+  WebOrderStatus,
 } from "@gls-pos/types";
 import {
   readableSyncCollections,
@@ -30,6 +35,19 @@ import {
 import type { Env } from "../env.js";
 import * as schema from "./schema.js";
 import migrations from "./migrations/migrations.js";
+import {
+  SERVER_ONLY_REASONS,
+  applyDelta,
+  currentStock,
+  ingredientMovementOf,
+  sanitizeIngredient,
+} from "./ingredients.js";
+
+/**
+ * Undelivered outgoing transfers. Not a sync collection, so no role can read it
+ * and it never reaches a device.
+ */
+const TRANSFER_OUTBOX = "_transfer_outbox";
 
 /** Public VIP endpoint throttle: at most N orders per table per window. */
 const RATE_WINDOW_MS = 60_000;
@@ -701,12 +719,13 @@ export class StoreDurableObject extends DurableObject<Env> {
     };
 
     for (const change of request.changes) {
-      if (change.collection === "stock_movements") {
-        if (incomingMovementIds.has(change.id)) {
+      if (change.collection === "stock_movements" || change.collection === "ingredient_movements") {
+        const key = `${change.collection}/${change.id}`;
+        if (incomingMovementIds.has(key)) {
           refuse(change);
           continue;
         }
-        incomingMovementIds.add(change.id);
+        incomingMovementIds.add(key);
       }
       const key = `${change.collection}/${change.id}`;
       const [existing] = this.db
@@ -742,6 +761,9 @@ export class StoreDurableObject extends DurableObject<Env> {
     // pre-push state, and applied after all product docs are written below.
     const newMovements: SyncChange[] = [];
     const newMovementIds = new Set<string>();
+    const newIngredientMovements: IngredientMovement[] = [];
+    const webOrderStock: { id: string; prevStatus?: WebOrderStatus; status: WebOrderStatus }[] = [];
+    const newReceipts: unknown[] = [];
     const now = Date.now();
 
     // All SQL below is synchronous and there is no `await` between statements.
@@ -764,7 +786,26 @@ export class StoreDurableObject extends DurableObject<Env> {
       // Stock movements are append-only commands. Once an id exists, a retry
       // may acknowledge it but must never replace the server-normalized
       // before/after balance or its server-stamped actor snapshot.
-      if (change.collection === "stock_movements" && existing) continue;
+      if (
+        (change.collection === "stock_movements" || change.collection === "ingredient_movements") &&
+        existing
+      ) {
+        continue;
+      }
+
+      // Ingredient movements are applied after the batch, like stock movements.
+      if (change.collection === "ingredient_movements") {
+        const movement = ingredientMovementOf(change.data);
+        if (movement && !change.deleted) {
+          newIngredientMovements.push({
+            ...movement,
+            ...(actor
+              ? { actorId: actor.id, actorName: actor.name, actorEmail: actor.email, actorRole: role }
+              : {}),
+          });
+        }
+        continue;
+      }
 
       // Stored version is newer or equal — keep it, drop the incoming change.
       // Ties favour the server copy, which every device sees identically.
@@ -786,6 +827,24 @@ export class StoreDurableObject extends DurableObject<Env> {
       }
       if (change.collection === "held_orders" && !change.deleted) {
         data = stripHeldOrderCosts(data);
+      }
+      if (change.collection === "web_orders" && !change.deleted && data && typeof data === "object") {
+        // Stock bookkeeping is server-owned: a device copy that predates it
+        // must never wipe the markers, or the stock would move twice.
+        const prev = existing ? (JSON.parse(existing.data) as WebOrder) : null;
+        const next = data as WebOrder;
+        data = {
+          ...next,
+          stockDeductedAt: prev?.stockDeductedAt,
+          stockRestoredAt: prev?.stockRestoredAt,
+        };
+        webOrderStock.push({ id: change.id, prevStatus: prev?.status, status: next.status });
+      }
+      if (change.collection === "ingredients" && !change.deleted) {
+        data = sanitizeIngredient(change.data, existing?.data) ?? change.data;
+      }
+      if (change.collection === "receipts" && !existing && !change.deleted) {
+        newReceipts.push(data);
       }
       if (change.collection === "products" && !change.deleted) {
         if (!roleCanReadProductCosts(role)) {
@@ -828,9 +887,45 @@ export class StoreDurableObject extends DurableObject<Env> {
         .run();
     }
 
+    // VIP orders move menu stock on acceptance (and put it back on a cancel)
+    // before device movements are applied, so the billing guard below can see
+    // that an order's stock has already left.
+    for (const entry of webOrderStock) {
+      const before = seq;
+      seq = this.syncWebOrderStock(entry.id, entry.prevStatus, entry.status, seq, actor, role);
+      if (seq !== before) appliedAny = true;
+    }
+
     // Apply the new movements' deltas to the (now-written) product docs.
     for (const movement of newMovements) {
+      if (this.isDuplicateVipSale(movement)) {
+        // An older app build billed a VIP order and recorded the sale again.
+        // The stock already left when the order was accepted: void the copy.
+        seq += 1;
+        this.db
+          .update(schema.documents)
+          .set({ deleted: true, serverSeq: seq, updatedAt: Date.now() })
+          .where(
+            and(
+              eq(schema.documents.collection, "stock_movements"),
+              eq(schema.documents.id, movement.id),
+            ),
+          )
+          .run();
+        continue;
+      }
       seq = this.applyMovementDelta(movement, seq);
+    }
+
+    // Ingredient ledger: device movements first, then recipe use by new sales.
+    for (const movement of newIngredientMovements) {
+      seq = this.applyIngredientMovement(movement, seq);
+      appliedAny = true;
+    }
+    for (const receipt of newReceipts) {
+      const before = seq;
+      seq = this.deductRecipesForReceipt(receipt, seq);
+      if (seq !== before) appliedAny = true;
     }
 
     // Let other devices know there's something to pull (e.g. one till marks an
@@ -883,6 +978,15 @@ export class StoreDurableObject extends DurableObject<Env> {
     // discount. Tombstones carry no money to check.
     if (!change.deleted && !syncMoneyDocumentIsConsistent(change.collection, change.data)) {
       return false;
+    }
+
+    if (change.collection === "ingredient_movements") {
+      const movement = ingredientMovementOf(change.data);
+      if (!movement || movement.id !== change.id || SERVER_ONLY_REASONS.has(movement.reason)) {
+        return false;
+      }
+      // A retry of a movement we already hold is acknowledged, never replayed.
+      return !storedJson || (JSON.parse(storedJson) as { ingredientId?: string }).ingredientId === movement.ingredientId;
     }
 
     if (change.collection === "stock_movements") {
@@ -1091,6 +1195,446 @@ export class StoreDurableObject extends DurableObject<Env> {
       .run();
 
     return nextSeq;
+  }
+
+  // --- VIP order stock ------------------------------------------------------
+
+  /**
+   * Move menu stock for a VIP order when staff act on it.
+   *
+   *  - Leaving "received" (accepted, ready or served) takes the items out of
+   *    stock once, so the guest menu shows them sold out straight away.
+   *  - Cancelling after that puts them back once.
+   *
+   * A brand-new order never touches stock: a prank or mistaken order costs
+   * nothing until someone accepts it. Movement ids are derived from the order,
+   * so a retried push moves nothing twice.
+   */
+  private syncWebOrderStock(
+    orderId: string,
+    prevStatus: WebOrderStatus | undefined,
+    status: WebOrderStatus,
+    seq: number,
+    actor: StockActor | undefined,
+    role: StoreRole,
+  ): number {
+    const order = this.doc<WebOrder>("web_orders", orderId);
+    if (!order || prevStatus === status) return seq;
+
+    const accept = status !== "received" && status !== "cancelled" && !order.stockDeductedAt;
+    const restore = status === "cancelled" && !!order.stockDeductedAt && !order.stockRestoredAt;
+    if (!accept && !restore) return seq;
+
+    let next = seq;
+    const now = Date.now();
+    order.lines.forEach((line, index) => {
+      const product = this.doc<StoredProduct>("products", line.productId);
+      if (!product || line.quantity <= 0) return;
+      const variant = line.variantId
+        ? product.variants?.find((v) => v.id === line.variantId)
+        : undefined;
+      const tracked = line.variantId
+        ? variant != null && variant.stock != null && variant.autoUpdateStock !== false
+        : product.stockQuantity != null && product.autoUpdateStock !== false;
+      if (!tracked) return;
+
+      const id = `mov_vip${accept ? "" : "ret"}_${order.id}_${index}`;
+      if (this.doc("stock_movements", id)) return;
+      const movement: StockMovement = {
+        id,
+        productId: product.id,
+        productName: product.name,
+        ...(variant ? { variantId: variant.id, variantName: variant.name } : {}),
+        reason: accept ? "sale" : "return",
+        delta: accept ? -line.quantity : line.quantity,
+        resulting: 0,
+        at: now,
+        ref: `vip:${order.id}`,
+        note: accept
+          ? `VIP order ${order.code} accepted (${order.tableName})`
+          : `VIP order ${order.code} cancelled`,
+        ...(actor
+          ? { actorId: actor.id, actorName: actor.name, actorEmail: actor.email, actorRole: role }
+          : {}),
+      };
+      next += 1;
+      this.writeDoc("stock_movements", id, movement, next);
+      next = this.applyMovementDelta(
+        { collection: "stock_movements", id, data: movement, updatedAt: now, deleted: false },
+        next,
+      );
+    });
+
+    // Keep the order's own edit clock: bumping it to server time could make a
+    // phone's next status change look older and get dropped.
+    next += 1;
+    const marked = { ...order, ...(accept ? { stockDeductedAt: now } : { stockRestoredAt: now }) };
+    this.db
+      .update(schema.documents)
+      .set({ data: JSON.stringify(marked), serverSeq: next })
+      .where(and(eq(schema.documents.collection, "web_orders"), eq(schema.documents.id, order.id)))
+      .run();
+    return next;
+  }
+
+  /**
+   * True for a device "sale" movement that bills a VIP order whose stock the
+   * server already took on acceptance. Older app builds still record one.
+   */
+  private isDuplicateVipSale(movement: SyncChange): boolean {
+    const data = movement.data as { reason?: unknown; ref?: unknown } | null;
+    if (!data || data.reason !== "sale" || typeof data.ref !== "string" || !data.ref) return false;
+    const row = this.db
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "web_orders"),
+          sql`json_extract(${schema.documents.data}, '$.receiptId') = ${data.ref}`,
+          sql`json_extract(${schema.documents.data}, '$.stockDeductedAt') IS NOT NULL`,
+        ),
+      )
+      .get();
+    return !!row;
+  }
+
+  // --- Ingredient ledger & central transfers ---------------------------------
+
+  /** One stored document, decoded, or null. */
+  private doc<T>(collection: string, id: string): T | null {
+    const row = this.db
+      .select({ data: schema.documents.data, deleted: schema.documents.deleted })
+      .from(schema.documents)
+      .where(and(eq(schema.documents.collection, collection), eq(schema.documents.id, id)))
+      .get();
+    return row && !row.deleted ? (JSON.parse(row.data) as T) : null;
+  }
+
+  /** Upsert one server-authored document at the next seq. */
+  private writeDoc(collection: string, id: string, data: unknown, seq: number, deleted = false): void {
+    const json = JSON.stringify(data);
+    const now = Date.now();
+    this.db
+      .insert(schema.documents)
+      .values({ collection, id, data: json, updatedAt: now, deleted, serverSeq: seq })
+      .onConflictDoUpdate({
+        target: [schema.documents.collection, schema.documents.id],
+        set: { data: json, updatedAt: now, deleted, serverSeq: seq },
+      })
+      .run();
+  }
+
+  /**
+   * Apply one ingredient movement to its ingredient and store the movement with
+   * the balance the server actually applied. Stock never goes below zero; a
+   * clamped request keeps its `requestedDelta` so the history explains itself.
+   * Movements for an unknown ingredient are stored but move nothing.
+   */
+  private applyIngredientMovement(movement: IngredientMovement, seq: number): number {
+    let next = seq;
+    const ingredient = this.doc<Ingredient>("ingredients", movement.ingredientId);
+    let normalized: IngredientMovement = movement;
+    if (ingredient) {
+      const { before, resulting, actual } = applyDelta(currentStock(ingredient), movement.delta);
+      normalized = {
+        ...movement,
+        ingredientName: ingredient.name,
+        baseStock: before,
+        delta: actual,
+        resulting,
+        ...(actual !== movement.delta ? { requestedDelta: movement.delta } : {}),
+      };
+      if (actual !== 0 || ingredient.stock !== resulting) {
+        next += 1;
+        this.writeDoc("ingredients", ingredient.id, { ...ingredient, stock: resulting }, next);
+      }
+    }
+    next += 1;
+    this.writeDoc("ingredient_movements", movement.id, normalized, next);
+    return next;
+  }
+
+  /**
+   * Take each sold product's recipe out of ingredient stock. Movement ids are
+   * derived from the receipt, so a receipt pushed twice deducts once.
+   */
+  private deductRecipesForReceipt(receipt: unknown, seq: number): number {
+    if (!receipt || typeof receipt !== "object") return seq;
+    const r = receipt as { id?: unknown; createdAt?: unknown; lines?: unknown };
+    if (typeof r.id !== "string" || !Array.isArray(r.lines)) return seq;
+    let next = seq;
+    const at = typeof r.createdAt === "number" ? r.createdAt : Date.now();
+    r.lines.forEach((raw, index) => {
+      const line = raw as { productId?: unknown; qty?: unknown };
+      if (typeof line.productId !== "string" || typeof line.qty !== "number" || line.qty <= 0) return;
+      const product = this.doc<StoredProduct & { recipe?: RecipeLine[] }>("products", line.productId);
+      if (!product?.recipe?.length) return;
+      for (const part of product.recipe) {
+        const used = Math.round(part.qty * (line.qty as number));
+        if (!Number.isInteger(part.qty) || part.qty <= 0 || used <= 0) continue;
+        const id = `ingmov_rcp_${r.id}_${index}_${part.ingredientId}`;
+        if (this.doc("ingredient_movements", id)) continue;
+        next = this.applyIngredientMovement(
+          {
+            id,
+            ingredientId: part.ingredientId,
+            ingredientName: "",
+            reason: "recipe",
+            delta: -used,
+            resulting: 0,
+            at,
+            ref: r.id as string,
+            note: `Sold ${line.qty} × ${product.name}`,
+          },
+          next,
+        );
+      }
+    });
+    return next;
+  }
+
+  /**
+   * Central side of a transfer. Checks and deducts stock, records the outgoing
+   * transfer and queues its delivery, all in one synchronous SQLite batch, so
+   * the stock can never leave without a record of where it went. Repeating the
+   * same transfer id returns the original and deducts nothing.
+   */
+  async dispatchTransfer(input: {
+    id: string;
+    ingredientId: string;
+    quantity: number;
+    fromStoreId: string;
+    fromStoreName: string;
+    toStoreId: string;
+    toStoreName: string;
+    note?: string;
+    actor: { id: string; name: string; email?: string };
+  }): Promise<
+    | { ok: true; transfer: StockTransfer; duplicate: boolean; lowStock: boolean }
+    | { ok: false; error: "unknown_ingredient" | "invalid_quantity" | "insufficient_stock"; available?: number }
+  > {
+    const existing = this.doc<StockTransfer>("stock_transfers", input.id);
+    if (existing) {
+      this.ctx.waitUntil(this.deliverPendingTransfers());
+      return { ok: true, transfer: existing, duplicate: true, lowStock: false };
+    }
+    if (!Number.isInteger(input.quantity) || input.quantity < 1) {
+      return { ok: false, error: "invalid_quantity" };
+    }
+    const ingredient = this.doc<Ingredient>("ingredients", input.ingredientId);
+    if (!ingredient || ingredient.archived) return { ok: false, error: "unknown_ingredient" };
+    const available = currentStock(ingredient);
+    if (available < input.quantity) {
+      return { ok: false, error: "insufficient_stock", available };
+    }
+
+    const now = Date.now();
+    const note = input.note?.trim().slice(0, 240) || undefined;
+    const transfer: StockTransfer = {
+      id: input.id,
+      direction: "out",
+      status: "sent",
+      fromStoreId: input.fromStoreId,
+      fromStoreName: input.fromStoreName,
+      toStoreId: input.toStoreId,
+      toStoreName: input.toStoreName,
+      ingredientId: ingredient.id,
+      ingredientName: ingredient.name,
+      unit: ingredient.unit,
+      quantity: input.quantity,
+      ...(note ? { note } : {}),
+      sentAt: now,
+      actorId: input.actor.id,
+      actorName: input.actor.name.slice(0, 120),
+    };
+
+    // No await from here to the end of the block: SQLite-backed DOs commit
+    // these statements as one atomic write.
+    let seq = this.currentSeq();
+    seq = this.applyIngredientMovement(
+      {
+        id: `ingmov_tx_${input.id}`,
+        ingredientId: ingredient.id,
+        ingredientName: ingredient.name,
+        reason: "transfer_out",
+        delta: -input.quantity,
+        resulting: 0,
+        at: now,
+        ref: input.id,
+        note: `Sent to ${input.toStoreName}`,
+        actorId: input.actor.id,
+        actorName: input.actor.name,
+      },
+      seq,
+    );
+    seq += 1;
+    this.writeDoc("stock_transfers", transfer.id, transfer, seq);
+    // The outbox lives in a collection no role can read, so it never syncs.
+    seq += 1;
+    this.writeDoc(TRANSFER_OUTBOX, transfer.id, { transferId: transfer.id, attempts: 0 }, seq);
+    this.broadcast("changes");
+
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+    this.ctx.waitUntil(this.deliverPendingTransfers());
+
+    const after = available - input.quantity;
+    return {
+      ok: true,
+      transfer,
+      duplicate: false,
+      lowStock: available > ingredient.lowAt && after <= ingredient.lowAt,
+    };
+  }
+
+  /**
+   * Branch side of a transfer. Credits the branch's copy of the ingredient,
+   * creating it on first delivery. Keyed by transfer id, so the central store
+   * can retry delivery as often as it needs to.
+   */
+  async receiveTransfer(transfer: StockTransfer): Promise<{ ok: true; receivedAt: number }> {
+    const existing = this.doc<StockTransfer>("stock_transfers", transfer.id);
+    if (existing?.receivedAt) return { ok: true, receivedAt: existing.receivedAt };
+
+    const localId = `ing_c_${transfer.ingredientId}`;
+    let seq = this.currentSeq();
+    if (!this.doc<Ingredient>("ingredients", localId)) {
+      seq += 1;
+      this.writeDoc(
+        "ingredients",
+        localId,
+        {
+          id: localId,
+          name: transfer.ingredientName,
+          unit: transfer.unit,
+          stock: 0,
+          lowAt: 0,
+          sourceIngredientId: transfer.ingredientId,
+          sourceStoreId: transfer.fromStoreId,
+        } satisfies Ingredient,
+        seq,
+      );
+    }
+    const receivedAt = Date.now();
+    seq = this.applyIngredientMovement(
+      {
+        id: `ingmov_tx_${transfer.id}`,
+        ingredientId: localId,
+        ingredientName: transfer.ingredientName,
+        reason: "transfer_in",
+        delta: transfer.quantity,
+        resulting: 0,
+        at: receivedAt,
+        ref: transfer.id,
+        note: `From ${transfer.fromStoreName}`,
+        actorId: transfer.actorId,
+        actorName: transfer.actorName,
+      },
+      seq,
+    );
+    seq += 1;
+    this.writeDoc(
+      "stock_transfers",
+      transfer.id,
+      { ...transfer, direction: "in", status: "received", ingredientId: localId, receivedAt } satisfies StockTransfer,
+      seq,
+    );
+    this.broadcast("changes");
+    return { ok: true, receivedAt };
+  }
+
+  /** Try to deliver every queued outgoing transfer. Safe to run concurrently. */
+  private async deliverPendingTransfers(): Promise<void> {
+    const queued = this.docs<{ transferId: string; attempts: number }>(TRANSFER_OUTBOX);
+    let retryLater = false;
+    for (const entry of queued) {
+      const transfer = this.doc<StockTransfer>("stock_transfers", entry.transferId);
+      if (!transfer) {
+        this.writeDoc(TRANSFER_OUTBOX, entry.transferId, entry, this.currentSeq() + 1, true);
+        continue;
+      }
+      try {
+        const branch = this.env.STORE.get(this.env.STORE.idFromName(transfer.toStoreId));
+        const { receivedAt } = await branch.receiveTransfer(transfer);
+        let seq = this.currentSeq() + 1;
+        this.writeDoc("stock_transfers", transfer.id, { ...transfer, status: "received", receivedAt }, seq);
+        seq += 1;
+        this.writeDoc(TRANSFER_OUTBOX, transfer.id, entry, seq, true);
+        this.broadcast("changes");
+      } catch {
+        retryLater = true;
+        this.writeDoc(
+          TRANSFER_OUTBOX,
+          transfer.id,
+          { ...entry, attempts: entry.attempts + 1 },
+          this.currentSeq() + 1,
+        );
+      }
+    }
+    if (retryLater) {
+      const attempts = Math.max(1, ...queued.map((q) => q.attempts + 1));
+      // 2s, 4s, 8s ... capped at 5 minutes.
+      await this.ctx.storage.setAlarm(Date.now() + Math.min(300_000, 1000 * 2 ** attempts));
+    }
+  }
+
+  /** Retries transfer deliveries that failed or were cut off. */
+  override async alarm(): Promise<void> {
+    await this.deliverPendingTransfers();
+  }
+
+  /** This store's ingredients and transfers, for the Worker's list endpoints. */
+  async stockOverview(): Promise<{ ingredients: Ingredient[]; transfers: StockTransfer[] }> {
+    const transfers = this.docs<StockTransfer>("stock_transfers").sort((a, b) => b.sentAt - a.sentAt);
+    return {
+      ingredients: this.docs<Ingredient>("ingredients").filter((i) => !i.archived),
+      transfers: transfers.slice(0, 200),
+    };
+  }
+
+  /**
+   * One-off import of a legacy D1 central balance as an opening movement.
+   * Keyed by the legacy item id, so running the migration twice is harmless.
+   */
+  async importLegacyStock(input: {
+    ingredient: Ingredient;
+    quantity: number;
+    actor: { id: string; name: string };
+  }): Promise<{ ok: true; duplicate: boolean }> {
+    const movementId = `ingmov_legacy_${input.ingredient.id}`;
+    if (this.doc("ingredient_movements", movementId)) return { ok: true, duplicate: true };
+    let seq = this.currentSeq();
+    if (!this.doc<Ingredient>("ingredients", input.ingredient.id)) {
+      seq += 1;
+      this.writeDoc("ingredients", input.ingredient.id, { ...input.ingredient, stock: 0 }, seq);
+    }
+    if (input.quantity > 0) {
+      seq = this.applyIngredientMovement(
+        {
+          id: movementId,
+          ingredientId: input.ingredient.id,
+          ingredientName: input.ingredient.name,
+          reason: "initial",
+          delta: input.quantity,
+          resulting: 0,
+          at: Date.now(),
+          note: "Opening balance moved from the old central stock",
+          actorId: input.actor.id,
+          actorName: input.actor.name,
+        },
+        seq,
+      );
+    } else {
+      seq += 1;
+      this.writeDoc(
+        "ingredient_movements",
+        movementId,
+        { id: movementId, ingredientId: input.ingredient.id, ingredientName: input.ingredient.name, reason: "initial", delta: 0, resulting: 0, at: Date.now() },
+        seq,
+        true,
+      );
+    }
+    this.broadcast("changes");
+    return { ok: true, duplicate: false };
   }
 
   /** Live documents of one collection, decoded. Internal helper. */

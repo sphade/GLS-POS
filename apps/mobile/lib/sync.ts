@@ -264,6 +264,7 @@ const DIRTY_PRIORITY: readonly SyncCollection[] = [
   "receipts",
   "returns",
   "stock_movements",
+  "ingredient_movements",
   "held_orders",
   "web_orders",
   "products",

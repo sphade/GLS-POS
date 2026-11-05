@@ -10,6 +10,7 @@ import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 import { formatStockQuantity, stockSummaryOf } from "@/lib/stock";
+import { formatQty } from "@/lib/stock-units";
 
 const TABS = ["ITEMS", "CATEGORIES", "MODIFIERS", "INGREDIENTS"];
 
@@ -154,13 +155,15 @@ export default function InventoryScreen() {
               addLabel="New Ingredient"
               onAdd={() => router.push("/ingredient-editor")}
               renderRow={(g) => {
-                const low = g.stock <= g.lowAt;
+                const low = g.lowAt > 0 && g.stock <= g.lowAt;
                 return (
                   <EntityRow
                     initial={g.name.charAt(0).toUpperCase()}
                     color={low ? colors.red500 : colors.dkGreen}
                     title={g.name}
-                    subtitle={`${g.stock} ${g.unit} in stock · alert below ${g.lowAt}`}
+                    subtitle={`${formatQty(g.stock, g.unit)} in stock${
+                      g.lowAt > 0 ? ` · alert at ${formatQty(g.lowAt, g.unit)}` : ""
+                    }${g.sourceIngredientId ? " · from Central" : ""}`}
                     trailing={
                       low ? (
                         <View style={styles.lowPill}>

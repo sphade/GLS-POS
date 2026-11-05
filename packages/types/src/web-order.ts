@@ -7,6 +7,20 @@
  * the table, and payment happens in person against the printed receipt.
  */
 
+import type { StoreRole } from "./permissions";
+
+/**
+ * The roles that receive VIP orders: they get the ringing push and the
+ * full-screen alert. Floor leads act on guest orders; owners, cashiers, waiters
+ * and the kitchen are not interrupted. One list, used by the server's push and
+ * the app's alert, so the two can never disagree.
+ */
+export const VIP_ORDER_ROLES: readonly StoreRole[] = ["manager", "supervisor"];
+
+export function receivesVipOrders(role: StoreRole | null | undefined): boolean {
+  return !!role && VIP_ORDER_ROLES.includes(role);
+}
+
 export type WebOrderStatus =
   /** Guest submitted it; waiting for staff to see it. */
   | "received"
@@ -50,6 +64,13 @@ export interface WebOrder {
   updatedAt: number;
   /** Set when staff turn it into a sale. */
   receiptId?: string;
+  /**
+   * Server-owned. When the order was accepted (left "received"), the server
+   * took its items out of menu stock. Billing must not deduct them again.
+   */
+  stockDeductedAt?: number;
+  /** Server-owned. Set when a cancelled order's stock was put back. */
+  stockRestoredAt?: number;
 }
 
 /** What the guest's browser submits. Prices are deliberately absent. */

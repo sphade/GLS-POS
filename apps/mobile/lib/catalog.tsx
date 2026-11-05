@@ -1,5 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import type { StockMovement, StockMovementReason } from "@gls-pos/types";
+import type {
+  Ingredient as SharedIngredient,
+  IngredientMovement,
+  IngredientMovementReason,
+  StockMovement,
+  StockMovementReason,
+} from "@gls-pos/types";
 import type { Item } from "./cart";
 import { mockItems, categories as MENU_CATEGORIES } from "./mock-items";
 import { getAuditActor, logAudit } from "./audit";
@@ -34,7 +40,7 @@ export type ModifierGroup = {
   multiSelect: boolean;
   options: ModifierOption[];
 };
-export type Ingredient = { id: string; name: string; unit: string; stock: number; lowAt: number };
+export type Ingredient = SharedIngredient;
 export type Table = { id: string; name: string; section: string; seats: number; reference?: string };
 export type Customer = { id: string; name: string; phone?: string; email?: string; address?: string; due: number };
 export type StaffMember = { id: string; name: string; role: string; phone?: string; active: boolean };
@@ -228,6 +234,13 @@ type CatalogState = {
   deleteModifier: (id: string) => void;
   upsertIngredient: (i: Partial<Ingredient> & { name: string }) => Ingredient;
   deleteIngredient: (id: string) => void;
+  /** Log a whole-base-unit stock change (restock, waste, count correction). */
+  adjustIngredient: (
+    id: string,
+    delta: number,
+    reason: Exclude<IngredientMovementReason, "transfer_in" | "transfer_out" | "recipe">,
+    note?: string,
+  ) => void;
   upsertTable: (t: Partial<Table> & { name: string }) => Table;
   deleteTable: (id: string) => void;
   upsertCustomer: (c: Partial<Customer> & { name: string }) => Customer;
@@ -397,7 +410,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       products,
       categories,
       modifiers,
-      ingredients,
+      ingredients: ingredients.filter((i) => !i.archived),
       tables,
       sections: [...new Set(tables.map((t) => t.section))],
       customers,
@@ -429,9 +442,50 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         }),
       deleteModifier: (id) => remove(setModifiers, "modifiers", id),
 
-      upsertIngredient: (i) =>
-        upsert<Ingredient>(setIngredients, "ingredients", "ing", i, { name: i.name, unit: "kg", stock: 0, lowAt: 5 }),
-      deleteIngredient: (id) => remove(setIngredients, "ingredients", id),
+      upsertIngredient: (i) => {
+        // Stock is never written through the item: the server ignores it and
+        // only the movement ledger changes it. Keep the cached figure as-is.
+        const current = ingredients.find((x) => x.id === i.id);
+        return upsert<Ingredient>(setIngredients, "ingredients", "ing", { ...i, stock: current?.stock ?? 0 }, {
+          name: i.name,
+          unit: "g",
+          stock: 0,
+          lowAt: 0,
+        });
+      },
+      // Archive rather than delete, so transfers and sales that used it still
+      // show what it was.
+      deleteIngredient: (id) => {
+        const current = ingredients.find((x) => x.id === id);
+        if (!current) return;
+        dbPut("ingredients", { ...current, archived: true });
+        setIngredients((prev) => prev.filter((p) => p.id !== id));
+        auditEntity("ingredients", "delete", id, current.name);
+      },
+      adjustIngredient: (id, delta, reason, note) => {
+        const current = ingredients.find((x) => x.id === id);
+        const whole = Math.round(delta);
+        if (!current || whole === 0) return;
+        const actor = getAuditActor();
+        const resulting = Math.max(0, current.stock + whole);
+        const movement: IngredientMovement = {
+          id: uid("ingmov"),
+          ingredientId: id,
+          ingredientName: current.name,
+          reason,
+          delta: whole,
+          baseStock: current.stock,
+          resulting,
+          at: Date.now(),
+          ...(note?.trim() ? { note: note.trim().slice(0, 240) } : {}),
+          ...(actor ? { actorId: actor.id, actorName: actor.name } : {}),
+        };
+        dbPut("ingredient_movements", movement);
+        // Optimistic figure only; the server's balance replaces it on next pull.
+        const next = { ...current, stock: resulting };
+        dbPut("ingredients", next, false);
+        setIngredients((prev) => prev.map((p) => (p.id === id ? next : p)));
+      },
 
       upsertTable: (t) =>
         upsert<Table>(setTables, "tables", "tbl", t, { name: t.name, section: "DEFAULT ALL", seats: 4 }),

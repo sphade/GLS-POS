@@ -11,6 +11,7 @@ import {
 import { AppState } from "react-native";
 import * as Notifications from "expo-notifications";
 import type { WebOrder, WebOrderStatus } from "@gls-pos/types";
+import { receivesVipOrders } from "@gls-pos/types";
 import {
   loadDocsByField,
   loadDocsInRange,
@@ -20,6 +21,7 @@ import {
   put as dbPut,
 } from "./db";
 import { onSynced, pullNow, SYNC_ENABLED } from "./sync";
+import { isRealtimeOpen } from "./realtime";
 import { useStore } from "./store";
 
 /**
@@ -103,6 +105,10 @@ const WebOrdersContext = createContext<WebOrdersState | null>(null);
 
 export function WebOrdersProvider({ children }: { children: ReactNode }) {
   const { store } = useStore();
+  const receivesAlerts = receivesVipOrders(store.role);
+  // Read inside the sync callback without re-subscribing it.
+  const alertsRef = useRef(receivesAlerts);
+  alertsRef.current = receivesAlerts;
   const [orders, setOrders] = useState<WebOrder[]>(loadLiveOrders);
   const [arrivals, setArrivals] = useState<WebOrder[]>([]);
   const [webOrderRevision, setWebOrderRevision] = useState(0);
@@ -128,7 +134,9 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
     );
     setWebOrderRevision((revision) => revision + 1);
 
-    if (unseen.length > 0) {
+    // Only the roles that receive VIP orders get the ringing full-screen alert.
+    // Everyone else still sees the order in VIP Orders, quietly.
+    if (unseen.length > 0 && alertsRef.current) {
       // Never overwrite one order with another. Restaurant bursts are common;
       // staff must acknowledge each order in arrival order.
       setArrivals((current) => {
@@ -161,8 +169,15 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!SYNC_ENABLED) return;
 
+    // While the realtime socket is open it already announces every new order,
+    // so the poll only runs as a fallback: every 4s when the socket is down,
+    // and once every ~30s as a belt-and-braces check when it is up. Polling
+    // every 4s regardless kept old tills busy downloading for nothing.
+    let ticks = 0;
     const timer = setInterval(() => {
       if (AppState.currentState !== "active") return;
+      ticks += 1;
+      if (isRealtimeOpen() && ticks % 8 !== 0) return;
       void pullNow(store.id);
     }, 4000);
     return () => clearInterval(timer);
@@ -206,10 +221,11 @@ export function WebOrdersProvider({ children }: { children: ReactNode }) {
       setStatus: (id, status) => write(id, { status }),
       attachReceipt: (id, receiptId) => write(id, { receiptId, status: "served" }),
       reload,
-      arrival: arrivals[0] ?? null,
+      // A role change mid-shift must also silence anything already queued.
+      arrival: receivesAlerts ? (arrivals[0] ?? null) : null,
       dismissArrival: () => setArrivals((current) => current.slice(1)),
     };
-  }, [orders, arrivals, reload, webOrderRevision]);
+  }, [orders, arrivals, reload, webOrderRevision, receivesAlerts]);
 
   return <WebOrdersContext.Provider value={value}>{children}</WebOrdersContext.Provider>;
 }
