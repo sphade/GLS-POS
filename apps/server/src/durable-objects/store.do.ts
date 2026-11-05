@@ -1006,6 +1006,100 @@ export class StoreDurableObject extends DurableObject<Env> {
     return false;
   }
 
+  // --- Diagnostics (temporary: correct wrong-dated receipts) -----------------
+
+  /**
+   * List all receipts with their stored createdAt timestamps, newest first.
+   * Used to find receipts whose createdAt was stamped with a wrong terminal
+   * clock and now appear on the wrong day in Reports.
+   */
+  diagListReceipts(): Array<{
+    id: string;
+    number: string;
+    createdAt: number;
+    createdAtIso: string;
+    total: number;
+    status: string;
+  }> {
+    const rows = this.db
+      .select({ id: schema.documents.id, data: schema.documents.data })
+      .from(schema.documents)
+      .where(eq(schema.documents.collection, "receipts"))
+      .all() as Array<{ id: string; data: string }>;
+
+    const receipts = rows
+      .map((row) => {
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(row.data) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+        const createdAt = typeof data.createdAt === "number" ? data.createdAt : 0;
+        return {
+          id: row.id,
+          number: typeof data.number === "string" ? data.number : "",
+          createdAt,
+          createdAtIso: new Date(createdAt).toISOString(),
+          total: typeof data.total === "number" ? data.total : 0,
+          status: typeof data.status === "string" ? data.status : "",
+        };
+      })
+      .filter((r) => r !== null)
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    return receipts as Array<{
+      id: string;
+      number: string;
+      createdAt: number;
+      createdAtIso: string;
+      total: number;
+      status: string;
+    }>;
+  }
+
+  /**
+   * Correct a single receipt's createdAt timestamp. Used when a terminal's
+   * clock was wrong and a sale was stamped with the wrong date.
+   */
+  diagCorrectReceiptDate(receiptId: string, newCreatedAt: number): boolean {
+    const [row] = this.db
+      .select({ data: schema.documents.data })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "receipts"),
+          eq(schema.documents.id, receiptId),
+        ),
+      )
+      .all() as Array<{ data: string }>;
+
+    if (!row) return false;
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(row.data) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+
+    data.createdAt = newCreatedAt;
+    data.updatedAt = Date.now();
+
+    this.db
+      .update(schema.documents)
+      .set({ data: JSON.stringify(data), updatedAt: Date.now() })
+      .where(
+        and(
+          eq(schema.documents.collection, "receipts"),
+          eq(schema.documents.id, receiptId),
+        ),
+      )
+      .run();
+
+    return true;
+  }
+
   // --- Realtime (WebSocket) -------------------------------------------------
 
   /**
