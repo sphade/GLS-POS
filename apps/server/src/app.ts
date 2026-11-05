@@ -20,6 +20,7 @@ import { inventory } from "./modules/inventory/inventory.routes.js";
 import { transfers } from "./modules/transfers/transfers.routes.js";
 import { admin } from "./modules/admin/admin.routes.js";
 import { catalog } from "./modules/stores/catalog.routes.js";
+import { diag } from "./modules/diag/diag.routes.js";
 import { withApiKey } from "./middleware/api-key.js";
 
 /**
@@ -117,6 +118,9 @@ export function createApp() {
   api.use("/catalog", requireAuth, withStore);
   api.use("/catalog/*", requireAuth, withStore);
   api.route("/catalog", catalog);
+
+  // Temporary diagnostics: list and correct wrong-dated receipts.
+  api.route("/diag", diag);
 
   // The caller's role + effective permissions for the selected store, so the
   // client can shape its UI from the same matrix the server enforces.
