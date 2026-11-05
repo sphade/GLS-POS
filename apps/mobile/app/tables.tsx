@@ -11,6 +11,7 @@ import { feedbackTap } from "@/lib/feedback";
  * Each row also opens that table's VIP QR code, since guests scan a code that
  * is specific to their table.
  */
+// lawal adebola fawaz
 export default function TablesScreen() {
   const router = useRouter();
   const { tables } = useCatalog();
