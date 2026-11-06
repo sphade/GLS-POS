@@ -102,6 +102,56 @@ const SALES_COLLECTIONS = [
 const CLOCK_SKEW_MS = 2 * 60_000;
 
 /**
+ * Re-date a sale or refund stamped by a till whose clock is wrong.
+ *
+ * A sale's `createdAt` decides which day it counts on in every report, and it
+ * comes from the device. A till with a wrong date (flat clock battery, set by
+ * hand) therefore put today's sales on tomorrow. Two corrections:
+ *
+ *  1. The device reports its time on upload (`skew`). If it is off by more
+ *     than CLOCK_SKEW_MS, the same error is taken out of the sale's times.
+ *  2. Nothing can have been sold in the future. A time still ahead of the
+ *     server (older builds send no device time) is pulled back to now.
+ *
+ * The device's original time is kept in `deviceCreatedAt`. A sale corrected
+ * once keeps its corrected time on every later upload (e.g. when it's settled).
+ */
+function correctSaleTime(
+  incoming: unknown,
+  storedJson: string | undefined,
+  now: number,
+  skew: number | undefined,
+): unknown {
+  if (!incoming || typeof incoming !== "object") return incoming;
+  const doc = { ...(incoming as Record<string, unknown>) };
+  const created = doc.createdAt;
+  if (typeof created !== "number" || !Number.isFinite(created)) return incoming;
+
+  const stored = storedJson ? (JSON.parse(storedJson) as Record<string, unknown>) : null;
+  if (stored && typeof stored.deviceCreatedAt === "number" && typeof stored.createdAt === "number") {
+    // Already corrected on first upload: keep that answer.
+    doc.createdAt = stored.createdAt;
+    doc.deviceCreatedAt = stored.deviceCreatedAt;
+    if (typeof stored.clockSkewMs === "number") doc.clockSkewMs = stored.clockSkewMs;
+    if (typeof doc.paidAt === "number" && doc.paidAt !== stored.paidAt && typeof stored.clockSkewMs === "number") {
+      doc.paidAt = Math.min(doc.paidAt + stored.clockSkewMs, now);
+    }
+    return doc;
+  }
+  if (stored) return incoming; // first stored without correction: leave history alone
+
+  let shift = skew !== undefined && Math.abs(skew) > CLOCK_SKEW_MS ? Math.round(skew) : 0;
+  if (created + shift > now + CLOCK_SKEW_MS) shift = now - created;
+  if (shift === 0) return incoming;
+
+  doc.deviceCreatedAt = created;
+  doc.clockSkewMs = shift;
+  doc.createdAt = created + shift;
+  if (typeof doc.paidAt === "number") doc.paidAt = Math.min(doc.paidAt + shift, now);
+  return doc;
+}
+
+/**
  * Per-response page budget for sync deltas.
  *
  * A first sync used to return the store's ENTIRE history — including every
@@ -421,6 +471,11 @@ export type PushOptions = {
    * entire history that nobody reads.
    */
   skipPull?: boolean;
+  /**
+   * Server time minus the device's time at upload, when the device reported
+   * it. Used to re-date sales stamped by a till with a wrong clock.
+   */
+  deviceClockSkewMs?: number;
 };
 
 /** DB row → role-projected wire change (parse stored JSON only after authorization). */
@@ -843,6 +898,12 @@ export class StoreDurableObject extends DurableObject<Env> {
       if (change.collection === "ingredients" && !change.deleted) {
         data = sanitizeIngredient(change.data, existing?.data) ?? change.data;
       }
+      if (
+        (change.collection === "receipts" || change.collection === "returns") &&
+        !change.deleted
+      ) {
+        data = correctSaleTime(data, existing?.data, now, options?.deviceClockSkewMs);
+      }
       if (change.collection === "receipts" && !existing && !change.deleted) {
         newReceipts.push(data);
       }
@@ -1083,12 +1144,17 @@ export class StoreDurableObject extends DurableObject<Env> {
       return false;
     }
 
+    if (typeof data.deviceCreatedAt !== "number" && typeof data.createdAt === "number") {
+      data.deviceCreatedAt = data.createdAt;
+    }
     data.createdAt = newCreatedAt;
     data.updatedAt = Date.now();
 
+    // A new server_seq is what makes phones pull the corrected date; without
+    // it every device kept showing the sale on the wrong day.
     this.db
       .update(schema.documents)
-      .set({ data: JSON.stringify(data), updatedAt: Date.now() })
+      .set({ data: JSON.stringify(data), updatedAt: Date.now(), serverSeq: this.currentSeq() + 1 })
       .where(
         and(
           eq(schema.documents.collection, "receipts"),

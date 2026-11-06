@@ -6,6 +6,7 @@ import { feedbackTap } from "@/lib/feedback";
 import { useStore } from "@/lib/store";
 import { AppDrawer } from "@/components/AppDrawer";
 import { StoreSwitcherList } from "@/components/StoreSwitcherList";
+import { ClockWarning } from "@/components/ClockWarning";
 
 /**
  * Shared primary-blue app bar (content_home_base.xml). Shows either the store
@@ -106,6 +107,7 @@ export function PosHeader({
         )}
 
       </View>
+      <ClockWarning />
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>

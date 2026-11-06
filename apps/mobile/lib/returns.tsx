@@ -19,6 +19,7 @@ import {
 } from "./db";
 import { logAudit } from "./audit";
 import { uid } from "./ids";
+import { trustedNow } from "./clock";
 import { onSynced } from "./sync";
 import { useCatalog } from "./catalog";
 import type { Receipt } from "./cart";
@@ -228,7 +229,7 @@ export function ReturnsProvider({
         reason: input.reason,
         note: input.note?.trim() ? input.note.trim() : undefined,
         method: input.method,
-        createdAt: Date.now(),
+        createdAt: trustedNow(),
         storeName: input.storeName,
         storeReference: input.storeReference,
         servedBy: input.servedBy,

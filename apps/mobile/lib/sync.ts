@@ -28,6 +28,7 @@ import {
 } from "./db";
 import { API_URL, authCookie } from "./auth-client";
 import { OFFLINE_MODE } from "./offline";
+import { learnClockFromResponse, trustedNow } from "./clock";
 
 /**
  * Offline-first sync engine.
@@ -744,7 +745,10 @@ async function fetchWithTimeout(
   }, SYNC_TIMEOUT_MS);
 
   try {
+    const sentAt = Date.now();
     const response = await fetch(url, { ...init, signal: controller.signal });
+    // Every sync reply tells us the real time; see lib/clock.ts.
+    learnClockFromResponse(response, sentAt);
     if (!epochIsCurrent(epoch)) throw new SyncCancelledError("Sync epoch retired");
     return response;
   } catch (error) {
@@ -1334,6 +1338,9 @@ async function pushBatch(
           "x-store-id": storeId,
           // Opts into per-row refusals instead of an all-or-nothing 403.
           "x-sync-protocol": String(SYNC_PROTOCOL_VERSION),
+          // The clock the queued sales were stamped with, so the server can
+          // correct them if this device's time is wrong.
+          "x-device-time": String(trustedNow()),
         },
         body: JSON.stringify({ cursor, changes }),
       },

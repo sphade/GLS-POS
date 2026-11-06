@@ -1,4 +1,4 @@
-﻿import {
+import {
   createContext,
   useCallback,
   useContext,
@@ -30,6 +30,7 @@ import {
 import { logAudit } from "./audit";
 import { uid } from "./ids";
 import { onSynced } from "./sync";
+import { trustedNow } from "./clock";
 
 /**
  * How an item is sold:
@@ -769,7 +770,7 @@ export function CartProvider({
       return;
     }
 
-    const now = Date.now();
+    const now = trustedNow();
     const prior = res ? heldOrdersRef.current.find((h) => h.id === res) : undefined;
     const parkedDiscount = orderDiscountRef.current;
     const held: HeldOrder = {
@@ -933,7 +934,7 @@ export function CartProvider({
       heldOrders,
       holdOrder: (label, note, existingId) => {
         if (list.length === 0) return;
-        const now = Date.now();
+        const now = trustedNow();
         // Editing the resumed bill consumes it; otherwise clear() below
         // auto-consumes whatever else was resumed (its items moved here).
         if (existingId && existingId === resumedHeldIdRef.current) {
@@ -993,7 +994,7 @@ export function CartProvider({
         const settled: Receipt = {
           ...receipt,
           status: "paid",
-          paidAt: Date.now(),
+          paidAt: trustedNow(),
         };
         dbPut("receipts", settled);
         setReceipts((prev) =>
@@ -1014,7 +1015,7 @@ export function CartProvider({
       receiptById,
       receiptRevision,
       completeSale: ({ mode, customerName, cashReceived, status, storeName, storeReference, servedBy }) => {
-        const now = Date.now();
+        const now = trustedNow();
         const settled = status ?? "paid";
         const receipt = putWithDeviceSequence<Receipt>(
           "receipts",
@@ -1076,7 +1077,7 @@ export function CartProvider({
       },
 
       billWebOrder: ({ order, storeName, storeReference, servedBy }) => {
-        const now = Date.now();
+        const now = trustedNow();
         const receipt: Receipt = {
           id: uid("rcpt"),
           number: order.code,

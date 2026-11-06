@@ -15,6 +15,7 @@ import type { WebOrder } from "@gls-pos/types";
 import { colors, formatMoney, strings } from "@/constants/theme";
 import { centeredContent } from "@/lib/responsive";
 import { EmptyState } from "@/components/EmptyState";
+import { trustedNow } from "@/lib/clock";
 import { ReceiptDisclosureRow } from "@/components/ReceiptDisclosureRow";
 import { loadReceiptsInRange, useCart } from "@/lib/cart";
 import {
@@ -53,22 +54,22 @@ export default function TodayScreen() {
   const pendingSet = new Set(pendingIds);
   /** This tab is Today, so older receipts stay in SQLite until requested. */
   const todayReceipts = useMemo(() => {
-    const start = new Date();
+    const start = new Date(trustedNow());
     start.setHours(0, 0, 0, 0);
-    return loadReceiptsInRange(start.getTime(), Date.now() + 1);
+    return loadReceiptsInRange(start.getTime(), trustedNow() + 1);
   }, [receiptRevision]);
 
   const todayReturns = useMemo(() => {
-    const start = new Date();
+    const start = new Date(trustedNow());
     start.setHours(0, 0, 0, 0);
-    return loadReturnsInRange(start.getTime(), Date.now() + 1);
+    return loadReturnsInRange(start.getTime(), trustedNow() + 1);
   }, [returnRevision]);
 
   const todayOrders = useMemo(() => {
-    const start = new Date();
+    const start = new Date(trustedNow());
     start.setHours(0, 0, 0, 0);
     const byId = new Map(
-      loadWebOrdersInRange(start.getTime(), Date.now() + 1).map((order) => [order.id, order]),
+      loadWebOrdersInRange(start.getTime(), trustedNow() + 1).map((order) => [order.id, order]),
     );
     // An unfinished order remains operational after midnight; Today combines
     // those carry-overs with orders created during the current calendar day.

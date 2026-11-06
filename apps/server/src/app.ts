@@ -120,6 +120,7 @@ export function createApp() {
   api.route("/catalog", catalog);
 
   // Temporary diagnostics: list and correct wrong-dated receipts.
+  api.use("/diag/*", requireAuth, withStore);
   api.route("/diag", diag);
 
   // The caller's role + effective permissions for the selected store, so the

@@ -7,6 +7,16 @@ import type { PushResult } from "../../durable-objects/store.do.js";
 import { syncPullQuerySchema, syncPushSchema, syncRecentQuerySchema } from "./sync.schema.js";
 
 /**
+ * How far the device's clock is behind (+) or ahead (−) of the server, from the
+ * `x-device-time` header newer builds send. Undefined for older builds.
+ */
+function deviceClockSkew(header: string | undefined): number | undefined {
+  const deviceTime = Number(header);
+  if (!header || !Number.isFinite(deviceTime) || deviceTime <= 0) return undefined;
+  return Date.now() - deviceTime;
+}
+
+/**
  * Offline-first sync endpoint. One round-trip uploads the device's dirty
  * changes and downloads everything the store has recorded since the device's
  * cursor.
@@ -39,7 +49,7 @@ export const sync = new Hono<AppEnv>()
           name: user.name,
           email: user.email,
         },
-        { partial },
+        { partial, deviceClockSkewMs: deviceClockSkew(c.req.header("x-device-time")) },
       );
 
     if (denied.length > 0) {

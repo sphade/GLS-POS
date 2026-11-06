@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ActivityIndicator, Animated, InteractionManager, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -9,6 +9,7 @@ import { DatePickerSheet } from "@/components/DatePickerSheet";
 import { DateRangeSheet } from "@/components/DateRangeSheet";
 import { RequirePermission } from "@/components/RequirePermission";
 import { EmptyState } from "@/components/EmptyState";
+import { trustedNow } from "@/lib/clock";
 import { loadReceiptsInRange, useCart } from "@/lib/cart";
 import { useCatalog } from "@/lib/catalog";
 import { isVoidReturn, loadReturnsInRange, useReturns } from "@/lib/returns";
@@ -34,7 +35,8 @@ const RANGES = [
 const DAY = 86_400_000;
 
 function rangeBounds(range: string): { from: number; to: number } {
-  const d = new Date();
+  // The corrected clock, so a till with a wrong date still shows the real day.
+  const d = new Date(trustedNow());
   d.setHours(0, 0, 0, 0);
   const today = d.getTime();
   switch (range) {
