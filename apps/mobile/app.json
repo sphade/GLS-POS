@@ -16,6 +16,10 @@
     "runtimeVersion": {
       "policy": "appVersion"
     },
+    "updates": {
+      "url": "https://u.expo.dev/3fcafcaa-5de5-4638-ae28-c71bcfbb6142",
+      "checkAutomatically": "ON_LOAD"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.gls.pos",
