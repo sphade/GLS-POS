@@ -73,7 +73,6 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
   // is for the owner and the accountant; receipts stay so they can reprint.
   manager: [
     "sale:create",
-    "sale:refund",
     "price:override",
     "catalog:read",
     "catalog:write",

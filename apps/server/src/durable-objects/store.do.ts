@@ -821,6 +821,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     const newIngredientMovements: IngredientMovement[] = [];
     const webOrderStock: { id: string; prevStatus?: WebOrderStatus; status: WebOrderStatus }[] = [];
     const newReceipts: unknown[] = [];
+    const newReturns: unknown[] = [];
     const now = Date.now();
 
     // All SQL below is synchronous and there is no `await` between statements.
@@ -909,6 +910,9 @@ export class StoreDurableObject extends DurableObject<Env> {
       if (change.collection === "receipts" && !existing && !change.deleted) {
         newReceipts.push(data);
       }
+      if (change.collection === "returns" && !existing && !change.deleted) {
+        newReturns.push(data);
+      }
       if (change.collection === "products" && !change.deleted) {
         if (!roleCanReadProductCosts(role)) {
           data = preserveProductCosts(existing?.data, data);
@@ -992,6 +996,13 @@ export class StoreDurableObject extends DurableObject<Env> {
         seq = this.flagUnauthorizedDiscount(receipt, seq, actor, role);
       }
       if (seq !== before) appliedAny = true;
+    }
+    if (!roleCan(role, "sale:refund")) {
+      for (const ret of newReturns) {
+        const before = seq;
+        seq = this.flagUnauthorizedRefund(ret, seq, actor, role);
+        if (seq !== before) appliedAny = true;
+      }
     }
 
     // Let other devices know there's something to pull (e.g. one till marks an
@@ -1425,6 +1436,45 @@ export class StoreDurableObject extends DurableObject<Env> {
         summary: `NOT ALLOWED: ${actor?.name ?? "A staff member"} (${role}) gave a ${naira(
           r.discountTotal,
         )} discount on ${typeof r.number === "string" ? r.number : "a sale"} · paid ${naira(r.total)}`,
+      },
+      next,
+    );
+    return next;
+  }
+
+  /**
+   * Refunds are owner-only. One from anyone else (an older build) is kept,
+   * because the cash has already left the drawer, and flagged by name.
+   */
+  private flagUnauthorizedRefund(
+    ret: unknown,
+    seq: number,
+    actor: StockActor | undefined,
+    role: StoreRole,
+  ): number {
+    if (!ret || typeof ret !== "object") return seq;
+    const r = ret as { id?: unknown; number?: unknown; receiptNumber?: unknown; total?: unknown };
+    if (typeof r.id !== "string") return seq;
+    const id = `audit_refund_${r.id}`;
+    if (this.doc("audit_log", id)) return seq;
+    const amount =
+      typeof r.total === "number" ? `₦${Math.round(r.total / 100).toLocaleString("en-NG")}` : "a";
+    const next = seq + 1;
+    this.writeDoc(
+      "audit_log",
+      id,
+      {
+        id,
+        at: Date.now(),
+        actorId: actor?.id,
+        actorName: actor?.name ?? "Unknown staff",
+        actorRole: role,
+        action: "refund.unauthorized",
+        entity: "return",
+        entityId: r.id,
+        summary: `NOT ALLOWED: ${actor?.name ?? "A staff member"} (${role}) gave ${amount} refund${
+          typeof r.receiptNumber === "string" ? ` on ${r.receiptNumber}` : ""
+        }`,
       },
       next,
     );

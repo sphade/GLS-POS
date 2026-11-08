@@ -565,7 +565,7 @@ function ResetPasswordSheet({
 function describeRole(role: StoreRole): string {
   switch (role) {
     case "manager":
-      return "Run operations, the catalog and refunds. No reports or discounts";
+      return "Run operations and the catalog. No reports, refunds or discounts";
     case "supervisor":
       return "Manage operations and catalog. No reports, refunds, or discounts";
     case "cashier":

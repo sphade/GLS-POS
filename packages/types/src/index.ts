@@ -501,7 +501,10 @@ const SYNC_WRITE_PERMISSIONS = {
   customers: "customers:manage",
   staff: "staff:manage",
   receipts: "sale:create",
-  returns: "sale:refund",
+  // Refunds are owner-only in the app. A refund an older build still lets
+  // staff give is accepted (the cash already left the drawer, refusing it
+  // would hide that) and flagged by the Store DO. See flagUnauthorizedRefund.
+  returns: "sale:create",
   product_images: "catalog:write",
   web_orders: "sale:create",
   audit_log: "catalog:read",
@@ -585,7 +588,9 @@ function syncMovementPermission(change: SyncChange): Permission | null {
     return movement.delta <= 0 ? "sale:create" : null;
   }
   if (movement.reason === "return") {
-    return movement.delta >= 0 ? "sale:refund" : null;
+    // Same as the refund document itself: accepted, then flagged if the role
+    // may not refund. Only ever adds back what a refund returned.
+    return movement.delta >= 0 ? "sale:create" : null;
   }
   if (movement.reason === "waste") {
     return movement.delta <= 0 ? "inventory:adjust" : null;

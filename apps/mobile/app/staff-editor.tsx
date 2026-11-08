@@ -15,7 +15,6 @@ const PERMISSIONS: Record<string, string[]> = {
   Owner: ["Everything"],
   Manager: [
     "Sell",
-    "Refunds",
     "Receipts",
     "Menu",
     "Inventory",
