@@ -472,6 +472,7 @@ import { roleCan, type Permission, type StoreRole } from "./permissions";
 export * from "./permissions";
 export * from "./web-order";
 export * from "./integration";
+export * from "./channels";
 
 /** Bump whenever collection visibility semantics change. */
 export const SYNC_READ_POLICY_VERSION = 3;

@@ -23,4 +23,6 @@ export interface Env {
   WEB_ORIGIN?: string;
   /** Operator secret for the prod -> staging copy routes. Unset = routes 404. */
   ADMIN_TOKEN?: string;
+  /** Azumi Deliveries server base URL. Defaults to production (server.azumi.com.ng). */
+  AZUMI_API_URL?: string;
 }

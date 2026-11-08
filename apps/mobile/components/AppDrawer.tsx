@@ -55,6 +55,7 @@ const GROUPS: { title: string; entries: Entry[] }[] = [
       { label: "Table Management", icon: "table-furniture", route: "/tables", needs: "tables:manage" },
       { label: "Customers Management", icon: "account-group-outline", route: "/customers", needs: "customers:manage" },
       { label: "Staff Management", icon: "account-tie-outline", route: "/staff", needs: "staff:manage" },
+      { label: "Delivery Apps (Azumi)", icon: "moped", route: "/delivery-apps", needs: "settings:manage" },
       { label: "Add Expense", icon: "cash-minus", route: "/expense-categories", needs: "expenses:manage" },
       { label: "Receipts", icon: "receipt", route: "/(tabs)/today", needs: "receipts:view" },
       { label: "Returns & Refunds", icon: "cash-refund", route: "/returns", needs: "sale:refund" },

@@ -5,6 +5,7 @@ import { validate } from "../../lib/validator.js";
 import { HttpError } from "../../lib/http-error.js";
 import type { PushResult } from "../../durable-objects/store.do.js";
 import { syncPullQuerySchema, syncPushSchema, syncRecentQuerySchema } from "./sync.schema.js";
+import { afterSync } from "../channels/channels.service.js";
 
 /**
  * How far the device's clock is behind (+) or ahead (−) of the server, from the
@@ -51,6 +52,15 @@ export const sync = new Hono<AppEnv>()
         },
         { partial, deviceClockSkewMs: deviceClockSkew(c.req.header("x-device-time")) },
       );
+
+    // Keep linked delivery-app listings in step with stock. Background only:
+    // a sale never waits on Azumi, and a failure retries on the next sync.
+    const collections = [...new Set(c.req.valid("json").changes.map((ch) => ch.collection))];
+    if (collections.length > 0) {
+      c.executionCtx.waitUntil(
+        afterSync(c.env, c.get("storeId"), collections).catch(() => undefined),
+      );
+    }
 
     if (denied.length > 0) {
       throw HttpError.forbidden(

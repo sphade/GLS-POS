@@ -1,4 +1,13 @@
-import type { ApiResult, StockTransfer, StoreMembership, StoreProfile, StoreRole } from "@gls-pos/types";
+import type {
+  ApiResult,
+  ChannelLink,
+  ChannelLinkView,
+  ChannelStatus,
+  StockTransfer,
+  StoreMembership,
+  StoreProfile,
+  StoreRole,
+} from "@gls-pos/types";
 import { API_URL, authCookie } from "./auth-client";
 import { OFFLINE_MODE } from "./offline";
 
@@ -349,6 +358,39 @@ export const api = {
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
     return request<CentralAllocation[]>(`/inventory/allocations${suffix}`);
   },
+  // --- Delivery apps (Azumi) ---
+  channelStatuses: (storeId: string) =>
+    request<ChannelStatus[]>("/channels", { headers: { "x-store-id": storeId } }),
+  connectChannel: (storeId: string, channel: string, apiKey: string) =>
+    request<ChannelStatus>(`/channels/${channel}/connect`, {
+      method: "POST",
+      headers: { "x-store-id": storeId, "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey }),
+    }),
+  disconnectChannel: (storeId: string, channel: string) =>
+    request<{ disconnected: true }>(`/channels/${channel}`, {
+      method: "DELETE",
+      headers: { "x-store-id": storeId },
+    }),
+  channelLinks: (storeId: string, channel: string) =>
+    request<ChannelLinkView>(`/channels/${channel}/links`, { headers: { "x-store-id": storeId } }, 20_000),
+  saveChannelLinks: (storeId: string, channel: string, links: ChannelLink[]) =>
+    request<unknown>(`/channels/${channel}/links`, {
+      method: "PUT",
+      headers: { "x-store-id": storeId, "Content-Type": "application/json" },
+      body: JSON.stringify({ links }),
+    }, 20_000),
+  autoLinkChannel: (storeId: string, channel: string) =>
+    request<{ added: number; total: number; unmatched: number }>(`/channels/${channel}/auto-link`, {
+      method: "POST",
+      headers: { "x-store-id": storeId },
+    }, 20_000),
+  syncChannels: (storeId: string) =>
+    request<Record<string, { pushed: number; error?: string }>>("/channels/sync", {
+      method: "POST",
+      headers: { "x-store-id": storeId },
+    }, 20_000),
+
   // --- Central store transfers (stock lives in each store's DO) ---
   listTransferBranches: (centralStoreId: string) =>
     request<{ id: string; name: string }[]>("/transfers/branches", {

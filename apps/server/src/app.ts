@@ -18,6 +18,7 @@ import { v1 } from "./modules/integration/v1.routes.js";
 import { integrations } from "./modules/integration/integration.routes.js";
 import { inventory } from "./modules/inventory/inventory.routes.js";
 import { transfers } from "./modules/transfers/transfers.routes.js";
+import { channels } from "./modules/channels/channels.routes.js";
 import { admin } from "./modules/admin/admin.routes.js";
 import { catalog } from "./modules/stores/catalog.routes.js";
 import { diag } from "./modules/diag/diag.routes.js";
@@ -154,6 +155,11 @@ export function createApp() {
   api.use("/sync", requireAuth, withStore);
   api.use("/sync/*", requireAuth, withStore);
   api.route("/sync", sync);
+
+  // Delivery apps (Azumi): connect, link menu items, auto stock sync.
+  api.use("/channels", requireAuth, withStore);
+  api.use("/channels/*", requireAuth, withStore);
+  api.route("/channels", channels);
 
   // Central-store transfers between Durable Objects. x-store-id = the centre.
   api.use("/transfers", requireAuth, withStore);

@@ -52,7 +52,9 @@
       "name": "gls-pos-server-staging",
       "vars": {
         "BETTER_AUTH_URL": "https://staging-api.glskitchenandbakery.com",
-        "ENVIRONMENT": "staging"
+        "ENVIRONMENT": "staging",
+        // Staging links to Azumi's staging server, never live Azumi menus.
+        "AZUMI_API_URL": "https://staging-server.azumi.com.ng"
       },
       "routes": [
         { "pattern": "staging-api.glskitchenandbakery.com", "custom_domain": true }

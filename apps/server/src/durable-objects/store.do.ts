@@ -1362,6 +1362,31 @@ export class StoreDurableObject extends DurableObject<Env> {
     return nextSeq;
   }
 
+  // --- Delivery-app links (see modules/channels) ---------------------------
+
+  /** Server-only key/value for delivery-app connections, links and state. */
+  async channelKvGet(key: string): Promise<string | null> {
+    return (await this.ctx.storage.get<string>(`channels:${key}`)) ?? null;
+  }
+
+  async channelKvPut(key: string, json: string | null): Promise<void> {
+    if (json === null) await this.ctx.storage.delete(`channels:${key}`);
+    else await this.ctx.storage.put(`channels:${key}`, json);
+  }
+
+  /** Live products, with just what availability needs. */
+  async channelProducts(): Promise<
+    { id: string; name: string; stockQuantity: number | null; variants?: { stock?: number | null }[]; isActive?: boolean }[]
+  > {
+    return this.docs<StoredProduct & { isActive?: boolean }>("products").map((p) => ({
+      id: p.id,
+      name: p.name,
+      stockQuantity: p.stockQuantity ?? null,
+      variants: p.variants?.map((v) => ({ stock: v.stock })),
+      isActive: p.isActive,
+    }));
+  }
+
   // --- Discount control -----------------------------------------------------
 
   /**
