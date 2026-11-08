@@ -223,7 +223,7 @@ function ActiveCounter({
 }) {
   const { can } = useAuth();
   const canSell = can("sale:create");
-  /** Only owners and managers may discount the bill. */
+  /** Only the owner may discount the bill (`discount:apply`). */
   const canDiscount = can("discount:apply");
 
   return (
