@@ -10,7 +10,9 @@ export type StoreRole =
   | "supervisor"
   | "cashier"
   | "waiter"
-  | "kitchen";
+  | "kitchen"
+  /** Read-only money view: Reports, receipts and history. Cannot sell or edit. */
+  | "accountant";
 
 /** Every gated capability in the app. */
 export type Permission =
@@ -67,17 +69,15 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
     "audit:view",
     "kitchen:view",
   ],
-  // Runs the floor and catalog and can see aggregate reports, but cannot manage
-  // staff roles or business settings.
+  // Runs the floor and catalog. Discounts are owner-only and the Reports tab
+  // is for the owner and the accountant; receipts stay so they can reprint.
   manager: [
     "sale:create",
     "sale:refund",
-    "discount:apply",
     "price:override",
     "catalog:read",
     "catalog:write",
     "inventory:adjust",
-    "reports:view",
     "receipts:view",
     "expenses:manage",
     "customers:manage",
@@ -89,7 +89,6 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
   // management and individual receipt lookup remain.
   supervisor: [
     "sale:create",
-    "discount:apply",
     "price:override",
     "catalog:read",
     "catalog:write",
@@ -104,16 +103,13 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
   /**
    * Sells and takes payment, but no back office and no reversing money.
    *
-   * `discount:apply` is included because the till UI offers line and order
-   * discounts to anyone who can sell. Without it the store refused the finished
-   * receipt on sync — after the money was taken and the slip printed — and since
-   * a push is all-or-nothing, that one rejection stopped everything else on the
-   * device from uploading too. Discounts stay attributable: every discounted
-   * sale is named with its amount and reason in the audit log.
+   * No `discount:apply`: discounts are owner-only. A discounted receipt from an
+   * older build that still shows the button is NOT refused by the server (that
+   * would strand a sale the customer already paid for); it is accepted and
+   * flagged in the activity history instead. See `syncWriteDisposition`.
    */
   cashier: [
     "sale:create",
-    "discount:apply",
     "catalog:read",
     "customers:manage",
     "tables:manage",
@@ -121,13 +117,15 @@ export const ROLE_PERMISSIONS: Record<StoreRole, readonly Permission[]> = {
   // Takes orders to tables; cannot change the menu or see money reports.
   waiter: [
     "sale:create",
-    "discount:apply",
     "catalog:read",
     "tables:manage",
     "kitchen:view",
   ],
   // Kitchen display only.
   kitchen: ["catalog:read", "kitchen:view"],
+  // Sees every sale, receipt, report and the history. Cannot sell, discount,
+  // refund, or change the menu, stock, staff or settings.
+  accountant: ["catalog:read", "reports:view", "receipts:view", "audit:view"],
 };
 
 /** Human labels for role pickers. */
@@ -138,6 +136,7 @@ export const ROLE_LABELS: Record<StoreRole, string> = {
   cashier: "Cashier",
   waiter: "Waiter",
   kitchen: "Kitchen",
+  accountant: "Accountant",
 };
 
 export const ALL_ROLES = Object.keys(ROLE_PERMISSIONS) as StoreRole[];

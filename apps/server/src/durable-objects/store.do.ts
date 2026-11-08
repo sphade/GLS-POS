@@ -28,8 +28,10 @@ import type {
 } from "@gls-pos/types";
 import {
   readableSyncCollections,
+  roleCan,
   roleCanReadProductCosts,
   syncMoneyDocumentIsConsistent,
+  syncReceiptHasDiscount,
   syncWriteDisposition,
 } from "@gls-pos/types";
 import type { Env } from "../env.js";
@@ -986,6 +988,9 @@ export class StoreDurableObject extends DurableObject<Env> {
     for (const receipt of newReceipts) {
       const before = seq;
       seq = this.deductRecipesForReceipt(receipt, seq);
+      if (!roleCan(role, "discount:apply")) {
+        seq = this.flagUnauthorizedDiscount(receipt, seq, actor, role);
+      }
       if (seq !== before) appliedAny = true;
     }
 
@@ -1355,6 +1360,50 @@ export class StoreDurableObject extends DurableObject<Env> {
       .run();
 
     return nextSeq;
+  }
+
+  // --- Discount control -----------------------------------------------------
+
+  /**
+   * Discounts are owner-only. A discounted sale from anyone else (an older app
+   * build that still shows the button) is kept so the money stays on the
+   * books, and written to the activity history under that person's name so
+   * the owner sees exactly who discounted what. The id is derived from the
+   * receipt, so a re-sent receipt is flagged once.
+   */
+  private flagUnauthorizedDiscount(
+    receipt: unknown,
+    seq: number,
+    actor: StockActor | undefined,
+    role: StoreRole,
+  ): number {
+    if (!syncReceiptHasDiscount(receipt)) return seq;
+    const r = receipt as { id?: unknown; number?: unknown; total?: unknown; discountTotal?: unknown; currency?: unknown };
+    if (typeof r.id !== "string") return seq;
+    const id = `audit_disc_${r.id}`;
+    if (this.doc("audit_log", id)) return seq;
+    const naira = (minor: unknown) =>
+      typeof minor === "number" ? `₦${Math.round(minor / 100).toLocaleString("en-NG")}` : "?";
+    const next = seq + 1;
+    this.writeDoc(
+      "audit_log",
+      id,
+      {
+        id,
+        at: Date.now(),
+        actorId: actor?.id,
+        actorName: actor?.name ?? "Unknown staff",
+        actorRole: role,
+        action: "discount.unauthorized",
+        entity: "receipt",
+        entityId: r.id,
+        summary: `NOT ALLOWED: ${actor?.name ?? "A staff member"} (${role}) gave a ${naira(
+          r.discountTotal,
+        )} discount on ${typeof r.number === "string" ? r.number : "a sale"} · paid ${naira(r.total)}`,
+      },
+      next,
+    );
+    return next;
   }
 
   // --- VIP order stock ------------------------------------------------------

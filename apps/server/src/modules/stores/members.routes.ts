@@ -31,7 +31,7 @@ const createStaffSchema = z.object({
     .regex(/^[a-zA-Z0-9._-]+$/, "letters, numbers, dot, underscore or dash only")
     .optional(),
   password: z.string().min(6, "use at least 6 characters"),
-  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen"]),
+  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen", "accountant"]),
 });
 
 const resetPasswordSchema = z.object({ password: z.string().min(6) });

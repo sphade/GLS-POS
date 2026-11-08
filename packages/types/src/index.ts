@@ -510,7 +510,8 @@ const SYNC_WRITE_PERMISSIONS = {
   Permission
 >;
 
-function syncReceiptHasDiscount(data: unknown): boolean {
+/** True when a receipt document carries any line or order discount. */
+export function syncReceiptHasDiscount(data: unknown): boolean {
   if (!data || typeof data !== "object" || Array.isArray(data)) return false;
   const receipt = data as {
     discountTotal?: unknown;
@@ -657,14 +658,11 @@ export function syncWriteDisposition(
 
   const required = SYNC_WRITE_PERMISSIONS[change.collection];
   if (!roleCan(role, required)) return "denied";
-  if (
-    change.collection === "receipts" &&
-    !change.deleted &&
-    syncReceiptHasDiscount(change.data) &&
-    !roleCan(role, "discount:apply")
-  ) {
-    return "denied";
-  }
+  // A discounted receipt from a role without `discount:apply` is deliberately
+  // NOT refused. By the time it syncs the guest has paid and the slip is
+  // printed; refusing it would strand the sale on the till and drop it from
+  // the books. Discounts are blocked in the app instead, and the Store DO
+  // flags any that still arrive (older builds) in the activity history.
   return "allowed";
 }
 

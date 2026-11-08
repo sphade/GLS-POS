@@ -42,7 +42,7 @@ export type UpdateStoreInput = z.infer<typeof updateStoreSchema>;
 /** Grant or change a member's role by email. */
 export const setRoleSchema = z.object({
   email: z.string().email(),
-  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen"]),
+  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen", "accountant"]),
 });
 
 export type SetRoleInput = z.infer<typeof setRoleSchema>;
@@ -56,7 +56,7 @@ export type SetRoleInput = z.infer<typeof setRoleSchema>;
  */
 export const attachMemberSchema = z.object({
   username: z.string().min(3).max(32),
-  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen"]),
+  role: z.enum(["owner", "manager", "supervisor", "cashier", "waiter", "kitchen", "accountant"]),
 });
 
 export type AttachMemberInput = z.infer<typeof attachMemberSchema>;

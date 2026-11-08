@@ -288,6 +288,8 @@ function roleColor(role: StoreRole): string {
       return "#0277BD";
     case "waiter":
       return "#EF6C00";
+    case "accountant":
+      return "#5D4037";
     default:
       return colors.grey600;
   }
@@ -563,15 +565,17 @@ function ResetPasswordSheet({
 function describeRole(role: StoreRole): string {
   switch (role) {
     case "manager":
-      return "Run operations, manage the catalog, and view reports";
+      return "Run operations, the catalog and refunds. No reports or discounts";
     case "supervisor":
       return "Manage operations and catalog. No reports, refunds, or discounts";
     case "cashier":
-      return "Sell and take payment. No reports or menu edits";
+      return "Sell and take payment. No discounts, reports or menu edits";
     case "waiter":
       return "Take orders and manage tables only";
     case "kitchen":
       return "Kitchen display only";
+    case "accountant":
+      return "See all sales, receipts and reports. Cannot sell or change anything";
     default:
       return "Full access";
   }

@@ -8,7 +8,7 @@ import { useCatalog } from "@/lib/catalog";
 import { useAuth } from "@/lib/auth";
 import { feedbackTap } from "@/lib/feedback";
 
-const ROLES = ["Owner", "Manager", "Supervisor", "Cashier", "Waiter", "Kitchen"];
+const ROLES = ["Owner", "Manager", "Supervisor", "Cashier", "Waiter", "Kitchen", "Accountant"];
 
 /** Permissions shown per role — mirrors the staff permission matrix. */
 const PERMISSIONS: Record<string, string[]> = {
@@ -16,8 +16,6 @@ const PERMISSIONS: Record<string, string[]> = {
   Manager: [
     "Sell",
     "Refunds",
-    "Discounts",
-    "Reports",
     "Receipts",
     "Menu",
     "Inventory",
@@ -43,6 +41,7 @@ const PERMISSIONS: Record<string, string[]> = {
   Cashier: ["Sell", "Customers", "Tables"],
   Waiter: ["Sell", "Tables"],
   Kitchen: ["Kitchen display"],
+  Accountant: ["Reports", "Receipts", "Activity", "View menu"],
 };
 
 export default function StaffEditorScreen() {
