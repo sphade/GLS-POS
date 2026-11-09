@@ -56,29 +56,26 @@ export default function StaffScreen() {
     void load();
   }, [load]);
 
+  // A sheet, not Alert.alert: Android alerts show at most three buttons, so
+  // every role after the third (Accountant included) was silently cut off.
+  const [roleFor, setRoleFor] = useState<StoreMember | null>(null);
+
   const changeRole = (member: StoreMember) => {
     if (!isOwner) return;
     feedbackTap();
-    Alert.alert(
-      member.name,
-      `Change role for ${member.username ? `@${member.username}` : member.email}`,
-      [
-        ...ALL_ROLES.map((r) => ({
-          text: `${ROLE_LABELS[r]}${r === member.role ? " (current)" : ""}`,
-          onPress: async () => {
-            if (r === member.role) return;
-            const res = await api.setMemberRole(store.id, member.email, r);
-            if (!res.ok) {
-              feedbackError();
-              Alert.alert("Could not change role", res.error.message);
-              return;
-            }
-            void load();
-          },
-        })),
-        { text: "Cancel", style: "cancel" as const },
-      ],
-    );
+    setRoleFor(member);
+  };
+
+  const applyRole = async (member: StoreMember, r: StoreRole) => {
+    setRoleFor(null);
+    if (r === member.role) return;
+    const res = await api.setMemberRole(store.id, member.email, r);
+    if (!res.ok) {
+      feedbackError();
+      Alert.alert("Could not change role", res.error.message);
+      return;
+    }
+    void load();
   };
 
   const revoke = (member: StoreMember) => {
@@ -217,6 +214,39 @@ export default function StaffScreen() {
           <Text style={styles.fabText}>ADD STAFF</Text>
         </Pressable>
       )}
+
+      <Modal visible={!!roleFor} transparent animationType="slide" onRequestClose={() => setRoleFor(null)}>
+        <Pressable style={styles.backdrop} onPress={() => setRoleFor(null)}>
+          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={[styles.label, { padding: 16, paddingBottom: 6 }]}>
+              CHANGE ROLE · {roleFor?.name}
+            </Text>
+            {ALL_ROLES.map((r) => {
+              const current = r === roleFor?.role;
+              return (
+                <Pressable
+                  key={r}
+                  style={styles.rolePick}
+                  onPress={() => {
+                    feedbackTap();
+                    if (roleFor) void applyRole(roleFor, r);
+                  }}
+                >
+                  <View style={[styles.roleDot, { backgroundColor: roleColor(r) }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.roleOptionName}>
+                      {ROLE_LABELS[r]}
+                      {current ? " (current)" : ""}
+                    </Text>
+                    <Text style={styles.roleOptionHint}>{describeRole(r)}</Text>
+                  </View>
+                  {current ? <Ionicons name="checkmark" size={20} color={colors.primary} /> : null}
+                </Pressable>
+              );
+            })}
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <InviteSheet
         visible={inviteOpen}
@@ -793,6 +823,10 @@ const styles = StyleSheet.create({
   },
   sheetTitle: { color: colors.white, fontSize: 16, fontWeight: "700", letterSpacing: 0.5 },
   label: { fontSize: 12, fontWeight: "800", color: colors.grey600, letterSpacing: 0.6 },
+  rolePick: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  roleDot: { width: 12, height: 12, borderRadius: 6 },
+  roleOptionName: { fontSize: 15, fontWeight: "700", color: colors.grey900 },
+  roleOptionHint: { fontSize: 12, color: colors.grey600, marginTop: 2 },
   input: {
     fontSize: 16,
     color: colors.grey900,
