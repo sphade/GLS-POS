@@ -53,11 +53,20 @@ async function loadConnection(env: Env, stub: Stub, channel: SalesChannel) {
 const linksOf = async (stub: Stub, channel: SalesChannel) =>
   (await kvGet<ChannelLink[]>(stub, `links:${channel}`)) ?? [];
 
-/** Can the POS sell this right now? The one rule every app follows. */
+/**
+ * Delivery apps stop taking orders for an item once GLS stock is at or below
+ * this many, so the last few are kept for walk-in customers and a late sync
+ * can't oversell. It comes back on Azumi once stock is above it again.
+ * Untracked items are always on.
+ */
+export const DELIVERY_STOCK_CUTOFF = 5;
+
+/** Should a delivery app offer this item right now? */
 export function sellable(p: Product): boolean {
   if (p.isActive === false) return false;
-  if (p.variants?.length) return p.variants.some((v) => v.stock == null || v.stock > 0);
-  return p.stockQuantity == null || p.stockQuantity > 0;
+  const enough = (stock: number | null | undefined) => stock == null || stock > DELIVERY_STOCK_CUTOFF;
+  if (p.variants?.length) return p.variants.some((v) => enough(v.stock));
+  return enough(p.stockQuantity);
 }
 
 // --- Connect / status -------------------------------------------------------
