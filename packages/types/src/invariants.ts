@@ -71,10 +71,13 @@ export const RECEIPT_IDENTITY_FIELDS = [
  *    a till forever, which is what the reconciliation screen exists to prevent.
  *  - an **unpaid → paid settlement**.
  *
- * Both require every identity field to be identical. A changed total, line
- * list, discount, number or timestamp is refused: that is a rewrite of money
- * that has already been reported, and it is indistinguishable, in the data,
- * from a sale that was never recorded.
+ * Both require every identity field to match except `createdAt`. That one field
+ * is deliberately outside the comparison: the server re-dates a sale made on a
+ * till with a wrong clock, and a device that lost that response still holds the
+ * uncorrected copy. Comparing it would leave such a bill unsettleable forever.
+ * The caller must therefore **pin `createdAt` to the stored value** when it
+ * applies the update — see `StoreDurableObject.push` — so a settlement can
+ * never move money to another trading day.
  */
 export function isReceiptUpdateAllowed(previous: unknown, next: unknown): boolean {
   if (!previous || typeof previous !== "object" || Array.isArray(previous)) return false;
@@ -86,7 +89,9 @@ export function isReceiptUpdateAllowed(previous: unknown, next: unknown): boolea
     (before.status === "unpaid" && after.status === "paid");
   if (!statusAllowed) return false;
   return RECEIPT_IDENTITY_FIELDS.every(
-    (field) => JSON.stringify(before[field]) === JSON.stringify(after[field]),
+    (field) =>
+      field === "createdAt" ||
+      JSON.stringify(before[field]) === JSON.stringify(after[field]),
   );
 }
 

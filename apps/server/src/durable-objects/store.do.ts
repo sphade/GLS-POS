@@ -146,7 +146,14 @@ function correctSaleTime(
     }
     return doc;
   }
-  if (stored) return incoming; // first stored without correction: leave history alone
+  // Stored without a clock correction: the day this money counts on is already
+  // recorded, so pin it. `isReceiptUpdateAllowed` deliberately ignores
+  // `createdAt` (a device may still hold a copy the server re-dated), which
+  // only stays safe because the stored value wins here.
+  if (stored) {
+    if (typeof stored.createdAt === "number") doc.createdAt = stored.createdAt;
+    return doc;
+  }
 
   let shift = skew !== undefined && Math.abs(skew) > CLOCK_SKEW_MS ? Math.round(skew) : 0;
   if (created + shift > now + CLOCK_SKEW_MS) shift = now - created;

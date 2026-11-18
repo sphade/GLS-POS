@@ -85,7 +85,10 @@ test("a paid receipt cannot be edited", () => {
 
 test("every identity field is protected from an update", () => {
   for (const field of RECEIPT_IDENTITY_FIELDS) {
-    if (field === "id") continue; // changing the id addresses a different document
+    // `id` addresses a different document; `createdAt` is pinned server-side
+    // instead of compared, so a settlement from a device with a stale copy of a
+    // re-dated sale can still go through.
+    if (field === "id" || field === "createdAt") continue;
     const tampered = { ...receipt, status: "paid", [field]: "changed" };
     assert.equal(
       isReceiptUpdateAllowed(receipt, tampered),
@@ -93,6 +96,14 @@ test("every identity field is protected from an update", () => {
       `${field} must not change during a settlement`,
     );
   }
+});
+
+test("a settlement from a device holding the old date is allowed; the store pins the day", () => {
+  // The server re-dated this sale (wrong terminal clock). The till never saw
+  // that correction, so it still sends the original timestamp. Refusing it
+  // would leave a paid bill unsettled forever.
+  const restated = { ...receipt, status: "paid", createdAt: receipt.createdAt - 86_400_000 };
+  assert.equal(isReceiptUpdateAllowed(receipt, restated), true);
 });
 
 test("an update cannot be used to reduce a bill", () => {
