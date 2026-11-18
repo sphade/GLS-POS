@@ -232,6 +232,45 @@ const MOVEMENT_REASONS = new Set<StockMovement["reason"]>([
   "waste",
 ]);
 
+/**
+ * Fields that make a receipt what it is. A device may flip an unpaid bill to
+ * paid, but it may not change any of these: that would rewrite money that has
+ * already been reported.
+ */
+const RECEIPT_IDENTITY_FIELDS = [
+  "id",
+  "number",
+  "total",
+  "currency",
+  "itemCount",
+  "createdAt",
+  "customerName",
+  "mode",
+  "storeName",
+  "storeReference",
+  "servedBy",
+  "discountTotal",
+  "orderDiscount",
+  "lines",
+  "cashReceived",
+] as const;
+
+/** True when the only difference is unpaid → paid (the settle flow). */
+function isReceiptSettlement(storedJson: string, incoming: unknown): boolean {
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) return false;
+  let stored: Record<string, unknown>;
+  try {
+    stored = JSON.parse(storedJson) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  const next = incoming as Record<string, unknown>;
+  if (stored.status !== "unpaid" || next.status !== "paid") return false;
+  return RECEIPT_IDENTITY_FIELDS.every(
+    (field) => JSON.stringify(stored[field]) === JSON.stringify(next[field]),
+  );
+}
+
 /** Runtime guard for the otherwise opaque sync document boundary. */
 function stockMovementOf(value: unknown): StockMovement | null {
   if (!value || typeof value !== "object") return null;
@@ -907,6 +946,19 @@ export class StoreDurableObject extends DurableObject<Env> {
       ) {
         data = correctSaleTime(data, existing?.data, now, options?.deviceClockSkewMs);
       }
+      if (change.collection === "audit_log" && !change.deleted && data && typeof data === "object") {
+        // Attribute every entry to the authenticated actor, not to whatever the
+        // device put in the document. `at` is clamped so a till with a fast
+        // clock cannot pin its entries above everyone else's forever.
+        const entry = data as Record<string, unknown>;
+        data = {
+          ...entry,
+          actorId: actor?.id ?? entry.actorId,
+          actorName: actor?.name ?? entry.actorName,
+          actorRole: role,
+          at: typeof entry.at === "number" && Number.isFinite(entry.at) ? Math.min(entry.at, now) : now,
+        };
+      }
       if (change.collection === "receipts" && !existing && !change.deleted) {
         newReceipts.push(data);
       }
@@ -964,6 +1016,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     }
 
     // Apply the new movements' deltas to the (now-written) product docs.
+    const unapplied: SyncChange[] = [];
     for (const movement of newMovements) {
       if (this.isDuplicateVipSale(movement)) {
         // An older app build billed a VIP order and recorded the sale again.
@@ -981,7 +1034,29 @@ export class StoreDurableObject extends DurableObject<Env> {
           .run();
         continue;
       }
-      seq = this.applyMovementDelta(movement, seq);
+      const applied = this.applyMovementDelta(movement, seq);
+      seq = applied.seq;
+      if (!applied.applied) unapplied.push(movement);
+    }
+
+    /**
+     * A movement that cannot be applied must not be acknowledged.
+     *
+     * It was written in the main loop above, so remove it and name it as denied:
+     * the till keeps it pending (and the reconciliation screen shows it) instead
+     * of clearing its queue while the product's stock never moved.
+     */
+    for (const movement of unapplied) {
+      this.db
+        .delete(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.collection, "stock_movements"),
+            eq(schema.documents.id, movement.id),
+          ),
+        )
+        .run();
+      refuse(movement);
     }
 
     // Ingredient ledger: device movements first, then recipe use by new sales.
@@ -1055,6 +1130,35 @@ export class StoreDurableObject extends DurableObject<Env> {
     // discount. Tombstones carry no money to check.
     if (!change.deleted && !syncMoneyDocumentIsConsistent(change.collection, change.data)) {
       return false;
+    }
+
+    /**
+     * Receipts and returns are append-only.
+     *
+     * Any role with `sale:create` could previously overwrite or delete an
+     * existing receipt, so "yesterday's total changed" was not only late sync —
+     * the history itself could be rewritten, and the trail could not prove it.
+     * A receipt may be created, and an unpaid one settled; a correction must be
+     * a new document (void/credit), never an edit.
+     */
+    if (change.collection === "receipts" || change.collection === "returns") {
+      if (change.deleted) return false;
+      if (!storedJson) return true;
+      // A refund is final the moment it is raised.
+      if (change.collection === "returns") return false;
+      return isReceiptSettlement(storedJson, change.data);
+    }
+
+    /**
+     * The audit trail is append-only and the server owns the fraud flags.
+     *
+     * `audit_log` only needs `catalog:read`, which every role has, so a device
+     * could delete the discount/refund flags this store wrote. Those ids are
+     * therefore refused outright, and no audit entry can be edited or deleted.
+     */
+    if (change.collection === "audit_log") {
+      if (change.id.startsWith("audit_disc_") || change.id.startsWith("audit_refund_")) return false;
+      if (change.deleted || storedJson) return false;
     }
 
     if (change.collection === "ingredient_movements") {
@@ -1268,11 +1372,16 @@ export class StoreDurableObject extends DurableObject<Env> {
   /**
    * Apply one stock movement's signed delta to its product (or variant),
    * clamped at zero, and re-write the product doc so devices pull the corrected
-   * stock. Untracked stock (null) is left alone. Returns the advanced seq.
+   * stock. Untracked stock (null) is left alone.
+   *
+   * `applied` is false when there is no product, no such variant, or the
+   * balance is untracked. The caller refuses such a movement instead of
+   * acknowledging a write that changed nothing — a sale whose stock never moved
+   * is exactly how sales and stock drift apart.
    */
-  private applyMovementDelta(movement: SyncChange, seq: number): number {
+  private applyMovementDelta(movement: SyncChange, seq: number): { seq: number; applied: boolean } {
     const data = stockMovementOf(movement.data);
-    if (!data || data.delta === 0) return seq;
+    if (!data || data.delta === 0) return { seq, applied: false };
 
     const [row] = this.db
       .select({ data: schema.documents.data })
@@ -1284,7 +1393,7 @@ export class StoreDurableObject extends DurableObject<Env> {
         ),
       )
       .all();
-    if (!row) return seq; // can't move stock for a product the store doesn't have
+    if (!row) return { seq, applied: false }; // can't move stock for a product the store doesn't have
 
     const product = JSON.parse(row.data) as StoredProduct;
     const precision = product.sellBy === "fraction" ? 1000 : 1;
@@ -1314,7 +1423,7 @@ export class StoreDurableObject extends DurableObject<Env> {
       }
     }
 
-    if (before === undefined || resulting === undefined) return seq;
+    if (before === undefined || resulting === undefined) return { seq, applied: false };
 
     let nextSeq = seq;
     const now = Date.now();
@@ -1370,7 +1479,7 @@ export class StoreDurableObject extends DurableObject<Env> {
       )
       .run();
 
-    return nextSeq;
+    return { seq: nextSeq, applied: true };
   }
 
   // --- Delivery-app links (see modules/channels) ---------------------------
@@ -1546,7 +1655,7 @@ export class StoreDurableObject extends DurableObject<Env> {
       next = this.applyMovementDelta(
         { collection: "stock_movements", id, data: movement, updatedAt: now, deleted: false },
         next,
-      );
+      ).seq;
     });
 
     // Keep the order's own edit clock: bumping it to server time could make a

@@ -12,6 +12,8 @@ import {
 import type { ProductVariant, RecipeLine, WebOrder } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
 import {
+  deviceMeta,
+  getActiveStore,
   loadAll,
   loadDocsInRange,
   loadOne,
@@ -28,7 +30,7 @@ import {
   type Totals,
 } from "./discount-model";
 import { logAudit } from "./audit";
-import { uid } from "./ids";
+import { uid, deviceToken } from "./ids";
 import { onSynced } from "./sync";
 import { trustedNow } from "./clock";
 
@@ -230,6 +232,15 @@ export type HeldOrder = {
   id: string;
   /** Customer/table name shown in the open-bills list. */
   label: string;
+  /**
+   * Dine-in table id this ticket belongs to.
+   *
+   * Tickets used to be keyed by the table's display name, so two tables both
+   * called "Table 1" in different sections, or a renamed table, could adopt each
+   * other's bill. The id is stable; `label` stays for display and for bills that
+   * predate this field.
+   */
+  tableId?: string;
   note?: string;
   entries: CartEntry[];
   itemCount: number;
@@ -244,7 +255,66 @@ export type HeldOrder = {
    * the app mid-edit never loses an open ticket.
    */
   resumedAt?: number;
+  /**
+   * Which till currently has this bill open, and until when.
+   *
+   * Two tills must not both ring up the same table: each would save its own
+   * copy and one set of items would vanish, or the bill would be charged twice.
+   * The claim is a short lease renewed on open/save, so a dead battery or a
+   * crashed app frees the table after a few minutes instead of locking it.
+   */
+  claimedBy?: string;
+  claimedUntil?: number;
 };
+
+/** How long one till owns an open table ticket before another may take it. */
+const TABLE_LEASE_MS = 3 * 60_000;
+
+/** Where the active cart's resumed ticket id is remembered across a restart. */
+const RESUMED_HELD_KEY = "cart_resumed_held_v1";
+
+export type TableClaimResult =
+  | { ok: true }
+  | { ok: false; reason: "leased"; claimedBy: string };
+
+/**
+ * The open bill, saved continuously.
+ *
+ * It used to live only in React memory, so a reload — an OS kill, a crash, a
+ * battery pull — left an open ticket that no charge would ever close, which is
+ * exactly how a ₦18,800 bill ended up "paid but still open". Persisting the
+ * cart means the resumed id survives with the items it belongs to.
+ */
+type CartDraft = {
+  storeId: string;
+  entries: CartEntry[];
+  orderDiscount: Discount | null;
+  heldId: string | null;
+  table: { id: string; label: string } | null;
+  savedAt: number;
+};
+
+const CART_DRAFT_KEY = "cart_draft_v1";
+/** A draft older than a trading day is stale, not something to restore. */
+const CART_DRAFT_MAX_AGE_MS = 12 * 60 * 60_000;
+
+function readCartDraft(): CartDraft | null {
+  try {
+    const raw = deviceMeta.get(CART_DRAFT_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw) as CartDraft;
+    if (!draft || typeof draft !== "object" || !Array.isArray(draft.entries)) return null;
+    // Stores share one device; a draft must never leak into another branch.
+    if (draft.storeId !== getActiveStore()) return null;
+    if (!Number.isFinite(draft.savedAt) || Date.now() - draft.savedAt > CART_DRAFT_MAX_AGE_MS) {
+      return null;
+    }
+    if (draft.entries.length === 0) return null;
+    return draft;
+  } catch {
+    return null;
+  }
+}
 
 /** Held bills need selling fields, never back-office root or variant costs. */
 function snapshotHeldEntries(entries: readonly CartEntry[]): CartEntry[] {
@@ -302,7 +372,7 @@ type CartState = {
 
   // --- Dine-in table tickets ----------------------------------------------
   /** Open (or reopen) a table's running ticket as the active cart. */
-  openTableTicket: (tableLabel: string) => void;
+  openTableTicket: (tableId: string, tableLabel: string) => TableClaimResult;
   /** Park the active cart back onto its table ticket and empty the cart. */
   saveTableTicket: () => void;
   /** Leave the table: discard its ticket if one is open, then empty the cart. */
@@ -447,7 +517,7 @@ type CartFast = {
    */
   registerCatalog: (products: Item[]) => void;
   /** Dine-in table ticket lifecycle (stable identities, ref-backed). */
-  openTableTicket: (tableLabel: string) => void;
+  openTableTicket: (tableId: string, tableLabel: string) => TableClaimResult;
   saveTableTicket: () => void;
   abandonTableTicket: () => void;
   /** Set or clear one line's discount. Pass null to remove it. */
@@ -476,8 +546,32 @@ export function CartProvider({
   children: ReactNode;
   canReadReceiptHistory: boolean;
 }) {
-  const [entries, setEntries] = useState<Record<string, CartEntry>>({});
-  const [orderDiscount, setOrderDiscountState] = useState<Discount | null>(null);
+  /**
+   * The bill that was open when the app last stopped, restored once.
+   *
+   * Scoped to this store and capped in age by `readCartDraft`, so a manager
+   * switching branches never inherits the other shop's half-typed sale.
+   */
+  const [restoredDraft] = useState<CartDraft | null>(readCartDraft);
+  const [entries, setEntries] = useState<Record<string, CartEntry>>(
+    () => Object.fromEntries((restoredDraft?.entries ?? []).map((e) => [e.lineId, e])),
+  );
+  const [orderDiscount, setOrderDiscountState] = useState<Discount | null>(
+    () => restoredDraft?.orderDiscount ?? null,
+  );
+
+  /**
+   * The held/ticket bill loaded in the cart, and the table it came from.
+   *
+   * These were plain in-memory refs, so a reload silently detached the cart
+   * from its ticket. Persisting them is what lets a charge close the bill it
+   * actually sold.
+   */
+  const resumedHeldIdRef = useRef<string | null>(restoredDraft?.heldId ?? null);
+  const tableTagRef = useRef<{ id: string; label: string } | null>(
+    restoredDraft?.table ?? null,
+  );
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- Synchronous fine-grained quantity store ----------------------------
   // React state remains the source rendered by checkout/report screens, while
@@ -502,6 +596,46 @@ export function CartProvider({
   const summaryListeners = useRef(new Set<() => void>());
   /** Live catalog lookup, refreshed by `registerCatalog` from CatalogProvider. */
   const catalogRef = useRef(new Map<string, Item>());
+
+  /**
+   * Save the open bill shortly after it changes.
+   *
+   * Debounced: a busy cart republishes on every tap, and serialising the whole
+   * bill each time is wasted work on the same JS thread that has to paint the
+   * grid. Any failure here costs a restart-recovery convenience, never a sale.
+   */
+  const persistDraftSoon = useCallback(() => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      draftTimer.current = null;
+      try {
+        const list = Object.values(entriesRef.current);
+        if (list.length === 0) {
+          deviceMeta.set(CART_DRAFT_KEY, "");
+          return;
+        }
+        const draft: CartDraft = {
+          storeId: getActiveStore(),
+          entries: list,
+          orderDiscount: orderDiscountRef.current,
+          heldId: resumedHeldIdRef.current,
+          table: tableTagRef.current,
+          savedAt: Date.now(),
+        };
+        deviceMeta.set(CART_DRAFT_KEY, JSON.stringify(draft));
+      } catch {
+        /* a draft is an aid, never a reason to fail a sale */
+      }
+    }, 400);
+  }, []);
+
+  // Never leave a timer pointing at an unmounted provider's refs.
+  useEffect(
+    () => () => {
+      if (draftTimer.current) clearTimeout(draftTimer.current);
+    },
+    [],
+  );
 
   const getQtyOf = useCallback(
     (productId: string) => productQtyRef.current.get(productId) ?? 0,
@@ -623,8 +757,9 @@ export function CartProvider({
         countListeners.current.forEach((listener) => listener());
       }
       if (summaryChanged) summaryListeners.current.forEach((listener) => listener());
+      persistDraftSoon();
     },
-    [notifyChangedEntries],
+    [notifyChangedEntries, persistDraftSoon],
   );
 
   /**
@@ -723,15 +858,43 @@ export function CartProvider({
     }
     // The bill is gone, so its discount goes with it.
     replaceEntries({}, null);
-  }, [replaceEntries]);
+    // Even an already-empty cart must forget its saved pointer, or the next
+    // restart would restore a bill this clear just consumed.
+    persistDraftSoon();
+  }, [persistDraftSoon, replaceEntries]);
 
   // --- Dine-in table tickets (stable identities) ---------------------------
-  /** Load (or start) a table's running ticket as the active cart. */
+  /**
+   * Load (or start) a table's running ticket as the active cart.
+   *
+   * Ownership is by table id first and label only as a fallback for tickets
+   * written before ids existed. A live lease held by another till is a refusal,
+   * not a warning: two tills editing one bill means one of them loses its items.
+   */
   const openTableTicket = useCallback(
-    (label: string) => {
-      const existing = heldOrdersRef.current.find((h) => h.label === label);
+    (tableId: string, tableLabel: string): TableClaimResult => {
+      const me = deviceToken();
+      const now = trustedNow();
+      const existing = heldOrdersRef.current.find(
+        (h) => h.tableId === tableId || (!h.tableId && h.label === tableLabel),
+      );
+
       if (existing) {
-        const marked: HeldOrder = { ...existing, resumedAt: Date.now() };
+        const leased =
+          typeof existing.claimedBy === "string" &&
+          existing.claimedBy !== me &&
+          typeof existing.claimedUntil === "number" &&
+          existing.claimedUntil > now;
+        if (leased) {
+          return { ok: false, reason: "leased", claimedBy: existing.claimedBy ?? "another till" };
+        }
+        const marked: HeldOrder = {
+          ...existing,
+          tableId,
+          resumedAt: now,
+          claimedBy: me,
+          claimedUntil: now + TABLE_LEASE_MS,
+        };
         dbPut("held_orders", marked);
         setHeldOrders((prev) => prev.map((h) => (h.id === existing.id ? marked : h)));
         const next: Record<string, CartEntry> = {};
@@ -744,9 +907,11 @@ export function CartProvider({
         replaceEntries({}, null);
         resumedHeldIdRef.current = null;
       }
-      tableTagRef.current = label;
+      tableTagRef.current = { id: tableId, label: tableLabel };
+      persistDraftSoon();
+      return { ok: true };
     },
-    [replaceEntries],
+    [persistDraftSoon, replaceEntries],
   );
 
   /**
@@ -755,11 +920,11 @@ export function CartProvider({
    * discarded instead — a table with nothing on it is free.
    */
   const saveTableTicket = useCallback(() => {
-    const label = tableTagRef.current;
+    const tag = tableTagRef.current;
     const list = Object.values(entriesRef.current);
     const res = resumedHeldIdRef.current;
 
-    if (!label || list.length === 0) {
+    if (!tag || list.length === 0) {
       if (res) {
         softDelete("held_orders", res);
         setHeldOrders((prev) => prev.filter((h) => h.id !== res));
@@ -775,7 +940,8 @@ export function CartProvider({
     const parkedDiscount = orderDiscountRef.current;
     const held: HeldOrder = {
       id: res ?? uid("held"),
-      label,
+      label: tag.label,
+      tableId: tag.id,
       note: prior?.note,
       entries: snapshotHeldEntries(list),
       itemCount: list.reduce((s, e) => s + e.qty, 0),
@@ -783,6 +949,10 @@ export function CartProvider({
       currency: list[0]?.item.currency ?? "NGN",
       createdAt: prior?.createdAt ?? now,
       ...(parkedDiscount ? { orderDiscount: parkedDiscount } : {}),
+      // Keep the table leased while the ticket is open, so another till cannot
+      // open and re-save it underneath this one. Bumped on every save.
+      claimedBy: deviceToken(),
+      claimedUntil: now + TABLE_LEASE_MS,
     };
     dbPut("held_orders", held);
     setHeldOrders((prev) => [held, ...prev.filter((h) => h.id !== held.id)]);
@@ -872,11 +1042,9 @@ export function CartProvider({
     loadAll<HeldOrder>("held_orders").sort((a, b) => b.createdAt - a.createdAt),
   );
 
-  // Latest held orders + the ticket currently loaded in the cart, readable
-  // from stable callbacks (table tickets) without re-creating them.
+  // Latest held orders, readable from stable callbacks (table tickets) without
+  // re-creating them.
   const heldOrdersRef = useRef(heldOrders);
-  const resumedHeldIdRef = useRef<string | null>(null);
-  const tableTagRef = useRef<string | null>(null);
   useEffect(() => {
     heldOrdersRef.current = heldOrders;
   }, [heldOrders]);
@@ -935,22 +1103,38 @@ export function CartProvider({
       holdOrder: (label, note, existingId) => {
         if (list.length === 0) return;
         const now = trustedNow();
+        const prior = existingId
+          ? heldOrdersRef.current.find((h) => h.id === existingId)
+          : undefined;
         // Editing the resumed bill consumes it; otherwise clear() below
         // auto-consumes whatever else was resumed (its items moved here).
         if (existingId && existingId === resumedHeldIdRef.current) {
           resumedHeldIdRef.current = null;
         }
+        const tag = tableTagRef.current;
         tableTagRef.current = null;
         const held: HeldOrder = {
-          id: existingId ?? `held_${now}_${Math.round(Math.random() * 1e4)}`,
+          id: existingId ?? uid("held"),
           label: label.trim() || "Open bill",
+          // A table ticket keeps its table and lease when re-parked through
+          // "hold"; a plain walk-in bill has neither.
+          ...(prior?.tableId ? { tableId: prior.tableId } : tag ? { tableId: tag.id } : {}),
           note,
           entries: snapshotHeldEntries(list),
           itemCount: list.reduce((s, e) => s + e.qty, 0),
           total,
           currency: list[0]?.item.currency ?? "NGN",
-          createdAt: now,
+          /**
+           * Keep the original creation time. Resetting it on every edit made an
+           * old unpaid bill sort as if it had just been opened — the ₦18,800
+           * ticket's `createdAt` had been rewritten a day after it was minted,
+           * which is why nobody could match it to the sale it belonged to.
+           */
+          createdAt: prior?.createdAt ?? now,
           ...(orderDiscount ? { orderDiscount } : {}),
+          ...(prior?.tableId && prior.claimedBy
+            ? { claimedBy: prior.claimedBy, claimedUntil: prior.claimedUntil }
+            : {}),
         };
         dbPut("held_orders", held);
         // Replace in place when updating, otherwise prepend.
@@ -968,7 +1152,7 @@ export function CartProvider({
         if (!held) return;
         // Mark resumed but KEEP the record until the cart is charged, re-held
         // or cleared — killing the app mid-edit no longer loses the ticket.
-        const marked: HeldOrder = { ...held, resumedAt: Date.now() };
+        const marked: HeldOrder = { ...held, resumedAt: trustedNow() };
         dbPut("held_orders", marked);
         setHeldOrders((prev) => prev.map((h) => (h.id === id ? marked : h)));
         const next: Record<string, CartEntry> = {};
@@ -977,7 +1161,12 @@ export function CartProvider({
         });
         replaceEntries(next, marked.orderDiscount ?? null);
         resumedHeldIdRef.current = id;
-        tableTagRef.current = null;
+        // A table ticket resumed from the open-bills list still belongs to its
+        // table, so leaving it parks the items back on the right table.
+        tableTagRef.current = held.tableId
+          ? { id: held.tableId, label: held.label }
+          : null;
+        persistDraftSoon();
       },
       discardHeldOrder: (id) => {
         if (resumedHeldIdRef.current === id) {
@@ -1130,6 +1319,7 @@ export function CartProvider({
     openTableTicket,
     saveTableTicket,
     abandonTableTicket,
+    persistDraftSoon,
   ]);
 
   return (

@@ -7,6 +7,7 @@ import { useStore } from "@/lib/store";
 import { AppDrawer } from "@/components/AppDrawer";
 import { StoreSwitcherList } from "@/components/StoreSwitcherList";
 import { ClockWarning } from "@/components/ClockWarning";
+import { SyncStatusBar } from "@/components/SyncStatusBar";
 
 /**
  * Shared primary-blue app bar (content_home_base.xml). Shows either the store
@@ -108,6 +109,7 @@ export function PosHeader({
 
       </View>
       <ClockWarning />
+      <SyncStatusBar />
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>

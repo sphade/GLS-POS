@@ -57,6 +57,8 @@ const replayHeadKey = (storeId: string) => `replay_head_v2_${storeId}`;
  */
 const referenceCursorKey = (storeId: string) => `reference_cursor_v1_${storeId}`;
 const referenceDoneKey = (storeId: string) => `reference_done_v1_${storeId}`;
+/** Last successful full sync, persisted so the age survives a restart. */
+const lastSyncOkKey = (storeId: string) => `sync_last_ok_at_v1_${storeId}`;
 /** Cursor for the newest-first trading pass; never the main replay cursor. */
 const recentCursorKey = (storeId: string) => `recent_cursor_v1_${storeId}`;
 const readProjectionPolicyKey = (storeId: string) => `read_projection_policy_v2_${storeId}`;
@@ -478,6 +480,16 @@ export type SyncActivity = {
    * no way to tell a slow first boot from a stuck one.
    */
   replayProgress: number | null;
+  /**
+   * Local rows still waiting to upload, from the same role-filtered count the
+   * Diagnostics screen uses. This is the number that answers "did the 5 units
+   * I added actually leave this phone?" — it was never shown anywhere before.
+   */
+  pending: number;
+  /** When this store last completed a full sync, or null if never. */
+  lastSyncedAt: number | null;
+  /** Store the activity refers to; screens ignore another branch's numbers. */
+  storeId: string | null;
 };
 let activity: SyncActivity = {
   busy: false,
@@ -485,6 +497,9 @@ let activity: SyncActivity = {
   errorKind: null,
   errorStoreId: null,
   replayProgress: null,
+  pending: 0,
+  lastSyncedAt: null,
+  storeId: null,
 };
 const activityListeners = new Set<() => void>();
 
@@ -495,7 +510,10 @@ function setActivity(patch: Partial<SyncActivity>): void {
     next.error === activity.error &&
     next.errorKind === activity.errorKind &&
     next.errorStoreId === activity.errorStoreId &&
-    next.replayProgress === activity.replayProgress
+    next.replayProgress === activity.replayProgress &&
+    next.pending === activity.pending &&
+    next.lastSyncedAt === activity.lastSyncedAt &&
+    next.storeId === activity.storeId
   ) {
     return;
   }
@@ -516,6 +534,19 @@ export function subscribeSyncActivity(cb: () => void): () => void {
 
 export function getSyncActivity(): SyncActivity {
   return activity;
+}
+
+/**
+ * Re-read the local upload queue for the status strip.
+ *
+ * Called when a write starts waiting and after every sync attempt, so the strip
+ * can say "3 changes not sent" the moment that becomes true instead of only
+ * when a sync happens to finish.
+ */
+export function refreshPendingSyncCount(storeId?: string): void {
+  const id = storeId ?? getActiveStore();
+  if (!id || id === "bootstrap" || id === "store_unknown") return;
+  setActivity({ storeId: id, pending: getPendingSyncCount(id) });
 }
 
 /** Snapshot of this device's sync position, for the Diagnostics screen. */
@@ -1650,6 +1681,16 @@ function handleSyncOutcome(epoch: SyncEpoch, result: SyncAttemptResult): void {
     clearRetryState(epoch);
     automaticSyncBlocks.delete(retryKey(epoch));
     if (isBooted(epoch.storeId)) clearSyncErrorForEpoch(epoch);
+    // Record "last synced" for the status strip. Persisted because a till is
+    // restarted often, and a strip that forgets the last successful sync says
+    // "never synced" every morning.
+    const now = Date.now();
+    storeScope(epoch.storeId).metaSet(lastSyncOkKey(epoch.storeId), String(now));
+    setActivity({
+      storeId: epoch.storeId,
+      lastSyncedAt: now,
+      pending: getPendingSyncCount(epoch.storeId),
+    });
     return;
   }
 
@@ -1858,6 +1899,17 @@ export function startAutoSync(
   const epoch = currentSyncEpoch(storeId);
   if (!epoch || epoch.scope !== scope) return () => {};
   clearRetryState(epoch);
+
+  // Seed the status strip from durable state before the first round trip, so a
+  // cold start shows the real backlog and the real time since a good sync.
+  {
+    const persistedOk = Number(db.metaGet(lastSyncOkKey(storeId)));
+    setActivity({
+      storeId,
+      pending: getPendingSyncCount(storeId),
+      lastSyncedAt: Number.isFinite(persistedOk) && persistedOk > 0 ? persistedOk : null,
+    });
+  }
 
   let stopped = false;
   const isCurrent = () => !stopped && epochIsCurrent(epoch);
@@ -2102,10 +2154,17 @@ export function startAutoSync(
   }, intervalMs);
 
   let debounce: ReturnType<typeof setTimeout> | null = null;
+  let pendingDebounce: ReturnType<typeof setTimeout> | null = null;
   // Push shortly after a sale rather than waiting for the poll. The replay no
   // longer gates this: a completed sale uploads even while history downloads.
   const unsubscribeLocalWrite = onLocalWrite(() => {
     if (!isCurrent()) return;
+    // The strip must show the new backlog quickly, but 17 COUNT queries on
+    // every keystroke in the item editor is not free — coalesce them.
+    if (pendingDebounce) clearTimeout(pendingDebounce);
+    pendingDebounce = setTimeout(() => {
+      if (isCurrent()) setActivity({ storeId, pending: getPendingSyncCount(storeId) });
+    }, 400);
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {
       if (isCurrent()) void syncNow(storeId);
@@ -2140,6 +2199,7 @@ export function startAutoSync(
     }
     clearInterval(handle);
     if (debounce) clearTimeout(debounce);
+    if (pendingDebounce) clearTimeout(pendingDebounce);
     unsubscribeLocalWrite();
     cancelFollowUp(epoch);
     clearRetryState(epoch);

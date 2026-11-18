@@ -18,8 +18,15 @@ import { deviceMeta } from "./db";
 const OFFSET_KEY = "clock_offset_ms_v1";
 /** Ignore differences smaller than this: network delay, not a wrong clock. */
 const NOISE_MS = 60_000;
-/** Above this the cashier is told to fix the device clock. */
-export const CLOCK_WARN_MS = 5 * 60_000;
+/**
+ * Above this the cashier is told to fix the device clock.
+ *
+ * This must match the server's `CLOCK_SKEW_MS` (store.do.ts). The server starts
+ * re-dating a sale once the device clock is more than two minutes out, so
+ * warning only at five let staff work through three minutes of silent
+ * rewriting — the till printed one time, the ledger stored another.
+ */
+export const CLOCK_WARN_MS = 2 * 60_000;
 
 let offset = (() => {
   try {

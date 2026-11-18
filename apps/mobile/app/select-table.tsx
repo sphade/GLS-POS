@@ -1,5 +1,5 @@
 ﻿import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -53,8 +53,11 @@ export default function SelectTableScreen() {
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.grid}>
         {visible.map((t) => {
-          // A table's running ticket is the held order saved under its name.
-          const ticket = heldOrders.find((h) => h.label === t.name);
+          // A table's running ticket is keyed by the table id; the label is only
+          // a fallback for tickets saved before ids were recorded.
+          const ticket = heldOrders.find(
+            (h) => h.tableId === t.id || (!h.tableId && h.label === t.name),
+          );
           return (
             <Pressable
               key={t.id}
@@ -66,7 +69,15 @@ export default function SelectTableScreen() {
                 }
                 feedbackTap();
                 // Load this table's ticket into the active cart (or start one).
-                openTableTicket(t.name);
+                const claim = openTableTicket(t.id, t.name);
+                if (!claim.ok) {
+                  feedbackError();
+                  Alert.alert(
+                    "Table in use",
+                    `${t.name} is open on another till. Finish it there, or wait a few minutes if that till is idle.`,
+                  );
+                  return;
+                }
                 router.push({ pathname: "/take-order", params: { table: t.name } });
               }}
               android_ripple={{ color: "#00000010" }}

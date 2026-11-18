@@ -35,19 +35,22 @@ const RANGES = [
 const DAY = 86_400_000;
 
 function rangeBounds(range: string): { from: number; to: number } {
-  // The corrected clock, so a till with a wrong date still shows the real day.
-  const d = new Date(trustedNow());
+  // One clock for the whole window. Mixing `trustedNow()` for the start with
+  // raw `Date.now()` for the end inverted the range on a till running behind,
+  // so Reports said "No sales in this period" while Today listed the sales.
+  const now = trustedNow();
+  const d = new Date(now);
   d.setHours(0, 0, 0, 0);
   const today = d.getTime();
   switch (range) {
     case "Today":
-      return { from: today, to: Date.now() + 1 };
+      return { from: today, to: now + 1 };
     case "Yesterday":
       return { from: today - DAY, to: today };
     case "This Week": {
       const w = new Date(d);
       w.setDate(d.getDate() - d.getDay());
-      return { from: w.getTime(), to: Date.now() + 1 };
+      return { from: w.getTime(), to: now + 1 };
     }
     case "Last Week": {
       const w = new Date(d);
@@ -55,7 +58,7 @@ function rangeBounds(range: string): { from: number; to: number } {
       return { from: w.getTime(), to: w.getTime() + 7 * DAY };
     }
     case "This Month":
-      return { from: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), to: Date.now() + 1 };
+      return { from: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), to: now + 1 };
     case "Last Month":
       return {
         from: new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime(),
@@ -67,7 +70,7 @@ function rangeBounds(range: string): { from: number; to: number } {
         to: new Date(d.getFullYear(), 0, 1).getTime(),
       };
     default:
-      return { from: new Date(d.getFullYear(), 0, 1).getTime(), to: Date.now() + 1 };
+      return { from: new Date(d.getFullYear(), 0, 1).getTime(), to: now + 1 };
   }
 }
 

@@ -773,12 +773,15 @@ function putOn<T extends { id: string }>(
   dirty: DirtyMode,
 ): void {
   const preserveDirty = dirty === "preserve";
+  // `deleted` is deliberately not reset here. It used to be forced to 0, so an
+  // edit made on a till that still had a locally-deleted row quietly brought
+  // the record back to life on every device. Deletions are final; re-creating
+  // something means a new document.
   db.runSync(
     `INSERT INTO ${c} (id, data, updated_at, deleted, dirty) VALUES (?, ?, ?, 0, ?)
      ON CONFLICT(id) DO UPDATE SET
        data = excluded.data,
        updated_at = MAX(excluded.updated_at, updated_at + 1),
-       deleted = 0,
        dirty = CASE WHEN ? = 1 THEN dirty ELSE excluded.dirty END`,
     item.id,
     JSON.stringify(item),
@@ -857,13 +860,26 @@ export function putBatch(
 /** Soft-delete (tombstone) so the deletion can sync. */
 export function softDelete(c: Collection, id: string) {
   const db = conn();
-  db.runSync(
+  const result = db.runSync(
     `UPDATE ${c}
      SET deleted = 1, dirty = 1, updated_at = MAX(?, updated_at + 1)
      WHERE id = ?`,
     Date.now(),
     id,
   );
+  /**
+   * A delete for a row this till never pulled used to be a silent no-op: the
+   * server never heard about it, so the "deleted" record came back on the next
+   * pull. Writing a tombstone makes the deletion travel like any other change.
+   */
+  if ((result.changes ?? 0) === 0) {
+    db.runSync(
+      `INSERT OR IGNORE INTO ${c} (id, data, updated_at, deleted, dirty)
+       VALUES (?, '{}', ?, 1, 1)`,
+      id,
+      Date.now(),
+    );
+  }
   notifyLocalWrite();
 }
 
@@ -1025,6 +1041,50 @@ function clearDirtyBatchOn(
   });
 }
 
+/**
+ * Take the server's stock numbers into a product this till has edited locally.
+ *
+ * Stock is server-owned, so it always wins; the device's unsent price/name
+ * edits are kept untouched and stay dirty. Before this, any till with an
+ * unsynced product change rejected the whole incoming row, which is why a
+ * manager could add 5 units, see 5 on his own phone, and have the counter keep
+ * showing the old figure.
+ */
+function mergeProductStockOn(db: SQLite.SQLiteDatabase, change: ChangeRow<unknown>): boolean {
+  const [local] = db.getAllSync<{ data: string }>(
+    `SELECT data FROM products WHERE id = ?`,
+    change.id,
+  );
+  if (!local) return false;
+  let current: Record<string, unknown>;
+  let remote: Record<string, unknown>;
+  try {
+    current = JSON.parse(local.data) as Record<string, unknown>;
+    remote = change.data as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  if (!current || typeof current !== "object" || !remote || typeof remote !== "object") {
+    return false;
+  }
+  if (remote.stockQuantity === undefined) return false;
+
+  const remoteVariants = Array.isArray(remote.variants)
+    ? (remote.variants as { id?: unknown; stock?: unknown }[])
+    : null;
+  const merged: Record<string, unknown> = { ...current, stockQuantity: remote.stockQuantity };
+  if (remoteVariants && Array.isArray(current.variants)) {
+    merged.variants = (current.variants as { id?: unknown }[]).map((variant) => {
+      const match = remoteVariants.find((candidate) => candidate.id === variant.id);
+      return match && match.stock !== undefined ? { ...variant, stock: match.stock } : variant;
+    });
+  }
+  // Deliberately keep `dirty` and `updated_at`: this is a merge into an unsent
+  // edit, not an acknowledgement of it.
+  db.runSync(`UPDATE products SET data = ? WHERE id = ?`, JSON.stringify(merged), change.id);
+  return true;
+}
+
 function applyRemoteOn<T extends { id: string }>(
   db: SQLite.SQLiteDatabase,
   c: Collection,
@@ -1044,6 +1104,11 @@ function applyRemoteOn<T extends { id: string }>(
     local.updated_at >= change.updatedAt &&
     c !== "stock_movements"
   ) {
+    // Products are the one collection where a field-level merge is right:
+    // the server owns stock, the device owns everything else.
+    if (c === "products" && !change.deleted) {
+      mergeProductStockOn(db, change as ChangeRow<unknown>);
+    }
     return;
   }
   db.runSync(
