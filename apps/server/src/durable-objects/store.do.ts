@@ -1249,12 +1249,22 @@ export class StoreDurableObject extends DurableObject<Env> {
     }
 
     // A confirmed VIP order already moved stock server-side under its own ref,
-    // so its billed receipt is not expected to carry movements of its own.
+    // so its billed receipt is not expected to carry movements of its own. The
+    // link is `receiptId` (plus the order code, for older rows that predate it);
+    // matching on the printed receipt number would never work, because those
+    // are device-issued.
+    const stockedVipOrders = webOrders.filter(
+      (order) => typeof order.stockDeductedAt === "number",
+    );
+    const vipStockedReceiptIds = new Set(
+      stockedVipOrders
+        .map((order) => order.receiptId)
+        .filter((id): id is string => typeof id === "string"),
+    );
     const vipStockedCodes = new Set(
-      webOrders
-        .filter((order) => typeof order.stockDeductedAt === "number")
-        .map((order) => order.number)
-        .filter((number): number is string => typeof number === "string"),
+      stockedVipOrders
+        .map((order) => order.code)
+        .filter((code): code is string => typeof code === "string"),
     );
     const refsWithMovements = new Set(
       movements.map((movement) => movement.ref).filter((ref): ref is string => typeof ref === "string"),
@@ -1272,6 +1282,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     for (const receipt of receipts) {
       const id = receipt.id;
       if (typeof id !== "string" || refsWithMovements.has(id)) continue;
+      if (vipStockedReceiptIds.has(id)) continue;
       if (typeof receipt.number === "string" && vipStockedCodes.has(receipt.number)) continue;
       const lines = Array.isArray(receipt.lines) ? (receipt.lines as { productId?: unknown }[]) : [];
       if (!lines.some((line) => trackedProduct(line.productId))) continue;
