@@ -125,6 +125,8 @@ export default function MoreScreen() {
       needs: "reports:view",
     },
     { key: "customers", value: String(customers.length), title: "Customers", route: "/customers", needs: "customers:manage" },
+    // Reports are computed from live data; closing the day records them once.
+    { key: "dayClose", value: "Freeze", title: "Day Close\n(Z-report)", route: "/day-close", needs: "reports:view" },
     { key: "staff", value: staffCount === null ? "—" : String(staffCount), title: "Staff", route: "/staff", needs: "staff:manage" },
     { key: "expense", value: "Expenses", title: "Record & View", route: "/expense-categories", needs: "expenses:manage" },
     { key: "audit", value: "Activity", title: "Who did what", route: "/audit", needs: "audit:view" },

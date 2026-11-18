@@ -7,12 +7,16 @@ import type {
   ApiCategory,
   ApiProduct,
   ApiStockAdjustment,
+  DayClose,
+  DayCloseResult,
+  DayCloseSummary,
   Ingredient,
   IngredientMovement,
   RecipeLine,
   StockTransfer,
   PlaceWebOrderRequest,
   PublicMenu,
+  ReconciliationReport,
   StockMovement,
   StockState,
   StoreRole,
@@ -27,6 +31,8 @@ import type {
   WebOrderStatus,
 } from "@gls-pos/types";
 import {
+  applyStockDelta,
+  isReceiptUpdateAllowed,
   readableSyncCollections,
   roleCan,
   roleCanReadProductCosts,
@@ -231,45 +237,6 @@ const MOVEMENT_REASONS = new Set<StockMovement["reason"]>([
   "return",
   "waste",
 ]);
-
-/**
- * Fields that make a receipt what it is. A device may flip an unpaid bill to
- * paid, but it may not change any of these: that would rewrite money that has
- * already been reported.
- */
-const RECEIPT_IDENTITY_FIELDS = [
-  "id",
-  "number",
-  "total",
-  "currency",
-  "itemCount",
-  "createdAt",
-  "customerName",
-  "mode",
-  "storeName",
-  "storeReference",
-  "servedBy",
-  "discountTotal",
-  "orderDiscount",
-  "lines",
-  "cashReceived",
-] as const;
-
-/** True when the only difference is unpaid → paid (the settle flow). */
-function isReceiptSettlement(storedJson: string, incoming: unknown): boolean {
-  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) return false;
-  let stored: Record<string, unknown>;
-  try {
-    stored = JSON.parse(storedJson) as Record<string, unknown>;
-  } catch {
-    return false;
-  }
-  const next = incoming as Record<string, unknown>;
-  if (stored.status !== "unpaid" || next.status !== "paid") return false;
-  return RECEIPT_IDENTITY_FIELDS.every(
-    (field) => JSON.stringify(stored[field]) === JSON.stringify(next[field]),
-  );
-}
 
 /** Runtime guard for the otherwise opaque sync document boundary. */
 function stockMovementOf(value: unknown): StockMovement | null {
@@ -498,6 +465,14 @@ export type PushResult = {
   /** The store's head sequence, so devices can detect a rebuilt oplog. */
   head: number;
 };
+
+/**
+ * The store checking itself — see `ReconciliationReport` in @gls-pos/types.
+ *
+ * Re-exported so the route file and the DO stub stay in step without importing
+ * the shared package twice.
+ */
+export type { ReconciliationReport };
 
 /** Per-request behaviour negotiated from the caller's `x-sync-protocol`. */
 export type PushOptions = {
@@ -1138,15 +1113,21 @@ export class StoreDurableObject extends DurableObject<Env> {
      * Any role with `sale:create` could previously overwrite or delete an
      * existing receipt, so "yesterday's total changed" was not only late sync —
      * the history itself could be rewritten, and the trail could not prove it.
-     * A receipt may be created, and an unpaid one settled; a correction must be
-     * a new document (void/credit), never an edit.
+     * A receipt may be created, re-sent unchanged, or have an unpaid one
+     * settled; a correction must be a new document (void/credit), never an edit.
      */
     if (change.collection === "receipts" || change.collection === "returns") {
       if (change.deleted) return false;
       if (!storedJson) return true;
       // A refund is final the moment it is raised.
       if (change.collection === "returns") return false;
-      return isReceiptSettlement(storedJson, change.data);
+      let stored: unknown;
+      try {
+        stored = JSON.parse(storedJson);
+      } catch {
+        return false;
+      }
+      return isReceiptUpdateAllowed(stored, change.data);
     }
 
     /**
@@ -1185,6 +1166,312 @@ export class StoreDurableObject extends DurableObject<Env> {
     }
 
     return false;
+  }
+
+  // --- Reconciliation -------------------------------------------------------
+  /**
+   * Check the store against itself: movement arithmetic, balances versus the
+   * ledger, movements without products, receipts without movements, duplicate
+   * table tickets, and tickets left open for hours.
+   *
+   * Read-only. This is the same forensic pass that was run by hand after every
+   * complaint; the difference is that the owner can now ask for it.
+   */
+  reconcile(): ReconciliationReport {
+    const products = this.docs<StoredProduct>("products");
+    const movements = this.docs<StockMovement>("stock_movements");
+    const receipts = this.docs<Record<string, unknown>>("receipts");
+    const returns = this.docs<Record<string, unknown>>("returns");
+    const heldOrders = this.docs<Record<string, unknown>>("held_orders");
+    const auditEntries = this.docs<Record<string, unknown>>("audit_log");
+    const webOrders = this.docs<Record<string, unknown>>("web_orders");
+    const now = Date.now();
+    const round = (value: number) => Math.round(value * 1000) / 1000;
+
+    const productIds = new Set(products.map((product) => product.id));
+    const ledger = new Map<string, number>();
+    const ledgerKey = (productId: string, variantId?: string) =>
+      `${productId}\u0000${variantId ?? ""}`;
+    for (const movement of movements) {
+      const key = ledgerKey(movement.productId, movement.variantId);
+      ledger.set(key, (ledger.get(key) ?? 0) + movement.delta);
+    }
+
+    const arithmeticBreaks: ReconciliationReport["arithmeticBreaks"] = [];
+    const orphanMovements: ReconciliationReport["orphanMovements"] = [];
+    for (const movement of movements) {
+      if (!productIds.has(movement.productId)) {
+        orphanMovements.push({
+          id: movement.id,
+          productId: movement.productId,
+          productName: movement.productName,
+        });
+      }
+      if (typeof movement.baseStock === "number" && Number.isFinite(movement.baseStock)) {
+        if (Math.abs(movement.baseStock + movement.delta - movement.resulting) > 1e-6) {
+          arithmeticBreaks.push({
+            id: movement.id,
+            productName: movement.productName,
+            base: movement.baseStock,
+            delta: movement.delta,
+            resulting: movement.resulting,
+          });
+        }
+      }
+    }
+
+    const balanceMismatches: ReconciliationReport["balanceMismatches"] = [];
+    for (const product of products) {
+      if (typeof product.stockQuantity === "number") {
+        const sum = round(ledger.get(ledgerKey(product.id)) ?? 0);
+        if (sum !== round(product.stockQuantity)) {
+          balanceMismatches.push({
+            productId: product.id,
+            name: product.name,
+            balance: product.stockQuantity,
+            ledger: sum,
+          });
+        }
+      }
+      for (const variant of product.variants ?? []) {
+        if (typeof variant.stock !== "number") continue;
+        const sum = round(ledger.get(ledgerKey(product.id, variant.id)) ?? 0);
+        if (sum !== round(variant.stock)) {
+          balanceMismatches.push({
+            productId: product.id,
+            name: product.name,
+            variantId: variant.id,
+            balance: variant.stock,
+            ledger: sum,
+          });
+        }
+      }
+    }
+
+    // A confirmed VIP order already moved stock server-side under its own ref,
+    // so its billed receipt is not expected to carry movements of its own.
+    const vipStockedCodes = new Set(
+      webOrders
+        .filter((order) => typeof order.stockDeductedAt === "number")
+        .map((order) => order.number)
+        .filter((number): number is string => typeof number === "string"),
+    );
+    const refsWithMovements = new Set(
+      movements.map((movement) => movement.ref).filter((ref): ref is string => typeof ref === "string"),
+    );
+    const trackedProduct = (productId: unknown) => {
+      if (typeof productId !== "string") return false;
+      return products.some(
+        (product) =>
+          product.id === productId &&
+          (typeof product.stockQuantity === "number" ||
+            (product.variants ?? []).some((variant) => typeof variant.stock === "number")),
+      );
+    };
+    const receiptsWithoutMovements: ReconciliationReport["receiptsWithoutMovements"] = [];
+    for (const receipt of receipts) {
+      const id = receipt.id;
+      if (typeof id !== "string" || refsWithMovements.has(id)) continue;
+      if (typeof receipt.number === "string" && vipStockedCodes.has(receipt.number)) continue;
+      const lines = Array.isArray(receipt.lines) ? (receipt.lines as { productId?: unknown }[]) : [];
+      if (!lines.some((line) => trackedProduct(line.productId))) continue;
+      receiptsWithoutMovements.push({
+        id,
+        number: typeof receipt.number === "string" ? receipt.number : "",
+        total: typeof receipt.total === "number" ? receipt.total : 0,
+        createdAt: typeof receipt.createdAt === "number" ? receipt.createdAt : 0,
+      });
+    }
+
+    const ticketsByTable = new Map<string, string[]>();
+    const staleTickets: ReconciliationReport["staleTickets"] = [];
+    for (const held of heldOrders) {
+      const id = typeof held.id === "string" ? held.id : null;
+      if (!id) continue;
+      if (typeof held.tableId === "string") {
+        const ids = ticketsByTable.get(held.tableId);
+        if (ids) ids.push(id);
+        else ticketsByTable.set(held.tableId, [id]);
+      }
+      if (
+        typeof held.resumedAt === "number" &&
+        now - held.resumedAt > 12 * 60 * 60_000
+      ) {
+        staleTickets.push({
+          id,
+          label: typeof held.label === "string" ? held.label : "",
+          total: typeof held.total === "number" ? held.total : 0,
+          resumedAt: held.resumedAt,
+        });
+      }
+    }
+    const duplicateTableTickets = [...ticketsByTable.entries()]
+      .filter(([, ids]) => ids.length > 1)
+      .map(([tableId, ids]) => ({ tableId, ids }));
+
+    // Keep the payload small enough for a phone screen.
+    const cap = <T,>(rows: T[]) => rows.slice(0, 20);
+    const capped = {
+      arithmeticBreaks: cap(arithmeticBreaks),
+      balanceMismatches: cap(balanceMismatches),
+      orphanMovements: cap(orphanMovements),
+      receiptsWithoutMovements: cap(receiptsWithoutMovements),
+      duplicateTableTickets: cap(duplicateTableTickets),
+      staleTickets: cap(staleTickets),
+    };
+
+    return {
+      generatedAt: now,
+      head: this.currentSeq(),
+      counts: {
+        products: products.length,
+        movements: movements.length,
+        receipts: receipts.length,
+        returns: returns.length,
+        heldOrders: heldOrders.length,
+        auditEntries: auditEntries.length,
+      },
+      ...capped,
+      ok:
+        arithmeticBreaks.length === 0 &&
+        balanceMismatches.length === 0 &&
+        orphanMovements.length === 0 &&
+        receiptsWithoutMovements.length === 0 &&
+        duplicateTableTickets.length === 0 &&
+        staleTickets.length === 0,
+    };
+  }
+
+  // --- Frozen daily close ---------------------------------------------------
+  /**
+   * The documents a day's totals are read from.
+   *
+   * Loaded once per request: listing thirty closed days must not re-read every
+   * receipt thirty times on a store that has years of history.
+   */
+  private dayDocuments(): {
+    receipts: Record<string, unknown>[];
+    returns: Record<string, unknown>[];
+  } {
+    return {
+      receipts: this.docs<Record<string, unknown>>("receipts"),
+      returns: this.docs<Record<string, unknown>>("returns"),
+    };
+  }
+
+  /**
+   * Totals for one trading day window, read from stored documents.
+   *
+   * Shared by the close and the drift check so both count the same way the
+   * Reports screen does: every receipt in [from, to), minus non-void returns.
+   */
+  private dayTotals(
+    from: number,
+    to: number,
+    source?: { receipts: Record<string, unknown>[]; returns: Record<string, unknown>[] },
+  ) {
+    const inRange = (at: unknown) =>
+      typeof at === "number" && Number.isFinite(at) && at >= from && at < to;
+    const all = source ?? this.dayDocuments();
+    const receipts = all.receipts.filter((receipt) => inRange(receipt.createdAt));
+    const returns = all.returns.filter(
+      (ret) => inRange(ret.createdAt) && ret.method !== "No refund",
+    );
+
+    const money = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value) ? value : 0;
+    const modes = new Map<string, { total: number; count: number }>();
+    let gross = 0;
+    let discounts = 0;
+    let itemCount = 0;
+    let firstSaleAt: number | null = null;
+    let lastSaleAt: number | null = null;
+    for (const receipt of receipts) {
+      const total = money(receipt.total);
+      gross += total;
+      discounts += money(receipt.discountTotal);
+      itemCount += money(receipt.itemCount);
+      const mode = typeof receipt.mode === "string" && receipt.mode ? receipt.mode : "Unknown";
+      const bucket = modes.get(mode) ?? { total: 0, count: 0 };
+      bucket.total += total;
+      bucket.count += 1;
+      modes.set(mode, bucket);
+      const at = receipt.createdAt as number;
+      if (firstSaleAt === null || at < firstSaleAt) firstSaleAt = at;
+      if (lastSaleAt === null || at > lastSaleAt) lastSaleAt = at;
+    }
+    const refunds = returns.reduce((sum, ret) => sum + money(ret.total), 0);
+
+    return {
+      gross,
+      discounts,
+      refunds,
+      net: gross - refunds,
+      salesCount: receipts.length,
+      returnCount: returns.length,
+      itemCount,
+      byMode: [...modes.entries()]
+        .map(([mode, bucket]) => ({ mode, ...bucket }))
+        .sort((a, b) => b.total - a.total),
+      firstSaleAt,
+      lastSaleAt,
+    };
+  }
+
+  /**
+   * Close a trading day and freeze its totals.
+   *
+   * The caller supplies the local day key and the exact bounds the till used,
+   * because only the till knows the shop's timezone and its corrected clock.
+   * Everything after that is computed here, from stored documents, so a device
+   * cannot invent a total.
+   *
+   * Idempotent and irreversible: closing an already-closed day returns the
+   * first record. A day that has been read out to the owner must not change
+   * because a phone uploaded a late sale afterwards — the drift is visible by
+   * comparing the frozen figures with the live report, which is the point.
+   */
+  async closeDay(input: {
+    day: string;
+    from: number;
+    to: number;
+    actor: { id: string; name: string };
+  }): Promise<DayCloseResult> {
+    const key = `dayclose:${input.day}`;
+    const existing = await this.ctx.storage.get<DayClose>(key);
+    if (existing) return { close: existing, alreadyClosed: true };
+
+    const close: DayClose = {
+      day: input.day,
+      closedAt: Date.now(),
+      closedById: input.actor.id,
+      closedByName: input.actor.name,
+      from: input.from,
+      to: input.to,
+      ...this.dayTotals(input.from, input.to),
+    };
+    await this.ctx.storage.put(key, close);
+    return { close, alreadyClosed: false };
+  }
+
+  /**
+   * Closed days, newest first, each with the live totals for the same window.
+   *
+   * `drift` is live minus frozen. Zero means the day is settled. A non-zero
+   * figure is not an error: it is a late upload (a phone that was offline at
+   * closing time), and showing it is how the owner learns that yesterday's
+   * read-out was N naira short instead of finding out at month end.
+   */
+  async listDayCloses(limit = 30): Promise<DayCloseSummary[]> {
+    const stored = await this.ctx.storage.list<DayClose>({ prefix: "dayclose:" });
+    const documents = this.dayDocuments();
+    return [...stored.values()]
+      .sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0))
+      .slice(0, Math.max(1, Math.min(120, limit)))
+      .map((close) => {
+        const live = this.dayTotals(close.from, close.to, documents);
+        return { ...close, live, drift: live.net - close.net };
+      });
   }
 
   // --- Diagnostics (temporary: correct wrong-dated receipts) -----------------
@@ -1381,7 +1668,12 @@ export class StoreDurableObject extends DurableObject<Env> {
    */
   private applyMovementDelta(movement: SyncChange, seq: number): { seq: number; applied: boolean } {
     const data = stockMovementOf(movement.data);
-    if (!data || data.delta === 0) return { seq, applied: false };
+    // A malformed movement is refused: the device must not clear a row that
+    // never described a balance change.
+    if (!data) return { seq, applied: false };
+    // A zero delta changes nothing, so it is acknowledged rather than refused —
+    // refusing it would leave an inert row pending on that till forever.
+    if (data.delta === 0) return { seq, applied: true };
 
     const [row] = this.db
       .select({ data: schema.documents.data })
@@ -1397,16 +1689,18 @@ export class StoreDurableObject extends DurableObject<Env> {
 
     const product = JSON.parse(row.data) as StoredProduct;
     const precision = product.sellBy === "fraction" ? 1000 : 1;
-    const rounded = (value: number) => Math.round(value * precision) / precision;
     let before: number | undefined;
     let resulting: number | undefined;
+    let actualDelta = 0;
     let settingChanged = false;
 
     if (data.variantId) {
       const variant = product.variants?.find((candidate) => candidate.id === data.variantId);
       if (variant && variant.stock !== null && variant.stock !== undefined) {
         before = variant.stock;
-        resulting = rounded(Math.max(0, variant.stock + data.delta));
+        const applied = applyStockDelta(variant.stock, data.delta, precision);
+        resulting = applied.resulting;
+        actualDelta = applied.actualDelta;
         variant.stock = resulting;
         if (typeof data.autoUpdateStock === "boolean") {
           settingChanged = variant.autoUpdateStock !== data.autoUpdateStock;
@@ -1415,7 +1709,9 @@ export class StoreDurableObject extends DurableObject<Env> {
       }
     } else if (product.stockQuantity !== null && product.stockQuantity !== undefined) {
       before = product.stockQuantity;
-      resulting = rounded(Math.max(0, product.stockQuantity + data.delta));
+      const applied = applyStockDelta(product.stockQuantity, data.delta, precision);
+      resulting = applied.resulting;
+      actualDelta = applied.actualDelta;
       product.stockQuantity = resulting;
       if (typeof data.autoUpdateStock === "boolean") {
         settingChanged = product.autoUpdateStock !== data.autoUpdateStock;
@@ -1453,7 +1749,6 @@ export class StoreDurableObject extends DurableObject<Env> {
     // Replace the device's optimistic after-value with what this single-writer
     // store actually applied. If concurrent/offline activity forced a clamp,
     // retain the requested delta separately so the history remains explainable.
-    const actualDelta = resulting - before;
     const normalized: StockMovement = {
       ...data,
       baseStock: before,

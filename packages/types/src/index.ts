@@ -463,6 +463,123 @@ export interface SyncPushResponse extends SyncPullResponse {
   deniedIds: SyncDeniedChange[];
 }
 
+/**
+ * The store checking itself.
+ *
+ * Every check here is one that used to be a throwaway script run by hand after
+ * a complaint ("stock is wrong", "a bill is missing", "two people sold the same
+ * table"). Making it a first-class read means the system can say "this is
+ * wrong" before a cashier does. Read-only: nothing in it changes a document.
+ */
+export interface ReconciliationReport {
+  generatedAt: number;
+  /** The store's head sequence when the check ran. */
+  head: number;
+  counts: {
+    products: number;
+    movements: number;
+    receipts: number;
+    returns: number;
+    heldOrders: number;
+    auditEntries: number;
+  };
+  /** Movements whose stored base + delta does not equal the resulting balance. */
+  arithmeticBreaks: {
+    id: string;
+    productName: string;
+    base?: number;
+    delta: number;
+    resulting: number;
+  }[];
+  /** Tracked balances that disagree with the sum of their movements. */
+  balanceMismatches: {
+    productId: string;
+    name: string;
+    variantId?: string;
+    balance: number;
+    ledger: number;
+  }[];
+  /** Movements pointing at a product the store no longer has. */
+  orphanMovements: { id: string; productId: string; productName: string }[];
+  /** Receipts that should have moved stock but have no movement at all. */
+  receiptsWithoutMovements: {
+    id: string;
+    number: string;
+    total: number;
+    createdAt: number;
+  }[];
+  /** Two live tickets claiming the same table. */
+  duplicateTableTickets: { tableId: string; ids: string[] }[];
+  /** Tickets marked resumed long ago — a bill opened and never closed. */
+  staleTickets: { id: string; label: string; total: number; resumedAt: number }[];
+  /** Whether every check passed, for a one-line status. */
+  ok: boolean;
+}
+
+/**
+ * One trading day, frozen.
+ *
+ * Computed once by the store from its own receipts and returns, then kept
+ * forever. Re-closing a day returns the first copy untouched: a report that the
+ * manager has already read must not be allowed to change because a till
+ * uploaded a late sale hours afterwards. The late sale is not lost — it shows
+ * in the live figures for the day, and the difference is the drift between
+ * them.
+ */
+export interface DayClose {
+  /** Local calendar day, "YYYY-MM-DD", as the closing till saw it. */
+  day: string;
+  closedAt: number;
+  closedById: ID;
+  closedByName: string;
+  /** Unix ms bounds the close used, [from, to). */
+  from: number;
+  to: number;
+  /** All money is integer minor units. */
+  gross: number;
+  discounts: number;
+  refunds: number;
+  /** gross - refunds. */
+  net: number;
+  salesCount: number;
+  returnCount: number;
+  itemCount: number;
+  byMode: { mode: string; total: number; count: number }[];
+  firstSaleAt: number | null;
+  lastSaleAt: number | null;
+}
+
+/** The result of asking to close a day. */
+export interface DayCloseResult {
+  close: DayClose;
+  /** True when this day was already closed and the stored copy was returned. */
+  alreadyClosed: boolean;
+}
+
+/**
+ * A closed day plus what the books say now.
+ *
+ * `drift` is the money that arrived after the close (`live.net - net`). It is
+ * the honest answer to "why doesn't yesterday match the report?": either
+ * nothing was late and it is zero, or a till uploaded an offline sale and the
+ * owner can see exactly how much.
+ */
+export interface DayCloseSummary extends DayClose {
+  live: {
+    gross: number;
+    discounts: number;
+    refunds: number;
+    net: number;
+    salesCount: number;
+    returnCount: number;
+    itemCount: number;
+    byMode: { mode: string; total: number; count: number }[];
+    firstSaleAt: number | null;
+    lastSaleAt: number | null;
+  };
+  drift: number;
+}
+
 // ---------------------------------------------------------------------------
 // Store registry (control plane)
 // ---------------------------------------------------------------------------
@@ -473,6 +590,7 @@ export * from "./permissions";
 export * from "./web-order";
 export * from "./integration";
 export * from "./channels";
+export * from "./invariants";
 
 /** Bump whenever collection visibility semantics change. */
 export const SYNC_READ_POLICY_VERSION = 3;

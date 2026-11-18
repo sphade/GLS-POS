@@ -2,7 +2,10 @@
   "extends": "@gls-pos/typescript-config/base.json",
   "compilerOptions": {
     "noEmit": true,
-    "moduleResolution": "Bundler"
+    "moduleResolution": "Bundler",
+    // Tests are run by Node's own runner, which resolves `.ts` imports
+    // literally. Nothing here is emitted, so the extension is safe.
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*.ts"]
 }

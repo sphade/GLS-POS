@@ -1,0 +1,39 @@
+name: CI
+
+# The invariants this repo depends on (stock arithmetic, append-only money
+# documents, table-ticket leases) are now tested. This workflow is what stops
+# them quietly regressing: a change that breaks a sale's stock delta fails here
+# instead of on a busy Saturday.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Types first: a compile error makes the test run meaningless.
+      - name: Typecheck
+        run: pnpm check-types
+
+      - name: Invariant tests
+        run: pnpm test

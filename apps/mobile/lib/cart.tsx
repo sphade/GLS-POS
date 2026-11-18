@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type { ProductVariant, RecipeLine, WebOrder } from "@gls-pos/types";
+import { ticketClaimState } from "@gls-pos/types";
 import { formatMoney } from "@/constants/theme";
 import {
   deviceMeta,
@@ -880,12 +881,8 @@ export function CartProvider({
       );
 
       if (existing) {
-        const leased =
-          typeof existing.claimedBy === "string" &&
-          existing.claimedBy !== me &&
-          typeof existing.claimedUntil === "number" &&
-          existing.claimedUntil > now;
-        if (leased) {
+        const claim = ticketClaimState(existing, me, now);
+        if (claim === "leased") {
           return { ok: false, reason: "leased", claimedBy: existing.claimedBy ?? "another till" };
         }
         const marked: HeldOrder = {

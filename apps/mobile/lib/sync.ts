@@ -2163,7 +2163,7 @@ export function startAutoSync(
     // every keystroke in the item editor is not free — coalesce them.
     if (pendingDebounce) clearTimeout(pendingDebounce);
     pendingDebounce = setTimeout(() => {
-      if (isCurrent()) setActivity({ storeId, pending: getPendingSyncCount(storeId) });
+      if (isCurrent()) refreshPendingSyncCount(storeId);
     }, 400);
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {

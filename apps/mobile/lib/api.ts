@@ -3,10 +3,13 @@ import type {
   ChannelLink,
   ChannelLinkView,
   ChannelStatus,
+  DayCloseResult,
+  DayCloseSummary,
   StockTransfer,
   StoreMembership,
   StoreProfile,
   StoreRole,
+  ReconciliationReport,
 } from "@gls-pos/types";
 import { API_URL, authCookie } from "./auth-client";
 import { OFFLINE_MODE } from "./offline";
@@ -214,6 +217,9 @@ export type ProductionResult = {
 };
 
 export const CENTRAL_UNITS = ["kg", "liters", "pieces", "bags", "boxes", "cans"] as const;
+
+/** A store's self-check, tagged with the store it describes. */
+export type StoreCheck = ReconciliationReport & { storeId: string };
 
 /** Result of copying another shop's menu into this one. */
 export type CopyCatalogResult = {
@@ -496,6 +502,40 @@ export const api = {
     request<ProductionResult>(
       "/inventory/produce",
       { method: "POST", body: JSON.stringify(body) },
+      30_000,
+    ),
+
+  // --- Store self-check (owner only) ---------------------------------------
+  /**
+   * Ask the store to reconcile itself: stock arithmetic, balances against the
+   * movement ledger, receipts that never moved stock, and table tickets left
+   * open or claimed twice.
+   *
+   * Read-only and safe to run mid-trading. Longer timeout because the store may
+   * be cold and the check reads every document.
+   */
+  runStoreCheck: (storeId: string) =>
+    request<StoreCheck>("/diag/reconcile", { headers: { "x-store-id": storeId } }, 30_000),
+
+  // --- Frozen daily close (Z-report) ---------------------------------------
+  /** Days already closed for this store, newest first. */
+  listDayCloses: (storeId: string, limit = 30) =>
+    request<{ storeId: string; closes: DayCloseSummary[] }>(`/day-close?limit=${limit}`, {
+      headers: { "x-store-id": storeId },
+    }),
+  /**
+   * Close a local trading day. The till sends the day it saw and the exact
+   * bounds; the store computes the totals. Closing an already-closed day
+   * returns the first copy, so this is safe to retry.
+   */
+  closeDay: (storeId: string, body: { day: string; from: number; to: number }) =>
+    request<{ storeId: string } & DayCloseResult>(
+      "/day-close",
+      {
+        method: "POST",
+        headers: { "x-store-id": storeId },
+        body: JSON.stringify(body),
+      },
       30_000,
     ),
 };

@@ -14,8 +14,9 @@ import { useRouter } from "expo-router";
 import Constants from "expo-constants";
 import * as Application from "expo-application";
 import * as Device from "expo-device";
-import { colors } from "@/constants/theme";
+import { colors, formatMoney } from "@/constants/theme";
 import { API_URL } from "@/lib/auth-client";
+import { api, type StoreCheck } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
 import { feedbackTap } from "@/lib/feedback";
@@ -39,6 +40,19 @@ type Health =
   | { state: "ok"; environment: string; ms: number }
   | { state: "error"; message: string };
 
+/**
+ * The store's self-check.
+ *
+ * Deliberately manual: it reads every document in the store, takes seconds on a
+ * real shop, and is an owner's tool for answering a specific complaint — not
+ * something to run on every screen visit.
+ */
+type StoreCheckState =
+  | { state: "idle" }
+  | { state: "running" }
+  | { state: "done"; report: StoreCheck }
+  | { state: "error"; message: string };
+
 export default function DiagnosticsScreen() {
   const router = useRouter();
   const { store } = useStore();
@@ -46,6 +60,18 @@ export default function DiagnosticsScreen() {
   const [health, setHealth] = useState<Health>({ state: "checking" });
   const [sync, setSync] = useState(() => getSyncDiagnostics(store.id));
   const [freezes, setFreezes] = useState(readFreezeLog);
+  const [storeCheck, setStoreCheck] = useState<StoreCheckState>({ state: "idle" });
+
+  const runCheck = useCallback(async () => {
+    setStoreCheck({ state: "running" });
+    feedbackTap();
+    const result = await api.runStoreCheck(store.id);
+    if (result.ok) {
+      setStoreCheck({ state: "done", report: result.data });
+    } else {
+      setStoreCheck({ state: "error", message: result.error.message });
+    }
+  }, [store.id]);
 
   const check = useCallback(async () => {
     setHealth({ state: "checking" });
@@ -185,6 +211,43 @@ export default function DiagnosticsScreen() {
           <Row label="Last error" value={sync.error ?? "none"} />
         </Card>
 
+        {/* Owner-only: the store checking itself against its own ledger. */}
+        {store.role === "owner" ? (
+          <Card title="STORE CHECK">
+            {storeCheck.state === "idle" ? (
+              <Text style={styles.hint}>
+                Checks stock arithmetic, balances against the movement ledger, sales that
+                never moved stock, and table bills left open or claimed twice. Read-only
+                and safe to run while trading.
+              </Text>
+            ) : storeCheck.state === "running" ? (
+              <View style={styles.statusRow}>
+                <ActivityIndicator color={colors.primary} />
+                <Text style={styles.hint}>Reading every document…</Text>
+              </View>
+            ) : storeCheck.state === "error" ? (
+              <Text style={[styles.hint, { color: colors.red500 }]}>
+                {storeCheck.message}
+              </Text>
+            ) : (
+              <StoreCheckReport report={storeCheck.report} currency={store.currency} />
+            )}
+
+            <Pressable
+              onPress={() => void runCheck()}
+              disabled={storeCheck.state === "running"}
+              style={[styles.checkButton, storeCheck.state === "running" ? styles.checkButtonBusy : null]}
+              accessibilityRole="button"
+              accessibilityLabel="Run store check"
+            >
+              <Ionicons name="shield-checkmark-outline" size={16} color={colors.primary} />
+              <Text style={styles.checkButtonText}>
+                {storeCheck.state === "running" ? "CHECKING…" : "RUN STORE CHECK"}
+              </Text>
+            </Pressable>
+          </Card>
+        ) : null}
+
         <Card title="APP">
           <Row label="Version" value={Constants.expoConfig?.version ?? "—"} />
           <Row
@@ -260,6 +323,106 @@ export default function DiagnosticsScreen() {
         </Pressable>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function StoreCheckReport({ report, currency }: { report: StoreCheck; currency: string }) {
+  const money = (minor: number) => formatMoney(minor, currency);
+  const when = (at: number) =>
+    new Date(at).toLocaleString([], {
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+  return (
+    <View style={styles.report}>
+      <View style={[styles.verdict, report.ok ? styles.verdictOk : styles.verdictBad]}>
+        <Ionicons
+          name={report.ok ? "checkmark-circle" : "alert-circle"}
+          size={16}
+          color={colors.white}
+        />
+        <Text style={styles.verdictText}>
+          {report.ok ? "ALL CHECKS PASSED" : "PROBLEMS FOUND"}
+        </Text>
+      </View>
+      <Text style={styles.hint}>
+        {report.counts.products} products · {report.counts.movements} stock movements ·{" "}
+        {report.counts.receipts} sales · {report.counts.heldOrders} bills · checked{" "}
+        {when(report.generatedAt)}
+      </Text>
+
+      <CheckGroup
+        title="Stock arithmetic"
+        rows={report.arithmeticBreaks.map((b) => ({
+          label: b.productName,
+          value: `${b.base ?? "?"} + ${b.delta} ≠ ${b.resulting}`,
+        }))}
+      />
+      <CheckGroup
+        title="Balances vs ledger"
+        rows={report.balanceMismatches.map((m) => ({
+          label: m.name,
+          value: `${m.balance} shown · ${m.ledger} in ledger`,
+        }))}
+      />
+      <CheckGroup
+        title="Movements with no product"
+        rows={report.orphanMovements.map((m) => ({
+          label: m.productName,
+          value: m.id,
+        }))}
+      />
+      <CheckGroup
+        title="Sales that never moved stock"
+        rows={report.receiptsWithoutMovements.map((r) => ({
+          label: `${r.number} · ${when(r.createdAt)}`,
+          value: money(r.total),
+        }))}
+      />
+      <CheckGroup
+        title="Tables claimed twice"
+        rows={report.duplicateTableTickets.map((t) => ({
+          label: t.tableId,
+          value: `${t.ids.length} open bills`,
+        }))}
+      />
+      <CheckGroup
+        title="Bills open over 12 hours"
+        rows={report.staleTickets.map((t) => ({
+          label: `${t.label} · since ${when(t.resumedAt)}`,
+          value: money(t.total),
+        }))}
+      />
+    </View>
+  );
+}
+
+/** One problem list. Empty groups render nothing, so a clean check stays short. */
+function CheckGroup({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: { label: string; value: string }[];
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <View style={styles.checkGroup}>
+      <Text style={styles.checkGroupTitle}>
+        {title.toUpperCase()} · {rows.length}
+      </Text>
+      {rows.map((row, i) => (
+        <View key={`${row.label}-${i}`} style={styles.checkRow}>
+          <Text style={styles.checkRowLabel} numberOfLines={2}>
+            {row.label}
+          </Text>
+          <Text style={styles.checkRowValue}>{row.value}</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -357,4 +520,51 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   buttonText: { color: colors.white, fontWeight: "900", letterSpacing: 0.8, fontSize: 13 },
+
+  // --- Store check ---
+  hint: { fontSize: 12, color: colors.grey600, lineHeight: 17, paddingVertical: 4 },
+  report: { gap: 8 },
+  verdict: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  verdictOk: { backgroundColor: "#0E7A3C" },
+  verdictBad: { backgroundColor: colors.red500 },
+  verdictText: { color: colors.white, fontSize: 12, fontWeight: "900", letterSpacing: 0.8 },
+  checkGroup: { gap: 2 },
+  checkGroupTitle: {
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+    color: colors.red500,
+    marginTop: 4,
+  },
+  checkRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+    paddingVertical: 3,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.grey200,
+  },
+  checkRowLabel: { flex: 1, fontSize: 12, color: colors.grey900 },
+  checkRowValue: { fontSize: 12, color: colors.grey700, fontWeight: "700" },
+  checkButton: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 10,
+    height: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  checkButtonBusy: { opacity: 0.5 },
+  checkButtonText: { color: colors.primary, fontWeight: "900", letterSpacing: 0.8, fontSize: 12 },
 });

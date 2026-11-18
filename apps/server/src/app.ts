@@ -7,7 +7,7 @@ import { ok } from "./lib/response.js";
 import { HttpError } from "./lib/http-error.js";
 import { onError, notFound } from "./middleware/error-handler.js";
 import { withAuth, requireAuth } from "./middleware/auth.js";
-import { withStore } from "./middleware/store.js";
+import { withStore, requirePermission } from "./middleware/store.js";
 import { stores } from "./modules/stores/stores.routes.js";
 import { members } from "./modules/stores/members.routes.js";
 import { business } from "./modules/stores/business.routes.js";
@@ -22,6 +22,7 @@ import { channels } from "./modules/channels/channels.routes.js";
 import { admin } from "./modules/admin/admin.routes.js";
 import { catalog } from "./modules/stores/catalog.routes.js";
 import { diag } from "./modules/diag/diag.routes.js";
+import { dayClose } from "./modules/dayclose/dayclose.routes.js";
 import { withApiKey } from "./middleware/api-key.js";
 
 /**
@@ -123,6 +124,12 @@ export function createApp() {
   // Temporary diagnostics: list and correct wrong-dated receipts.
   api.use("/diag/*", requireAuth, withStore);
   api.route("/diag", diag);
+
+  // Frozen daily close (Z-report). Owners and managers only; the store computes
+  // the totals, the till only names the local day.
+  api.use("/day-close", requireAuth, withStore, requirePermission("reports:view"));
+  api.use("/day-close/*", requireAuth, withStore, requirePermission("reports:view"));
+  api.route("/day-close", dayClose);
 
   // The caller's role + effective permissions for the selected store, so the
   // client can shape its UI from the same matrix the server enforces.
