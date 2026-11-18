@@ -13,8 +13,17 @@ import type { StockActor, PushResult } from "../../durable-objects/store.do.js";
  * never leave a store in a state a till could not have produced.
  *
  * Rows keep their ids. That keeps `categoryId`, `modifierIds` and variant ids
- * pointing at the copied documents, and makes running the copy twice an update
+ * pointing at the copied documents, and makes running the copy twice a no-op
  * rather than a duplicate.
+ *
+ * The copy is ADD-ONLY: a document that already exists in the destination is
+ * left completely untouched, including its tombstone. It used to send the
+ * source row's `updatedAt`, which looked harmless but was not. A branch edits
+ * its own prices; meanwhile the source shop keeps trading, and every stock
+ * movement bumps the source product's `updatedAt`. Last-write-wins therefore
+ * let an unrelated stock change in the source outrank — and silently erase — a
+ * deliberate price edit in the destination. The copy must never be able to
+ * rewrite a price that a branch has already set.
  *
  * Stock is deliberately NOT copied. A branch's shelf is its own: carrying over
  * the source's quantities would either hide items as "unavailable" or invent
@@ -33,7 +42,9 @@ export type CopyCatalogResult = {
   categories: number;
   products: number;
   modifiers: number;
-  /** Rows the destination refused (role limits, or a newer local edit won). */
+  /** Rows already present in the destination, left exactly as they were. */
+  skipped: number;
+  /** Rows the destination refused (role limits). */
   refused: number;
 };
 
@@ -95,6 +106,26 @@ export async function copyCatalog(
   let refused = 0;
   let after = 0;
 
+  // Everything the destination already has, tombstones included. These ids are
+  // never sent: an existing branch item keeps its own price, name and stock
+  // flags, and an existing deletion stays a deletion.
+  const present = new Set<string>();
+  let presentAfter = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const { rows } = await target.adminExportCollections(
+      [...CATALOG_COLLECTIONS],
+      presentAfter,
+      PAGE_SIZE,
+    );
+    if (rows.length === 0) break;
+    const page_ = rows as SourceRow[];
+    presentAfter = page_[page_.length - 1]!.server_seq;
+    for (const row of page_) present.add(`${row.collection}/${row.id}`);
+    if (page_.length < PAGE_SIZE) break;
+  }
+
+  let skipped = 0;
+
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const { rows } = await source.adminExportCollections(
       [...CATALOG_COLLECTIONS],
@@ -106,17 +137,21 @@ export async function copyCatalog(
     const page_ = rows as SourceRow[];
     after = page_[page_.length - 1]!.server_seq;
 
-    const changes: SyncChange[] = page_
-      .filter((row) =>
-        (CATALOG_COLLECTIONS as readonly string[]).includes(row.collection),
-      )
-      .map((row) => ({
+    const changes: SyncChange[] = [];
+    for (const row of page_) {
+      if (!(CATALOG_COLLECTIONS as readonly string[]).includes(row.collection)) continue;
+      if (present.has(`${row.collection}/${row.id}`)) {
+        skipped += 1;
+        continue;
+      }
+      changes.push({
         collection: row.collection as SyncCollection,
         id: row.id,
         data: JSON.parse(rewriteForTarget(row.collection, row.data, input.toStoreId)) as unknown,
         updatedAt: row.updated_at,
         deleted: row.deleted === 1,
-      }));
+      });
+    }
 
     if (changes.length > 0) {
       const result: PushResult = await target.push(
@@ -126,12 +161,12 @@ export async function copyCatalog(
         { partial: true, skipPull: true },
       );
       refused += result.deniedIds.length;
-      for (const row of page_) {
-        if (!(row.collection in counts)) continue;
+      for (const change of changes) {
+        if (!(change.collection in counts)) continue;
         const wasRefused = result.deniedIds.some(
-          (denied) => denied.collection === row.collection && denied.id === row.id,
+          (denied) => denied.collection === change.collection && denied.id === change.id,
         );
-        if (!wasRefused) counts[row.collection] = (counts[row.collection] ?? 0) + 1;
+        if (!wasRefused) counts[change.collection] = (counts[change.collection] ?? 0) + 1;
       }
     }
 
@@ -144,6 +179,7 @@ export async function copyCatalog(
     categories: counts.categories ?? 0,
     products: counts.products ?? 0,
     modifiers: counts.modifiers ?? 0,
+    skipped,
     refused,
   };
 }

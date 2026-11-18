@@ -65,9 +65,9 @@ const RATE_MAX_ORDERS = 5;
  * only one of those would let a guest be shown one total and charged another.
  *
  * In basis points so the percentage can be changed without floating-point
- * fiddling: 2000 = +20%.
+ * fiddling: 5000 = +50%.
  */
-const VIP_MARKUP_BPS = 2000;
+const VIP_MARKUP_BPS = 5000;
 
 /** Counter price -> guest price, rounded to the nearest whole naira. */
 function guestPrice(counterPrice: number): number {

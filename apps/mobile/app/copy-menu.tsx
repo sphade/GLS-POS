@@ -22,9 +22,10 @@ import { feedbackTap } from "@/lib/feedback";
  *
  * Written for opening a new branch: re-typing a whole menu (and every variant
  * and modifier group) is an hour of work and a source of pricing mistakes. The
- * copy is additive-safe — ids are kept, so running it again updates rather than
- * duplicates — and it deliberately does not copy stock, because a branch's
- * shelves are its own.
+ * copy only adds what this shop does not already have - ids are kept, so an
+ * item that is already here keeps its own price, and running it again changes
+ * nothing. It deliberately does not copy stock, because a branch's shelves are
+ * its own.
  */
 export default function CopyMenuScreen() {
   const router = useRouter();
@@ -82,7 +83,8 @@ export default function CopyMenuScreen() {
           <Text style={styles.noteText}>
             Categories, items, variants and modifier groups are copied into{" "}
             <Text style={styles.noteStrong}>{store.name}</Text>. Stock quantities are not copied —
-            set them in this shop afterwards.
+            set them in this shop afterwards. Items this shop already has are left untouched, so
+            your own prices are never overwritten.
           </Text>
         </View>
 
@@ -137,6 +139,9 @@ export default function CopyMenuScreen() {
               {result.products === 1 ? "" : "s"}, {result.categories} categor
               {result.categories === 1 ? "y" : "ies"} and {result.modifiers} modifier group
               {result.modifiers === 1 ? "" : "s"}.
+              {result.skipped > 0
+                ? ` ${result.skipped} item${result.skipped === 1 ? " was" : "s were"} already here and left unchanged.`
+                : ""}
               {result.refused > 0
                 ? ` ${result.refused} row${result.refused === 1 ? "" : "s"} were skipped — your role cannot write them.`
                 : ""}

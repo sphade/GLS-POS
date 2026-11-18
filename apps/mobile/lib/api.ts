@@ -222,7 +222,9 @@ export type CopyCatalogResult = {
   categories: number;
   products: number;
   modifiers: number;
-  /** Rows the destination refused (role limits, or a newer local edit won). */
+  /** Items this shop already had. They are left exactly as they are. */
+  skipped: number;
+  /** Rows the destination refused (role limits). */
   refused: number;
 };
 
