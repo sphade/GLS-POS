@@ -36,6 +36,7 @@ import {
   readableSyncCollections,
   roleCan,
   roleCanReadProductCosts,
+  stockChainGaps,
   syncMoneyDocumentIsConsistent,
   syncReceiptHasDiscount,
   syncWriteDisposition,
@@ -1186,7 +1187,8 @@ export class StoreDurableObject extends DurableObject<Env> {
    */
   reconcile(): ReconciliationReport {
     const products = this.docs<StoredProduct>("products");
-    const movements = this.docs<StockMovement>("stock_movements");
+    const movementRows = this.movementRows();
+    const movements = movementRows.map((row) => row.data);
     const receipts = this.docs<Record<string, unknown>>("receipts");
     const returns = this.docs<Record<string, unknown>>("returns");
     const heldOrders = this.docs<Record<string, unknown>>("held_orders");
@@ -1252,6 +1254,54 @@ export class StoreDurableObject extends DurableObject<Env> {
             ledger: sum,
           });
         }
+      }
+    }
+
+    /**
+     * The chain: every movement must start where the last one ended.
+     *
+     * Rows are sorted by the store's own sequence, not by the phones' clocks, so
+     * an offline upload that arrives late is still judged in the order it was
+     * applied. A break here is the only trace of stock that moved with no
+     * movement — a sale whose row was stored but never applied, or an item edit
+     * that reset a balance.
+     */
+    const stockChainBreaks: ReconciliationReport["stockChainBreaks"] = [];
+    const byTarget = new Map<
+      string,
+      { productId: string; variantId?: string; steps: { id: string; baseStock?: number; resulting?: number; at?: number }[] }
+    >();
+    for (const { data } of movementRows) {
+      const key = ledgerKey(data.productId, data.variantId);
+      const target = byTarget.get(key) ?? {
+        productId: data.productId,
+        variantId: data.variantId,
+        steps: [],
+      };
+      target.steps.push({
+        id: data.id,
+        baseStock: data.baseStock,
+        resulting: data.resulting,
+        at: data.at,
+      });
+      byTarget.set(key, target);
+    }
+    const productById = new Map(products.map((product) => [product.id, product]));
+    for (const { productId, variantId, steps } of byTarget.values()) {
+      const product = productById.get(productId);
+      // A movement for a product this store no longer has is already reported
+      // as an orphan; its chain says nothing about stock on the shelf.
+      if (!product) continue;
+      const variantName = variantId
+        ? product.variants?.find((variant) => variant.id === variantId)?.name
+        : undefined;
+      for (const gap of stockChainGaps(steps)) {
+        stockChainBreaks.push({
+          productId,
+          name: product.name,
+          variantName,
+          ...gap,
+        });
       }
     }
 
@@ -1332,6 +1382,7 @@ export class StoreDurableObject extends DurableObject<Env> {
     const capped = {
       arithmeticBreaks: cap(arithmeticBreaks),
       balanceMismatches: cap(balanceMismatches),
+      stockChainBreaks: cap(stockChainBreaks),
       orphanMovements: cap(orphanMovements),
       receiptsWithoutMovements: cap(receiptsWithoutMovements),
       duplicateTableTickets: cap(duplicateTableTickets),
@@ -1353,6 +1404,7 @@ export class StoreDurableObject extends DurableObject<Env> {
       ok:
         arithmeticBreaks.length === 0 &&
         balanceMismatches.length === 0 &&
+        stockChainBreaks.length === 0 &&
         orphanMovements.length === 0 &&
         receiptsWithoutMovements.length === 0 &&
         duplicateTableTickets.length === 0 &&
@@ -2344,6 +2396,28 @@ export class StoreDurableObject extends DurableObject<Env> {
   }
 
   /** Live documents of one collection, decoded. Internal helper. */
+  /**
+   * Stock movements in the order the store applied them.
+   *
+   * Every other reconciliation check only needs the values; the chain check
+   * needs the order, and it must be the store's sequence rather than the
+   * device's clock. Loading them here keeps that ordering explicit.
+   */
+  private movementRows(): { data: StockMovement; seq: number }[] {
+    return this.db
+      .select({ data: schema.documents.data, seq: schema.documents.serverSeq })
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.collection, "stock_movements"),
+          eq(schema.documents.deleted, false),
+        ),
+      )
+      .orderBy(schema.documents.serverSeq)
+      .all()
+      .map((row) => ({ data: JSON.parse(row.data) as StockMovement, seq: row.seq }));
+  }
+
   private docs<T>(collection: string): T[] {
     return this.db
       .select({ data: schema.documents.data })

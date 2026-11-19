@@ -499,6 +499,30 @@ export interface ReconciliationReport {
     balance: number;
     ledger: number;
   }[];
+  /**
+   * Movements for one item that do not connect.
+   *
+   * Every movement records the balance it started from and the balance it left,
+   * so consecutive movements must chain: the next one starts where the last one
+   * ended. A break means stock moved without a movement. Neither of the checks
+   * above can see this — each row adds up on its own, and the deltas still sum
+   * to the balance — which is exactly how "sales and stock don't match" stayed
+   * invisible for so long.
+   */
+  stockChainBreaks: {
+    productId: string;
+    name: string;
+    variantName?: string;
+    /** Balance the previous movement left behind. */
+    expected: number;
+    /** Balance the next movement started from. */
+    actual: number;
+    /** `actual - expected`: units no movement accounts for. */
+    gap: number;
+    /** The movement that started from the wrong place. */
+    movementId: string;
+    at: number;
+  }[];
   /** Movements pointing at a product the store no longer has. */
   orphanMovements: { id: string; productId: string; productName: string }[];
   /** Receipts that should have moved stock but have no movement at all. */

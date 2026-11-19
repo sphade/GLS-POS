@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   applyStockDelta,
   isReceiptUpdateAllowed,
+  stockChainGaps,
   ticketClaimState,
   RECEIPT_IDENTITY_FIELDS,
 } from "./invariants.ts";
@@ -118,6 +119,66 @@ test("nonsense is refused rather than trusted", () => {
   assert.equal(isReceiptUpdateAllowed(null, { status: "paid" }), false);
   assert.equal(isReceiptUpdateAllowed(receipt, null), false);
   assert.equal(isReceiptUpdateAllowed(receipt, []), false);
+});
+
+// --- Stock history chains ---------------------------------------------------
+
+test("a history that connects reports nothing", () => {
+  assert.deepEqual(
+    stockChainGaps([
+      { id: "m1", baseStock: 0, resulting: 40 },
+      { id: "m2", baseStock: 40, resulting: 38 },
+      { id: "m3", baseStock: 38, resulting: 176 },
+    ]),
+    [],
+  );
+});
+
+test("the BEEF history: 7 units vanished between a sale and a restock", () => {
+  // 40 → 38 (a sale), then the next movement starts from 31, not 38.
+  const gaps = stockChainGaps([
+    { id: "sale", baseStock: 40, resulting: 38, at: 1 },
+    { id: "restock_138", baseStock: 31, resulting: 169, at: 2 },
+    { id: "restock_8", baseStock: 169, resulting: 177, at: 3 },
+  ]);
+  assert.equal(gaps.length, 1);
+  assert.deepEqual(gaps[0], {
+    movementId: "restock_138",
+    expected: 38,
+    actual: 31,
+    gap: -7,
+    at: 2,
+  });
+});
+
+test("a row with no recorded balances starts a fresh segment, not a false break", () => {
+  // Older rows may predate `baseStock`. They cannot be judged, so the next row
+  // must not be compared against a balance that was never recorded.
+  const gaps = stockChainGaps([
+    { id: "m1", baseStock: 0, resulting: 10 },
+    { id: "legacy" },
+    { id: "m3", baseStock: 15, resulting: 12 },
+  ]);
+  assert.deepEqual(gaps, []);
+});
+
+test("an unexplained gain is reported with its sign", () => {
+  const gaps = stockChainGaps([
+    { id: "m1", baseStock: 0, resulting: 5 },
+    { id: "m2", baseStock: 12, resulting: 12 },
+  ]);
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0]?.gap, 7);
+});
+
+test("weighted goods compare without floating-point noise", () => {
+  assert.deepEqual(
+    stockChainGaps([
+      { id: "m1", baseStock: 0.1, resulting: 0.3 },
+      { id: "m2", baseStock: 0.3, resulting: 0.6 },
+    ]),
+    [],
+  );
 });
 
 // --- Table ticket leases ---------------------------------------------------

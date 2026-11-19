@@ -95,6 +95,75 @@ export function isReceiptUpdateAllowed(previous: unknown, next: unknown): boolea
   );
 }
 
+/** One applied movement, as much as the chain check needs to know. */
+export type StockStep = {
+  id: string;
+  /** Balance this movement started from. */
+  baseStock?: number;
+  /** Balance it left behind. */
+  resulting?: number;
+  /** When the till said it happened. */
+  at?: number;
+};
+
+/**
+ * Where a stock history stops adding up.
+ *
+ * Each movement records the balance it started from and the balance it left, so
+ * consecutive movements must chain: the next one starts exactly where the last
+ * one ended. When it does not, stock moved with no movement to explain it — the
+ * "sales and stock don't match" complaint.
+ *
+ * Neither of the other checks can see this. Every row adds up on its own
+ * (`baseStock + delta = resulting`), and the deltas still sum to the balance;
+ * the only evidence is the join between one row and the next.
+ *
+ * `steps` must be in the order the store *applied* them — its own sequence, not
+ * the phones' clocks, which can be minutes or days out and are the reason two
+ * rows for the same minute can appear in either order.
+ */
+export function stockChainGaps(steps: readonly StockStep[]): {
+  movementId: string;
+  expected: number;
+  actual: number;
+  gap: number;
+  at: number;
+}[] {
+  const gaps: {
+    movementId: string;
+    expected: number;
+    actual: number;
+    gap: number;
+    at: number;
+  }[] = [];
+  let previous: number | undefined;
+
+  for (const step of steps) {
+    const base = typeof step.baseStock === "number" && Number.isFinite(step.baseStock)
+      ? step.baseStock
+      : undefined;
+    const result = typeof step.resulting === "number" && Number.isFinite(step.resulting)
+      ? step.resulting
+      : undefined;
+
+    if (base !== undefined && previous !== undefined && Math.abs(base - previous) > 1e-6) {
+      gaps.push({
+        movementId: step.id,
+        expected: previous,
+        actual: base,
+        gap: Math.round((base - previous) * 1000) / 1000,
+        at: typeof step.at === "number" && Number.isFinite(step.at) ? step.at : 0,
+      });
+    }
+
+    // A row with no recorded result leaves nothing to compare the next row
+    // against: start a fresh segment rather than invent a break.
+    previous = result;
+  }
+
+  return gaps;
+}
+
 /** The ownership half of an open table ticket. */
 export type TicketLease = {
   claimedBy?: string;

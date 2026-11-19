@@ -369,6 +369,13 @@ function StoreCheckReport({ report, currency }: { report: StoreCheck; currency: 
         }))}
       />
       <CheckGroup
+        title="Stock with no history"
+        rows={report.stockChainBreaks.map((b) => ({
+          label: `${b.name}${b.variantName ? ` · ${b.variantName}` : ""}`,
+          value: `${b.expected} → ${b.actual} (${b.gap > 0 ? "+" : ""}${b.gap})`,
+        }))}
+      />
+      <CheckGroup
         title="Movements with no product"
         rows={report.orphanMovements.map((m) => ({
           label: m.productName,
