@@ -42,7 +42,10 @@ import { LOCAL_STORE_ID, LOCAL_STORE_MEMBERSHIP, LOCAL_USER, OFFLINE_MODE } from
 type User = { id: string; name: string; email: string; username?: string };
 
 /** Shape better-auth returns from a sign-in/sign-up call. */
-type AuthResult = { error?: { message?: string } | null };
+type AuthResult = {
+  data?: { user?: unknown } | null;
+  error?: { message?: string } | null;
+};
 
 /**
  * Whether we've actually heard back about this user's stores.
@@ -98,6 +101,17 @@ const CACHED_STORES_KEY = "cached_stores";
 const LEGACY_AUTH_SNAPSHOT_KEY = "auth_snapshot_v1";
 const AUTH_SNAPSHOT_KEY = "auth_snapshot_v2";
 const AUTH_REFRESH_TIMEOUT_MS = 12_000;
+/**
+ * How many times a *failed* session check is retried before giving up.
+ *
+ * A till sits on a shop network that is regularly slow or briefly down, which
+ * is the whole reason this app is offline-first. One timed-out round trip used
+ * to be enough to drop the user back on the sign-in screen even though the
+ * cookie was fine, so the check is repeated before that conclusion is drawn.
+ * An actual answer from the server is never retried: "no user" is final.
+ */
+const SESSION_CHECK_ATTEMPTS = 2;
+const SESSION_RETRY_DELAY_MS = 600;
 const PUSH_UNREGISTER_TIMEOUT_MS = 2_500;
 const SIGN_OUT_TIMEOUT_MS = 3_000;
 const EMPTY_DRAIN = Promise.resolve();
@@ -265,6 +279,10 @@ function initialAuthState(): InitialAuthState {
   };
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function withDeadline<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -353,7 +371,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * carries both a UI generation and a start revision. A newer refresh or auth
    * mutation aborts its predecessor and prevents waiters from starting later.
    */
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (seededUser?: User) => {
     const generation = ++refreshGeneration.current;
     const startRevision = ++refreshStartRevisionRef.current;
     const predecessor = activeRefreshLeaseRef.current;
@@ -381,7 +399,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    let confirmedUser: User | null = null;
+    let confirmedUser: User | null = seededUser ?? null;
     let cachedSnapshot: CachedAuthSnapshot | null = null;
 
     const applyConfirmedFallback = (
@@ -427,29 +445,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     cachedSnapshot = readCachedSnapshot();
-    const controller = new AbortController();
     const client = authClient as unknown as {
       getSession: (input?: {
         fetchOptions?: { signal?: AbortSignal };
       }) => Promise<SessionResult>;
     };
-    const raw = client.getSession({ fetchOptions: { signal: controller.signal } });
-    const drain = raw.then(
-      () => undefined,
-      () => undefined,
-    );
-    const lease: RefreshLease = { controller, raw, drain };
-    activeRefreshLeaseRef.current = lease;
-    void drain.then(() => {
-      if (activeRefreshLeaseRef.current === lease) {
-        activeRefreshLeaseRef.current = null;
-      }
-    });
+
+    /**
+     * One session check, announced through the refresh lease so a sign-out or a
+     * newer refresh can cancel it. The caller retries a thrown failure (offline,
+     * timeout, gateway error); it never retries an answer.
+     */
+    const checkSession = async (): Promise<SessionResult> => {
+      const controller = new AbortController();
+      const raw = client.getSession({ fetchOptions: { signal: controller.signal } });
+      const drain = raw.then(
+        () => undefined,
+        () => undefined,
+      );
+      const lease: RefreshLease = { controller, raw, drain };
+      activeRefreshLeaseRef.current = lease;
+      void drain.then(() => {
+        if (activeRefreshLeaseRef.current === lease) {
+          activeRefreshLeaseRef.current = null;
+        }
+      });
+      return withDeadline(raw, AUTH_REFRESH_TIMEOUT_MS, () => controller.abort());
+    };
 
     try {
-      const session = await withDeadline(raw, AUTH_REFRESH_TIMEOUT_MS, () => controller.abort());
+      let session: SessionResult | null = null;
+      let failure: unknown = null;
+      for (let attempt = 0; attempt < SESSION_CHECK_ATTEMPTS && !session; attempt += 1) {
+        try {
+          const answer = await checkSession();
+          if (answer.error) {
+            failure = new Error(answer.error.message ?? "Session check failed");
+          } else {
+            session = answer;
+          }
+        } catch (error) {
+          failure = error;
+          // A newer refresh or an auth mutation owns the state now.
+          if (!isCurrent() || refreshBlockCountRef.current > 0) return;
+          if (attempt < SESSION_CHECK_ATTEMPTS - 1) await wait(SESSION_RETRY_DELAY_MS);
+        }
+      }
       if (!isCurrent()) return;
-      if (session.error) throw new Error(session.error.message ?? "Session check failed");
+      if (!session) throw failure ?? new Error("Session check failed");
 
       const sessionUser = session.data?.user;
       if (!isUser(sessionUser)) {
@@ -605,8 +648,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             return { ok: false, error: "Sign in was cancelled" };
           }
 
+          // The sign-in response is itself the server's confirmation of who
+          // just authenticated. Mount that user before the follow-up store
+          // fetch so a slow or failed round trip cannot bounce a perfectly
+          // valid session back to the sign-in screen.
+          const signedInUser = isUser(result.data?.user) ? result.data.user : null;
+          if (signedInUser) {
+            if (currentUserIdRef.current !== signedInUser.id) {
+              // A different person is taking over this till: never carry the
+              // previous principal's role into their first frames.
+              setAuditActor(null);
+              setStores([]);
+              setStoresStatus("pending");
+              setActiveStoreId(null);
+              activeStoreIdRef.current = null;
+              revokeCredentialBinding();
+            }
+            currentUserIdRef.current = signedInUser.id;
+            setUser(signedInUser);
+            setStoresStatus("pending");
+            setReady(true);
+          }
+
           guard.release();
-          await refresh();
+          await refresh(signedInUser ?? undefined);
           return credentialMutationRevisionRef.current === guard.revision
             ? { ok: true }
             : { ok: false, error: "Sign in was cancelled" };

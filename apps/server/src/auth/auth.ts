@@ -25,6 +25,17 @@ export function createAuth(env: Env) {
       enabled: true,
     },
     /**
+     * Sessions are sliding, and a till may sit switched off through a public
+     * holiday or a slow week. Better Auth's default is a seven-day absolute
+     * session, which put a device that skipped a week straight back on the
+     * sign-in screen. Thirty days, refreshed twice a day while in use, keeps a
+     * working till signed in without changing how sign-out revokes anything.
+     */
+    session: {
+      expiresIn: 60 * 60 * 24 * 30,
+      updateAge: 60 * 60 * 12,
+    },
+    /**
      * The Expo client sends its origin in `expo-origin`, which the server-side
      * expo plugin copies into `origin`. That value is
      * `Linking.createURL("", { scheme })`, so it differs per platform:

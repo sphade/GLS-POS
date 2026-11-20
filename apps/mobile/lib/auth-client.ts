@@ -86,14 +86,66 @@ export const { signIn, signUp, signOut, useSession } = authClient;
  * `getCookie` is contributed by the Expo plugin at runtime; typed here since
  * plugin action inference is bypassed above.
  */
+/**
+ * Read one Expo secure-store value, reassembling the plugin's chunk format.
+ * Mirrors `storageAdapter.getItem` in the Expo plugin.
+ */
+function readStoredSecureItem(key: string): string | null {
+  try {
+    let value = SecureStore.getItem(key);
+    if (value == null) return null;
+    if (!value.startsWith(EXPO_CHUNK_MARKER)) return value;
+    const count = Number(value.slice(EXPO_CHUNK_MARKER.length));
+    if (!Number.isInteger(count) || count < 1) return null;
+    let joined = "";
+    for (let index = 0; index < count; index += 1) {
+      const chunk = SecureStore.getItem(`${key}.${index}`);
+      if (chunk == null) return null;
+      joined += chunk;
+    }
+    return joined;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rebuild the `Cookie` header from the stored session JSON, ignoring the local
+ * expiry the plugin recorded.
+ *
+ * The plugin drops a stored cookie once its `expires` — written from the
+ * *device* clock when the header arrived — is in the past. A tablet with a
+ * wrong clock then looks signed out while the server would still accept the
+ * token; that is the same clock flaw the stock code compensates for on the
+ * tills. Send it and let the server decide. A genuinely dead session comes
+ * back empty and is cleared through the normal path.
+ */
+function storedCookieHeader(): string {
+  const raw = readStoredSecureItem(AUTH_COOKIE_STORAGE_KEY);
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as Record<string, { value?: unknown } | null>;
+    return Object.entries(parsed)
+      .flatMap(([name, entry]) => {
+        const value = entry?.value;
+        return typeof value === "string" && value ? [`${name}=${value}`] : [];
+      })
+      .join("; ");
+  } catch {
+    return "";
+  }
+}
+
 export function authCookie(): string {
   try {
     const client = authClient as unknown as { getCookie?: () => string | undefined };
     const cookie = client.getCookie?.();
-    return typeof cookie === "string" ? cookie : "";
+    if (typeof cookie === "string" && cookie) return cookie;
   } catch {
-    return "";
+    // Fall through to the raw copy below; a storage read failure must not be
+    // mistaken for a definitive "no session".
   }
+  return storedCookieHeader();
 }
 
 function rotateRight(value: number, amount: number): number {
