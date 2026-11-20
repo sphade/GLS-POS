@@ -356,49 +356,49 @@ function StoreCheckReport({ report, currency }: { report: StoreCheck; currency: 
 
       <CheckGroup
         title="Stock arithmetic"
-        rows={report.arithmeticBreaks.map((b) => ({
+        rows={(report.arithmeticBreaks ?? []).map((b) => ({
           label: b.productName,
           value: `${b.base ?? "?"} + ${b.delta} ≠ ${b.resulting}`,
         }))}
       />
       <CheckGroup
         title="Balances vs ledger"
-        rows={report.balanceMismatches.map((m) => ({
+        rows={(report.balanceMismatches ?? []).map((m) => ({
           label: m.name,
           value: `${m.balance} shown · ${m.ledger} in ledger`,
         }))}
       />
       <CheckGroup
         title="Stock with no history"
-        rows={report.stockChainBreaks.map((b) => ({
+        rows={(report.stockChainBreaks ?? []).map((b) => ({
           label: `${b.name}${b.variantName ? ` · ${b.variantName}` : ""}`,
           value: `${b.expected} → ${b.actual} (${b.gap > 0 ? "+" : ""}${b.gap})`,
         }))}
       />
       <CheckGroup
         title="Movements with no product"
-        rows={report.orphanMovements.map((m) => ({
+        rows={(report.orphanMovements ?? []).map((m) => ({
           label: m.productName,
           value: m.id,
         }))}
       />
       <CheckGroup
         title="Sales that never moved stock"
-        rows={report.receiptsWithoutMovements.map((r) => ({
+        rows={(report.receiptsWithoutMovements ?? []).map((r) => ({
           label: `${r.number} · ${when(r.createdAt)}`,
           value: money(r.total),
         }))}
       />
       <CheckGroup
         title="Tables claimed twice"
-        rows={report.duplicateTableTickets.map((t) => ({
+        rows={(report.duplicateTableTickets ?? []).map((t) => ({
           label: t.tableId,
           value: `${t.ids.length} open bills`,
         }))}
       />
       <CheckGroup
         title="Bills open over 12 hours"
-        rows={report.staleTickets.map((t) => ({
+        rows={(report.staleTickets ?? []).map((t) => ({
           label: `${t.label} · since ${when(t.resumedAt)}`,
           value: money(t.total),
         }))}
