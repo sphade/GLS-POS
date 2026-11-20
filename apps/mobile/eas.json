@@ -22,12 +22,14 @@
         "buildType": "apk"
       },
       "env": {
+        "EXPO_PUBLIC_API_URL": "https://gls-pos-server.sphade012.workers.dev",
         "SENTRY_DISABLE_AUTO_UPLOAD": "true"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
+        "EXPO_PUBLIC_API_URL": "https://gls-pos-server.sphade012.workers.dev",
         "SENTRY_DISABLE_AUTO_UPLOAD": "true"
       }
     }
