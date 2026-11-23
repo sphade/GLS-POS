@@ -3,9 +3,10 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "GLS Kitchen & Bakery — public landing site (SvelteKit, prerendered)",
+  "description": "GLS Kitchen & Bakery - public website (static HTML; SvelteKit for /pos and /film)",
   "scripts": {
-    "dev": "vite dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:svelte": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
     "check-types": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
