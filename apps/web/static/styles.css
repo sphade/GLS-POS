@@ -55,7 +55,7 @@ a:hover .pic img{transform:scale(1.04)}
 
 /* hero */
 .hero{min-height:100svh;position:relative;display:flex;align-items:flex-end;color:var(--cream);padding:0 0 5.5rem}
-.hero::before{content:"";position:absolute;inset:0;background:url(img/hero.webp) center/cover}
+.hero::before{content:"";position:absolute;inset:0;background:var(--hero-img,url(img/hero.webp)) center/cover}
 .hero::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(9,24,15,.45),rgba(9,24,15,.55) 45%,rgba(9,24,15,.93))}
 .hero .wrap{position:relative;z-index:1}
 .hero h1{font-size:clamp(2.8rem,6.2vw,5.6rem);margin:1.3rem 0 1.3rem}
