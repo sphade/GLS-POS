@@ -1,4 +1,5 @@
 import * as SQLite from "expo-sqlite";
+import { overlayPendingStock, type PendingStockDelta } from "@gls-pos/types";
 
 /**
  * On-device SQLite — the offline-first source of truth.
@@ -1085,14 +1086,70 @@ function mergeProductStockOn(db: SQLite.SQLiteDatabase, change: ChangeRow<unknow
   return true;
 }
 
+function loadPendingStockDeltasOn(db: SQLite.SQLiteDatabase): PendingStockDelta[] {
+  const rows = db.getAllSync<{ data: string }>(
+    `SELECT data FROM stock_movements WHERE dirty = 1 AND deleted = 0 ORDER BY updated_at ASC`,
+  );
+  if (rows.length === 0) return [];
+  const out: PendingStockDelta[] = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.data) as {
+        productId?: unknown;
+        variantId?: unknown;
+        delta?: unknown;
+      };
+      if (
+        typeof parsed.productId === "string" &&
+        typeof parsed.delta === "number" &&
+        Number.isFinite(parsed.delta) &&
+        parsed.delta !== 0
+      ) {
+        out.push({
+          productId: parsed.productId,
+          variantId: typeof parsed.variantId === "string" ? parsed.variantId : undefined,
+          delta: parsed.delta,
+        });
+      }
+    } catch {
+      // Ignore malformed local row.
+    }
+  }
+  return out;
+}
+
+function applyProductPendingOverlay<T>(
+  data: T,
+  pending: readonly PendingStockDelta[] | undefined,
+): T {
+  if (!pending || pending.length === 0 || !data || typeof data !== "object") return data;
+  return overlayPendingStock(
+    data as unknown as {
+      id: string;
+      sellBy?: string;
+      stockQuantity?: number | null;
+      variants?: Array<{ id: string; stock?: number | null } & Record<string, unknown>>;
+    },
+    pending,
+  ) as unknown as T;
+}
+
 function applyRemoteOn<T extends { id: string }>(
   db: SQLite.SQLiteDatabase,
   c: Collection,
   change: ChangeRow<T>,
+  pendingStockDeltas?: readonly PendingStockDelta[],
 ) {
+  const effectiveData =
+    c === "products" && !change.deleted
+      ? applyProductPendingOverlay(change.data, pendingStockDeltas)
+      : change.data;
+  const effectiveChange =
+    effectiveData === change.data ? change : { ...change, data: effectiveData };
+
   const local = db.getFirstSync<{ updated_at: number; dirty: number }>(
     `SELECT updated_at, dirty FROM ${c} WHERE id = ?`,
-    change.id,
+    effectiveChange.id,
   );
   // Don't clobber a newer local edit that hasn't synced yet. Stock movements
   // are the exception: they are append-only and server-normalized, so an
@@ -1101,13 +1158,13 @@ function applyRemoteOn<T extends { id: string }>(
   if (
     local &&
     local.dirty === 1 &&
-    local.updated_at >= change.updatedAt &&
+    local.updated_at >= effectiveChange.updatedAt &&
     c !== "stock_movements"
   ) {
     // Products are the one collection where a field-level merge is right:
     // the server owns stock, the device owns everything else.
-    if (c === "products" && !change.deleted) {
-      mergeProductStockOn(db, change as ChangeRow<unknown>);
+    if (c === "products" && !effectiveChange.deleted) {
+      mergeProductStockOn(db, effectiveChange as ChangeRow<unknown>);
     }
     return;
   }
@@ -1115,10 +1172,10 @@ function applyRemoteOn<T extends { id: string }>(
     `INSERT INTO ${c} (id, data, updated_at, deleted, dirty) VALUES (?, ?, ?, ?, 0)
      ON CONFLICT(id) DO UPDATE SET
        data = excluded.data, updated_at = excluded.updated_at, deleted = excluded.deleted, dirty = 0`,
-    change.id,
-    JSON.stringify(change.data),
-    change.updatedAt,
-    change.deleted ? 1 : 0,
+    effectiveChange.id,
+    JSON.stringify(effectiveChange.data),
+    effectiveChange.updatedAt,
+    effectiveChange.deleted ? 1 : 0,
   );
 }
 
@@ -1129,8 +1186,21 @@ function applyRemoteBatchOn(
 ): void {
   if (changes.length === 0) return;
   withTx(db, () => {
-    for (const { collection, change } of changes) {
-      applyRemoteOn(db, collection, change);
+    // Apply stock_movements first so any movement acknowledged in this same
+    // server response is marked clean (dirty = 0) before we compute the
+    // still-unsent local deltas to overlay onto pulled product balances.
+    let hasProducts = false;
+    for (const entry of changes) {
+      if (entry.collection === "stock_movements") {
+        applyRemoteOn(db, entry.collection, entry.change);
+      } else if (entry.collection === "products" && !entry.change.deleted) {
+        hasProducts = true;
+      }
+    }
+    const pendingDeltas = hasProducts ? loadPendingStockDeltasOn(db) : undefined;
+    for (const entry of changes) {
+      if (entry.collection === "stock_movements") continue;
+      applyRemoteOn(db, entry.collection, entry.change, pendingDeltas);
     }
   });
 }

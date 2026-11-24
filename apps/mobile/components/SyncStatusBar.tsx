@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
-import { getSyncActivity, subscribeSyncActivity, syncNow } from "@/lib/sync";
+import { getSyncActivity, subscribeSyncActivity, syncNowDetailed } from "@/lib/sync";
 
 /**
  * Thin strip under the app header, on every screen that has one:
@@ -81,13 +81,22 @@ export function SyncStatusBar() {
 
   if (activity.error && !dismissed) {
     return (
-      <Pressable style={[styles.strip, styles.error]} onPress={() => setDismissed(true)}>
-        <Ionicons name="cloud-offline-outline" size={14} color={colors.white} />
-        <Text style={[styles.text, { flexShrink: 1 }]} numberOfLines={1}>
-          {activity.error.toUpperCase()}
-        </Text>
-        <Ionicons name="close" size={14} color={colors.white} />
-      </Pressable>
+      <View style={[styles.strip, styles.error]}>
+        <Pressable
+          style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1, justifyContent: "center" }}
+          onPress={() => {
+            if (activity.storeId) void syncNowDetailed(activity.storeId);
+          }}
+        >
+          <Ionicons name="cloud-offline-outline" size={14} color={colors.white} />
+          <Text style={[styles.text, { flexShrink: 1 }]} numberOfLines={1}>
+            {activity.error.toUpperCase()} · TAP TO RETRY
+          </Text>
+        </Pressable>
+        <Pressable onPress={() => setDismissed(true)} hitSlop={8}>
+          <Ionicons name="close" size={14} color={colors.white} />
+        </Pressable>
+      </View>
     );
   }
 
@@ -98,7 +107,7 @@ export function SyncStatusBar() {
       <Pressable
         style={[styles.strip, styles.pending]}
         onPress={() => {
-          if (activity.storeId) void syncNow(activity.storeId);
+          if (activity.storeId) void syncNowDetailed(activity.storeId);
         }}
       >
         <Ionicons name="cloud-upload-outline" size={14} color={colors.white} />

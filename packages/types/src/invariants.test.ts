@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   applyStockDelta,
   isReceiptUpdateAllowed,
+  overlayPendingStock,
   stockChainGaps,
   ticketClaimState,
   RECEIPT_IDENTITY_FIELDS,
@@ -179,6 +180,50 @@ test("weighted goods compare without floating-point noise", () => {
     ]),
     [],
   );
+});
+
+// --- Pending stock overlay on pull -----------------------------------------
+
+test("overlayPendingStock preserves unsent local restock when server pull arrives", () => {
+  // Server still says 4 (has not received this till's +3 yet).
+  // Without overlay, screen snaps back to 4 and staff re-enters +3 -> double count.
+  const serverProduct = { id: "p_amala", stockQuantity: 4 };
+  const merged = overlayPendingStock(serverProduct, [
+    { productId: "p_amala", delta: 3 },
+    { productId: "p_other", delta: 10 },
+  ]);
+  assert.equal(merged.stockQuantity, 7);
+});
+
+test("overlayPendingStock combines server sale with unsent local restock", () => {
+  // Server dropped from 4 to 3 (another till sold 1), this till has unsent +3.
+  const serverProduct = { id: "p_amala", stockQuantity: 3 };
+  const merged = overlayPendingStock(serverProduct, [
+    { productId: "p_amala", delta: 3 },
+  ]);
+  assert.equal(merged.stockQuantity, 6);
+});
+
+test("overlayPendingStock handles variants and clamps at zero", () => {
+  const serverProduct = {
+    id: "p_beef",
+    stockQuantity: null,
+    variants: [
+      { id: "v_small", stock: 2 },
+      { id: "v_large", stock: 5 },
+    ],
+  };
+  const merged = overlayPendingStock(serverProduct, [
+    { productId: "p_beef", variantId: "v_small", delta: -4 },
+    { productId: "p_beef", variantId: "v_large", delta: 3 },
+  ]);
+  assert.equal(merged.variants?.[0]?.stock, 0);
+  assert.equal(merged.variants?.[1]?.stock, 8);
+});
+
+test("overlayPendingStock returns original object when no pending movements exist", () => {
+  const serverProduct = { id: "p_amala", stockQuantity: 7 };
+  assert.equal(overlayPendingStock(serverProduct, []), serverProduct);
 });
 
 // --- Table ticket leases ---------------------------------------------------

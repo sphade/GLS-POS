@@ -153,9 +153,11 @@ export default function UpdateStockScreen() {
     setNote("");
     setSaved(true);
     loadTimeline();
-    requestAnimationFrame(() => {
+    // Keep the submit lock for 500ms so an accidental double-tap on a slow
+    // tablet cannot post the same restock twice.
+    setTimeout(() => {
       submitting.current = false;
-    });
+    }, 500);
   };
 
   if (!canAdjust || !product || !target) {

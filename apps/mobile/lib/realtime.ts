@@ -1,3 +1,4 @@
+import { AppState, type AppStateStatus } from "react-native";
 import { API_URL, authCookie } from "./auth-client";
 import { pullNow, SYNC_ENABLED, syncNow } from "./sync";
 
@@ -175,6 +176,8 @@ function connect(storeId: string) {
   };
 }
 
+let appStateSub: { remove(): void } | null = null;
+
 /** Open the realtime channel for a store. Returns a stop function. */
 export function startRealtime(storeId: string): () => void {
   if (
@@ -195,12 +198,37 @@ export function startRealtime(storeId: string): () => void {
   attempts = 0;
   currentStore = storeId;
   connect(storeId);
+
+  // Android silently kills TCP sockets while a tablet is asleep or backgrounded
+  // without firing `onclose` for minutes. On resume, immediately verify/reopen
+  // the socket and pull fresh stock so woken tills never display stale counts.
+  appStateSub = AppState.addEventListener("change", (state: AppStateStatus) => {
+    if (state !== "active" || stopped || currentStore !== storeId) return;
+    if (!socket || socket.readyState !== 1) {
+      clearTimers();
+      attempts = 0;
+      connect(storeId);
+      return;
+    }
+    try {
+      socket.send("ping");
+    } catch {
+      clearTimers();
+      attempts = 0;
+      connect(storeId);
+      return;
+    }
+    void pullNow(storeId);
+  });
+
   return () => stopRealtime();
 }
 
 export function stopRealtime(): void {
   stopped = true;
   currentStore = null;
+  appStateSub?.remove();
+  appStateSub = null;
   // Retire every outstanding handler BEFORE closing. startRealtime sets
   // `stopped` back to false immediately, so the close event this triggers
   // arrives once the channel looks open again — the generation is what stops it

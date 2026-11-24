@@ -164,6 +164,69 @@ export function stockChainGaps(steps: readonly StockStep[]): {
   return gaps;
 }
 
+/** One unsent local stock movement awaiting upload to the store. */
+export type PendingStockDelta = {
+  productId: string;
+  variantId?: string;
+  delta: number;
+};
+
+/**
+ * Overlay unsent local stock movements onto a server-authoritative product.
+ *
+ * When a background pull arrives while this till still has unuploaded restocks
+ * or sales (`stock_movements.dirty = 1`), writing the server's older balance
+ * straight to SQLite makes the staff member's just-added stock appear to vanish
+ * — causing them to re-enter the restock and double-count it once both uploads
+ * land. Re-applying pending local deltas on top of the server's balance keeps
+ * the screen truthful; the moment those movements are acknowledged (`dirty = 0`),
+ * the overlay becomes empty and every till converges on the exact server number.
+ */
+export function overlayPendingStock<
+  T extends {
+    id: string;
+    sellBy?: string;
+    stockQuantity?: number | null;
+    variants?: Array<{ id: string; stock?: number | null } & Record<string, unknown>>;
+  },
+>(product: T, pending: readonly PendingStockDelta[]): T {
+  const relevant = pending.filter(
+    (m) => m.productId === product.id && Number.isFinite(m.delta) && m.delta !== 0,
+  );
+  if (relevant.length === 0) return product;
+
+  const precision = product.sellBy === "fraction" ? 1000 : 1;
+  let stockQuantity = product.stockQuantity;
+  let variants = product.variants ? product.variants.map((v) => ({ ...v })) : undefined;
+  let changed = false;
+
+  for (const m of relevant) {
+    if (m.variantId) {
+      if (!variants) continue;
+      const target = variants.find((v) => v.id === m.variantId);
+      if (!target || typeof target.stock !== "number") continue;
+      const next = applyStockDelta(target.stock, m.delta, precision).resulting;
+      if (next !== target.stock) {
+        target.stock = next;
+        changed = true;
+      }
+    } else if (typeof stockQuantity === "number") {
+      const next = applyStockDelta(stockQuantity, m.delta, precision).resulting;
+      if (next !== stockQuantity) {
+        stockQuantity = next;
+        changed = true;
+      }
+    }
+  }
+
+  if (!changed) return product;
+  return {
+    ...product,
+    stockQuantity,
+    ...(variants ? { variants } : {}),
+  };
+}
+
 /** The ownership half of an open table ticket. */
 export type TicketLease = {
   claimedBy?: string;

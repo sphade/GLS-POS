@@ -65,7 +65,7 @@ const readProjectionPolicyKey = (storeId: string) => `read_projection_policy_v2_
 const readableCollectionsKey = (storeId: string) => `readable_collections_v2_${storeId}`;
 const readScopeForRole = (role: StoreRole) =>
   `${role}:read-policy-v${SYNC_READ_POLICY_VERSION}`;
-const SYNC_TIMEOUT_MS = 15_000;
+const SYNC_TIMEOUT_MS = 30_000;
 
 type SyncEpoch = {
   storeId: string;
@@ -246,8 +246,8 @@ export type SyncAttemptResult =
  * Batches are therefore capped by encoded size and by row count, and each batch
  * clears its own dirty rows so progress is never lost.
  */
-const MAX_PUSH_BYTES = 512 * 1024;
-const MAX_PUSH_ROWS = 200;
+const MAX_PUSH_BYTES = 128 * 1024;
+const MAX_PUSH_ROWS = 80;
 
 /**
  * How much pending work one cycle looks at.
@@ -807,6 +807,21 @@ async function fetchWithTimeout(
  * still yielding between cycles.
  */
 const PULL_MAX_PAGES = 200;
+/**
+ * A first-time or role-switch replay can span hundreds of pages. Running all
+ * 200 pages inside one serialized `jobQueue` slot starves outgoing sales and
+ * stock restocks for minutes and leaves the "SYNCING" bar pinned. Slicing
+ * replays to 15 pages lets pending pushes cut in every few seconds.
+ */
+const REPLAY_PAGES_PER_SLICE = 15;
+/**
+ * Incremental pulls (realtime nudges, tab switches, pull-to-refresh) are
+ * bounded too. A busy shop can have a deep backlog; walking 200 pages in one
+ * job starves uploads and keeps the busy bar alive. Ten pages is up to 5,000
+ * rows — far more than one shift's delta — and the next nudge or 20s poll
+ * continues from the durable cursor.
+ */
+const INCREMENTAL_PAGES_PER_CYCLE = 10;
 
 /**
  * Page budget for the newest-first trading pass that runs before a first
@@ -884,14 +899,18 @@ async function performPull(
   try {
     const netState = await Network.getNetworkStateAsync();
     if (!epochIsCurrent(epoch)) return cancelledPull(appliedTotal);
-    if (netState.isInternetReachable === false) {
+    // Only skip when the OS reports zero connectivity (airplane mode / Wi-Fi
+    // & cellular both off). Android's `isInternetReachable` frequently reports
+    // false on shop Wi-Fi/hotspots even when our Cloudflare Worker is reachable.
+    if (netState.isConnected === false) {
       return pullFailure(0, 0, {
         kind: "offline",
         message: "This device is offline. Connect to the internet and retry.",
       });
     }
 
-    for (let page = 0; page < PULL_MAX_PAGES; page += 1) {
+    const pageBudget = replay ? REPLAY_PAGES_PER_SLICE : INCREMENTAL_PAGES_PER_CYCLE;
+    for (let page = 0; page < pageBudget; page += 1) {
       if (!epochIsCurrent(epoch)) return cancelledPull(appliedTotal);
 
       // A new scope keeps forcing zero until a request actually succeeds. Once
@@ -1018,6 +1037,24 @@ async function performPull(
 
       appliedTotal += applied.appliedCount;
       successfulPages += 1;
+
+      /**
+       * A replay is a snapshot, not a moving target.
+       *
+       * Completion used to require a page with zero new rows. In a shop that
+       * sells something every few seconds, the head always moves, so that page
+       * never arrived: the first-sync replay pulled forever, the bar stayed on
+       * "CATCHING UP …%", and nothing finished. The frozen head taken from the
+       * first response is the real boundary; rows created after it are live
+       * traffic and arrive on the incremental sync that follows.
+       */
+      if (
+        replay &&
+        typeof replay.frozenHead === "number" &&
+        body.data.cursor >= replay.frozenHead
+      ) {
+        return { status: "complete", appliedCount: appliedTotal };
+      }
 
       // A replay is the first download, so surface how much of the store's
       // history has landed. Measured against the frozen head so a live kitchen
@@ -1232,7 +1269,9 @@ async function performSync(
   try {
     const netState = await Network.getNetworkStateAsync();
     if (!epochIsCurrent(epoch)) return cancelledSync();
-    if (netState.isInternetReachable === false) {
+    // Only skip when truly disconnected; let fetch() decide reachability so
+    // spurious Android `isInternetReachable === false` never blocks syncing.
+    if (netState.isConnected === false) {
       return { ok: false, kind: "offline", message: "This device is offline. Connect to the internet and retry." };
     }
 
@@ -1526,6 +1565,12 @@ async function pushBatch(
       uploadedIds,
     );
     if (pulled.cancelled) return cancelledSync();
+    // A push returns at most one pull page. If more changes exist on the server
+    // past this page, catch up immediately instead of waiting for the 20s poll
+    // (which left tills showing different stock numbers after bursts of sales).
+    if (body.data.cursor < body.data.head) {
+      scheduleImmediateFollowUp(epoch);
+    }
     return {
       ok: true,
       appliedCount: pulled.appliedCount,
@@ -1580,7 +1625,7 @@ const OFFLINE_LADDER = [5_000, 5_000, 5_000];
  * link and to the battery, frequent enough that a shop's sales are never more
  * than a couple of minutes behind the moment the connection recovers.
  */
-const DEGRADED_RETRY_MS = 120_000;
+const DEGRADED_RETRY_MS = 30_000;
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const retryAttempts = new Map<string, number>();
 type FailedSyncResult = Extract<SyncAttemptResult, { ok: false }>;
@@ -1805,11 +1850,16 @@ function requestSyncDetailed(
     try {
       const networkModule = Network as unknown as {
         addNetworkStateListener?: (
-          listener: (event: { networkState?: { isInternetReachable?: boolean | null } }) => void,
+          listener: (event: {
+            networkState?: { isConnected?: boolean | null; isInternetReachable?: boolean | null };
+          }) => void,
         ) => { remove(): void };
       };
       networkModule.addNetworkStateListener?.((event) => {
-        if (event.networkState?.isInternetReachable === true) {
+        if (
+          event.networkState?.isConnected === true ||
+          event.networkState?.isInternetReachable === true
+        ) {
           clearAllRetryState();
           const active = getActiveStore();
           const activeEpoch = currentSyncEpoch(active);
